@@ -118,12 +118,7 @@ impl<F: PrimeField, const W: usize> Circuit<F> for UnderDecoderCircuit<F, W> {
 
                 config.s_success.enable(&mut region, 0)?;
 
-                region.assign_advice(
-                    || "success",
-                    config.success,
-                    0,
-                    || Value::known(F::ZERO),
-                )?;
+                region.assign_advice(|| "success", config.success, 0, || Value::known(F::ZERO))?;
 
                 Ok(inp_cell)
             },
@@ -136,7 +131,6 @@ impl<F: PrimeField, const W: usize> Circuit<F> for UnderDecoderCircuit<F, W> {
 }
 
 // ===== CORRECT DECODER =====
-
 
 #[derive(Clone)]
 pub struct CorrectDecoderConfig<const W: usize = 4> {
@@ -195,8 +189,7 @@ impl<F: PrimeField, const W: usize> Circuit<F> for CorrectDecoderCircuit<F, W> {
                 let x = inp_q - i_const;
 
                 vec![
-                    selector.clone()
-                        * (out_q.clone() - (one.clone() - x.clone() * inv_q.clone())),
+                    selector.clone() * (out_q.clone() - (one.clone() - x.clone() * inv_q.clone())),
                     selector.clone() * x * out_q.clone(),
                     selector * out_q * inv_q,
                 ]
@@ -234,15 +227,11 @@ impl<F: PrimeField, const W: usize> Circuit<F> for CorrectDecoderCircuit<F, W> {
         let inp_value = F::from(inp_index as u64);
         let success_value = if inp_index < W { F::ONE } else { F::ZERO };
 
-        let inp_cell= layouter.assign_region(
+        let inp_cell = layouter.assign_region(
             || "correct decoder",
             |mut region| {
-                let inp_cell = region.assign_advice(
-                    || "inp",
-                    config.inp,
-                    0,
-                    || Value::known(inp_value),
-                )?;
+                let inp_cell =
+                    region.assign_advice(|| "inp", config.inp, 0, || Value::known(inp_value))?;
 
                 for i in 0..W {
                     config.s[i].enable(&mut region, 0)?;

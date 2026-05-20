@@ -1,7 +1,11 @@
-use super::cell::{CellId, CellKind};
+use super::{
+    cell::{CellId, CellKind},
+    expr::UcpExpr,
+};
 use std::collections::HashSet;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+// K HashSet in the article
 pub struct UcpFacts {
     unique_cells: HashSet<CellId>,
 }
@@ -52,6 +56,33 @@ where
     facts
 }
 
+pub fn initial_facts_from_expressions<'a, I>(expressions: I) -> UcpFacts
+where
+    I: IntoIterator<Item = &'a UcpExpr>,
+{
+    let mut facts = UcpFacts::new();
+
+    for expr in expressions {
+        collect_initial_facts(expr, &mut facts);
+    }
+
+    facts
+}
+
+fn collect_initial_facts(expr: &UcpExpr, facts: &mut UcpFacts) {
+    match expr {
+        UcpExpr::Var(cell) => {
+            facts.mark_initial_unique(cell.clone());
+        }
+        UcpExpr::Const(_) => {}
+        UcpExpr::Neg(inner) | UcpExpr::Scale(inner, _) => collect_initial_facts(inner, facts),
+        UcpExpr::Add(left, right) | UcpExpr::Mul(left, right) => {
+            collect_initial_facts(left, facts);
+            collect_initial_facts(right, facts);
+        }
+    }
+}
+
 impl FromIterator<CellId> for UcpFacts {
     fn from_iter<T: IntoIterator<Item = CellId>>(iter: T) -> Self {
         Self {
@@ -86,5 +117,23 @@ mod tests {
         assert!(!facts.is_unique(&advice));
         assert!(facts.is_unique(&fixed));
         assert_eq!(facts.unique_cells().len(), 1);
+    }
+
+    #[test]
+    fn initial_facts_from_expressions_collect_instance_and_fixed_only() {
+        let instance = CellId::instance(0, 0);
+        let fixed = CellId::fixed(1, 0);
+        let advice = CellId::advice(2, 0);
+        let expressions = vec![UcpExpr::add(
+            UcpExpr::var(instance.clone()),
+            UcpExpr::mul(UcpExpr::var(fixed.clone()), UcpExpr::var(advice.clone())),
+        )];
+
+        let facts = initial_facts_from_expressions(&expressions);
+
+        assert!(facts.is_unique(&instance));
+        assert!(facts.is_unique(&fixed));
+        assert!(!facts.is_unique(&advice));
+        assert_eq!(facts.unique_cells().len(), 2);
     }
 }

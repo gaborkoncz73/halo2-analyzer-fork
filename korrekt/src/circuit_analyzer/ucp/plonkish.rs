@@ -1,4 +1,7 @@
-use super::{cell::CellId, expr::UcpExpr};
+use super::{
+    cell::CellId,
+    expr::{UcpExpr, UcpScalar},
+};
 use crate::circuit_analyzer::{analyzable::AnalyzableField, halo2_proofs_libs::*};
 use std::collections::HashSet;
 
@@ -17,7 +20,13 @@ pub fn expression_to_ucp_expr<F: AnalyzableField>(
     region_begin: usize,
     row: i32,
 ) -> UcpExpr {
-    expression_to_ucp_expr_with_selector_indices(expr, region_begin, row, &HashSet::new())
+    expression_to_ucp_expr_with_selector_scalar(
+        expr,
+        region_begin,
+        row,
+        &HashSet::new(),
+        UcpScalar::Unknown,
+    )
 }
 
 pub fn expression_to_ucp_expr_with_selector_indices<F: AnalyzableField>(
@@ -26,15 +35,65 @@ pub fn expression_to_ucp_expr_with_selector_indices<F: AnalyzableField>(
     row: i32,
     selector_indices: &HashSet<usize>,
 ) -> UcpExpr {
+    expression_to_ucp_expr_with_selector_scalar(
+        expr,
+        region_begin,
+        row,
+        selector_indices,
+        UcpScalar::Unknown,
+    )
+}
+
+pub fn expression_to_ucp_expr_with_active_selectors<F: AnalyzableField>(
+    expr: &Expression<F>,
+    region_begin: usize,
+    row: i32,
+    selector_indices: &HashSet<usize>,
+) -> UcpExpr {
+    expression_to_ucp_expr_with_selector_scalar(
+        expr,
+        region_begin,
+        row,
+        selector_indices,
+        UcpScalar::NonZero,
+    )
+}
+
+pub fn expression_to_ucp_expr_with_inactive_selectors<F: AnalyzableField>(
+    expr: &Expression<F>,
+    region_begin: usize,
+    row: i32,
+    selector_indices: &HashSet<usize>,
+) -> UcpExpr {
+    expression_to_ucp_expr_with_selector_scalar(
+        expr,
+        region_begin,
+        row,
+        selector_indices,
+        UcpScalar::Zero,
+    )
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
+    expr: &Expression<F>,
+    region_begin: usize,
+    row: i32,
+    selector_indices: &HashSet<usize>,
+    enabled_selector_indices: &HashSet<usize>,
+) -> UcpExpr {
     match expr {
-        Expression::Constant(_) => UcpExpr::constant(),
-        // Selectors are row-fixed control signals. The caller decides which
-        // rows a gate is active on; once a row is chosen, the selector value is
-        // uniquely determined.
-        Expression::Selector(_) => UcpExpr::constant(),
+        Expression::Constant(value) => {
+            if bool::from(value.is_zero()) {
+                UcpExpr::zero()
+            } else {
+                UcpExpr::non_zero_constant()
+            }
+        }
+        Expression::Selector(selector) => selector_constant(selector.0, enabled_selector_indices),
         Expression::Fixed(query) => {
             if selector_indices.contains(&query.column_index) {
-                UcpExpr::constant()
+                selector_constant(query.column_index, enabled_selector_indices)
             } else {
                 UcpExpr::var(CellId::fixed(
                     query.column_index,
@@ -51,31 +110,170 @@ pub fn expression_to_ucp_expr_with_selector_indices<F: AnalyzableField>(
             absolute_row(region_begin, row, query.rotation),
         )),
         Expression::Negated(inner) => {
-            UcpExpr::neg(expression_to_ucp_expr_with_selector_indices(
+            UcpExpr::neg(expression_to_ucp_expr_with_enabled_selector_indices(
                 inner,
                 region_begin,
                 row,
                 selector_indices,
+                enabled_selector_indices,
             ))
         }
         Expression::Sum(left, right) => UcpExpr::add(
-            expression_to_ucp_expr_with_selector_indices(left, region_begin, row, selector_indices),
-            expression_to_ucp_expr_with_selector_indices(right, region_begin, row, selector_indices),
+            expression_to_ucp_expr_with_enabled_selector_indices(
+                left,
+                region_begin,
+                row,
+                selector_indices,
+                enabled_selector_indices,
+            ),
+            expression_to_ucp_expr_with_enabled_selector_indices(
+                right,
+                region_begin,
+                row,
+                selector_indices,
+                enabled_selector_indices,
+            ),
         ),
         Expression::Product(left, right) => UcpExpr::mul(
-            expression_to_ucp_expr_with_selector_indices(left, region_begin, row, selector_indices),
-            expression_to_ucp_expr_with_selector_indices(right, region_begin, row, selector_indices),
+            expression_to_ucp_expr_with_enabled_selector_indices(
+                left,
+                region_begin,
+                row,
+                selector_indices,
+                enabled_selector_indices,
+            ),
+            expression_to_ucp_expr_with_enabled_selector_indices(
+                right,
+                region_begin,
+                row,
+                selector_indices,
+                enabled_selector_indices,
+            ),
         ),
         Expression::Scaled(inner, scale) => {
             if bool::from(scale.is_zero()) {
-                UcpExpr::constant()
+                UcpExpr::zero()
             } else {
-                UcpExpr::scale(expression_to_ucp_expr_with_selector_indices(
-                    inner,
-                    region_begin,
-                    row,
-                    selector_indices,
+                UcpExpr::scale_by(
+                    expression_to_ucp_expr_with_enabled_selector_indices(
+                        inner,
+                        region_begin,
+                        row,
+                        selector_indices,
+                        enabled_selector_indices,
+                    ),
+                    UcpScalar::NonZero,
+                )
+            }
+        }
+        #[cfg(any(
+            feature = "use_pse_halo2_proofs",
+            feature = "use_axiom_halo2_proofs",
+            feature = "use_scroll_halo2_proofs"
+        ))]
+        Expression::Challenge(_) => UcpExpr::constant(),
+    }
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn selector_constant(selector_index: usize, enabled_selector_indices: &HashSet<usize>) -> UcpExpr {
+    if enabled_selector_indices.contains(&selector_index) {
+        UcpExpr::non_zero_constant()
+    } else {
+        UcpExpr::zero()
+    }
+}
+
+pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
+    expr: &Expression<F>,
+    region_begin: usize,
+    row: i32,
+    selector_indices: &HashSet<usize>,
+    selector_scalar: UcpScalar,
+) -> UcpExpr {
+    match expr {
+        Expression::Constant(value) => {
+            if bool::from(value.is_zero()) {
+                UcpExpr::zero()
+            } else {
+                UcpExpr::non_zero_constant()
+            }
+        }
+        // Selectors are row-fixed control signals. The caller decides which
+        // rows a gate is active on; once a row is chosen, the selector value is
+        // uniquely determined.
+        Expression::Selector(_) => UcpExpr::scalar_constant(selector_scalar),
+        Expression::Fixed(query) => {
+            if selector_indices.contains(&query.column_index) {
+                UcpExpr::scalar_constant(selector_scalar)
+            } else {
+                UcpExpr::var(CellId::fixed(
+                    query.column_index,
+                    absolute_row(region_begin, row, query.rotation),
                 ))
+            }
+        }
+        Expression::Advice(query) => UcpExpr::var(CellId::advice(
+            query.column_index,
+            absolute_row(region_begin, row, query.rotation),
+        )),
+        Expression::Instance(query) => UcpExpr::var(CellId::instance(
+            query.column_index,
+            absolute_row(region_begin, row, query.rotation),
+        )),
+        Expression::Negated(inner) => UcpExpr::neg(expression_to_ucp_expr_with_selector_scalar(
+            inner,
+            region_begin,
+            row,
+            selector_indices,
+            selector_scalar,
+        )),
+        Expression::Sum(left, right) => UcpExpr::add(
+            expression_to_ucp_expr_with_selector_scalar(
+                left,
+                region_begin,
+                row,
+                selector_indices,
+                selector_scalar,
+            ),
+            expression_to_ucp_expr_with_selector_scalar(
+                right,
+                region_begin,
+                row,
+                selector_indices,
+                selector_scalar,
+            ),
+        ),
+        Expression::Product(left, right) => UcpExpr::mul(
+            expression_to_ucp_expr_with_selector_scalar(
+                left,
+                region_begin,
+                row,
+                selector_indices,
+                selector_scalar,
+            ),
+            expression_to_ucp_expr_with_selector_scalar(
+                right,
+                region_begin,
+                row,
+                selector_indices,
+                selector_scalar,
+            ),
+        ),
+        Expression::Scaled(inner, scale) => {
+            if bool::from(scale.is_zero()) {
+                UcpExpr::zero()
+            } else {
+                UcpExpr::scale_by(
+                    expression_to_ucp_expr_with_selector_scalar(
+                        inner,
+                        region_begin,
+                        row,
+                        selector_indices,
+                        selector_scalar,
+                    ),
+                    UcpScalar::NonZero,
+                )
             }
         }
         #[cfg(any(
@@ -97,8 +295,8 @@ mod tests {
             UcpExpr::Var(cell) => {
                 vars.insert(cell.clone());
             }
-            UcpExpr::Const => {}
-            UcpExpr::Neg(inner) | UcpExpr::Scale(inner) => collect_vars(inner, vars),
+            UcpExpr::Const(_) => {}
+            UcpExpr::Neg(inner) | UcpExpr::Scale(inner, _) => collect_vars(inner, vars),
             UcpExpr::Add(left, right) | UcpExpr::Mul(left, right) => {
                 collect_vars(left, vars);
                 collect_vars(right, vars);
@@ -120,10 +318,7 @@ mod tests {
             let instance_prev = meta.query_instance(instance, Rotation::prev());
             let fixed_cur = meta.query_fixed(fixed);
 
-            vec![
-                s * (advice_cur + instance_prev)
-                    * (fixed_cur - Expression::Constant(Fr::from(7))),
-            ]
+            vec![s * (advice_cur + instance_prev) * (fixed_cur - Expression::Constant(Fr::from(7)))]
         });
 
         let ucp_expr = expression_to_ucp_expr(&cs.gates[0].polys[0], 10, 2);
@@ -138,12 +333,9 @@ mod tests {
 
     #[test]
     fn zero_scaled_expression_is_constant_for_ucp() {
-        let expr = Expression::Scaled(
-            Box::new(Expression::Constant(Fr::from(9))),
-            Fr::zero(),
-        );
+        let expr = Expression::Scaled(Box::new(Expression::Constant(Fr::from(9))), Fr::zero());
 
-        assert_eq!(expression_to_ucp_expr(&expr, 0, 0), UcpExpr::constant());
+        assert_eq!(expression_to_ucp_expr(&expr, 0, 0), UcpExpr::zero());
     }
 
     #[test]
@@ -171,5 +363,76 @@ mod tests {
         assert!(vars.contains(&CellId::advice(1, 0)));
         assert!(vars.contains(&CellId::advice(2, 0)));
         assert_eq!(vars.len(), 3);
+    }
+
+    #[test]
+    fn active_selector_conversion_allows_assign_propagation() {
+        use crate::circuit_analyzer::ucp::engine::analyze_expressions;
+        use crate::circuit_analyzer::ucp::facts::initial_facts;
+
+        let mut cs = ConstraintSystem::<Fr>::default();
+        let advice = cs.advice_column();
+        let instance = cs.instance_column();
+        let selector = cs.selector();
+
+        cs.create_gate("selected assignment", |meta| {
+            let selector = meta.query_selector(selector);
+            let advice = meta.query_advice(advice, Rotation::cur());
+            let public = meta.query_instance(instance, Rotation::cur());
+
+            vec![selector * (advice + public - Expression::Constant(Fr::from(5)))]
+        });
+
+        let default_expr = expression_to_ucp_expr(&cs.gates[0].polys[0], 0, 0);
+        let default_result =
+            analyze_expressions(&[default_expr], initial_facts([CellId::instance(0, 0)], []));
+
+        assert!(!default_result.facts.is_unique(&CellId::advice(0, 0)));
+        assert!(!default_result.all_expressions_unique());
+
+        let active_expr = expression_to_ucp_expr_with_active_selectors(
+            &cs.gates[0].polys[0],
+            0,
+            0,
+            &HashSet::new(),
+        );
+        let active_result =
+            analyze_expressions(&[active_expr], initial_facts([CellId::instance(0, 0)], []));
+
+        assert!(active_result.facts.is_unique(&CellId::advice(0, 0)));
+        assert!(active_result.all_expressions_unique());
+    }
+
+    #[test]
+    fn inactive_selector_conversion_does_not_propagate_assignment() {
+        use crate::circuit_analyzer::ucp::engine::analyze_expressions;
+        use crate::circuit_analyzer::ucp::facts::initial_facts;
+
+        let mut cs = ConstraintSystem::<Fr>::default();
+        let advice = cs.advice_column();
+        let instance = cs.instance_column();
+        let selector = cs.selector();
+
+        cs.create_gate("inactive selected assignment", |meta| {
+            let selector = meta.query_selector(selector);
+            let advice = meta.query_advice(advice, Rotation::cur());
+            let public = meta.query_instance(instance, Rotation::cur());
+
+            vec![selector * (advice + public - Expression::Constant(Fr::from(5)))]
+        });
+
+        let inactive_expr = expression_to_ucp_expr_with_inactive_selectors(
+            &cs.gates[0].polys[0],
+            0,
+            0,
+            &HashSet::new(),
+        );
+        let inactive_result = analyze_expressions(
+            &[inactive_expr],
+            initial_facts([CellId::instance(0, 0)], []),
+        );
+
+        assert!(!inactive_result.facts.is_unique(&CellId::advice(0, 0)));
+        assert!(inactive_result.all_expressions_unique());
     }
 }
