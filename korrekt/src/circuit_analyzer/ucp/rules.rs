@@ -14,7 +14,9 @@ pub fn expression_is_unique(expr: &UcpExpr, facts: &UcpFacts) -> bool {
         UcpExpr::Neg(inner) => expression_is_unique(inner, facts),
         UcpExpr::Scale(inner, scalar) => match scalar {
             UcpScalar::Zero => true,
-            UcpScalar::NonZero | UcpScalar::Unknown => expression_is_unique(inner, facts),
+            UcpScalar::NonZero | UcpScalar::Unknown | UcpScalar::Known(_) => {
+                expression_is_unique(inner, facts)
+            }
         },
         UcpExpr::Add(left, right) => {
             expression_is_unique(left, facts) && expression_is_unique(right, facts)
@@ -92,7 +94,7 @@ fn analyze_assign_candidate(expr: &UcpExpr, facts: &UcpFacts) -> AssignAnalysis 
         UcpExpr::Neg(inner) => analyze_assign_candidate(inner, facts),
         UcpExpr::Scale(inner, scalar) => match scalar {
             UcpScalar::Zero => AssignAnalysis::none(),
-            UcpScalar::NonZero => analyze_assign_candidate(inner, facts),
+            UcpScalar::NonZero | UcpScalar::Known(_) => analyze_assign_candidate(inner, facts),
             UcpScalar::Unknown => AssignAnalysis::invalid(),
         },
         UcpExpr::Add(left, right) => {
@@ -131,7 +133,10 @@ fn is_zero_constant(expr: &UcpExpr) -> bool {
 }
 
 fn is_non_zero_constant(expr: &UcpExpr) -> bool {
-    matches!(expr, UcpExpr::Const(UcpScalar::NonZero))
+    matches!(
+        expr,
+        UcpExpr::Const(UcpScalar::NonZero | UcpScalar::Known(_))
+    )
 }
 
 #[cfg(test)]

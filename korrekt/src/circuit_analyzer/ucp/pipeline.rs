@@ -2,10 +2,11 @@
 
 use super::{
     cell::{CellId, CellKind},
-    engine::{analyze_expressions, UcpResult, UcpTargetCheck},
+    engine::{analyze_expressions_with_values, UcpResult, UcpTargetCheck},
     expr::UcpExpr,
     extractor::extract_ucp_problem_with_targets,
     facts::UcpFacts,
+    value::initial_values_from_instance_cells,
 };
 use crate::{
     circuit_analyzer::{
@@ -55,6 +56,8 @@ where
             .context("Failed to build analyzable circuit for UCP!")?;
     let problem = extract_ucp_problem_with_targets(&analyzable, target_cells);
     let mut facts = problem.initial_facts.clone();
+    let mut value_facts =
+        initial_values_from_instance_cells(analyzer_input.verification_input.instance_cells.iter());
     let target_set: HashSet<CellId> = problem.target_cells.iter().cloned().collect();
     let mut queried_cells = HashSet::new();
     let mut smt_learned_cells = Vec::new();
@@ -62,7 +65,11 @@ where
     let mut analyzer = None;
 
     loop {
-        let ucp_result = analyze_expressions(&problem.expressions, facts.clone());
+        let ucp_result = analyze_expressions_with_values(
+            &problem.expressions,
+            facts.clone(),
+            value_facts.clone(),
+        );
         let target_check = ucp_result.check_targets(&problem.target_cells);
 
         if target_check.all_targets_unique() {
@@ -125,6 +132,7 @@ where
             .with_context(|| format!("Failed to query SMT uniqueness for {}", query_cell))?
         {
             SemanticQueryResult::ProvenUnique => {
+                value_facts = ucp_result.value_facts.clone();
                 facts = ucp_result.facts;
                 if facts.mark_unique(query_cell.clone()) {
                     smt_learned_cells.push(query_cell);
@@ -147,6 +155,7 @@ where
                     });
                 }
                 queried_cells.insert(query_cell);
+                value_facts = ucp_result.value_facts.clone();
                 facts = ucp_result.facts;
             }
             SemanticQueryResult::Overconstrained => {
@@ -164,6 +173,7 @@ where
             }
             SemanticQueryResult::Unknown => {
                 queried_cells.insert(query_cell);
+                value_facts = ucp_result.value_facts.clone();
                 facts = ucp_result.facts;
             }
         }

@@ -3,6 +3,7 @@ use super::{
     expr::{UcpExpr, UcpScalar},
 };
 use crate::circuit_analyzer::{analyzable::AnalyzableField, halo2_proofs_libs::*};
+use num::{BigInt, Num};
 use std::collections::HashSet;
 
 fn absolute_row(region_begin: usize, row: i32, rotation: Rotation) -> i32 {
@@ -13,6 +14,10 @@ fn absolute_row(region_begin: usize, row: i32, rotation: Rotation) -> i32 {
         .checked_add(row)
         .and_then(|base| base.checked_add(rotation.0))
         .expect("absolute UCP row overflowed i32")
+}
+
+fn field_to_bigint<F: AnalyzableField>(value: &F) -> BigInt {
+    BigInt::from_str_radix(format!("{:?}", value).strip_prefix("0x").unwrap(), 16).unwrap()
 }
 
 pub fn expression_to_ucp_expr<F: AnalyzableField>(
@@ -87,7 +92,7 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
             if bool::from(value.is_zero()) {
                 UcpExpr::zero()
             } else {
-                UcpExpr::non_zero_constant()
+                UcpExpr::known_constant(field_to_bigint(value))
             }
         }
         Expression::Selector(selector) => selector_constant(selector.0, enabled_selector_indices),
@@ -162,7 +167,7 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
                         selector_indices,
                         enabled_selector_indices,
                     ),
-                    UcpScalar::NonZero,
+                    UcpScalar::known(field_to_bigint(scale)),
                 )
             }
         }
@@ -196,16 +201,16 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
             if bool::from(value.is_zero()) {
                 UcpExpr::zero()
             } else {
-                UcpExpr::non_zero_constant()
+                UcpExpr::known_constant(field_to_bigint(value))
             }
         }
         // Selectors are row-fixed control signals. The caller decides which
         // rows a gate is active on; once a row is chosen, the selector value is
         // uniquely determined.
-        Expression::Selector(_) => UcpExpr::scalar_constant(selector_scalar),
+        Expression::Selector(_) => UcpExpr::scalar_constant(selector_scalar.clone()),
         Expression::Fixed(query) => {
             if selector_indices.contains(&query.column_index) {
-                UcpExpr::scalar_constant(selector_scalar)
+                UcpExpr::scalar_constant(selector_scalar.clone())
             } else {
                 UcpExpr::var(CellId::fixed(
                     query.column_index,
@@ -226,7 +231,7 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
             region_begin,
             row,
             selector_indices,
-            selector_scalar,
+            selector_scalar.clone(),
         )),
         Expression::Sum(left, right) => UcpExpr::add(
             expression_to_ucp_expr_with_selector_scalar(
@@ -234,14 +239,14 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
                 region_begin,
                 row,
                 selector_indices,
-                selector_scalar,
+                selector_scalar.clone(),
             ),
             expression_to_ucp_expr_with_selector_scalar(
                 right,
                 region_begin,
                 row,
                 selector_indices,
-                selector_scalar,
+                selector_scalar.clone(),
             ),
         ),
         Expression::Product(left, right) => UcpExpr::mul(
@@ -250,14 +255,14 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
                 region_begin,
                 row,
                 selector_indices,
-                selector_scalar,
+                selector_scalar.clone(),
             ),
             expression_to_ucp_expr_with_selector_scalar(
                 right,
                 region_begin,
                 row,
                 selector_indices,
-                selector_scalar,
+                selector_scalar.clone(),
             ),
         ),
         Expression::Scaled(inner, scale) => {
@@ -270,9 +275,9 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
                         region_begin,
                         row,
                         selector_indices,
-                        selector_scalar,
+                        selector_scalar.clone(),
                     ),
-                    UcpScalar::NonZero,
+                    UcpScalar::known(field_to_bigint(scale)),
                 )
             }
         }

@@ -3,6 +3,7 @@ use super::{
     expr::UcpExpr,
     facts::UcpFacts,
     rules::{expression_is_unique, infer_assigned_cell_from_zero_equation},
+    value::{infer_value_assignments_from_zero_equation, UcpValueFacts},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +34,7 @@ impl UcpTargetCheck {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpResult {
     pub facts: UcpFacts,
+    pub value_facts: UcpValueFacts,
     pub checked_expressions: usize,
     pub unique_expressions: usize,
     pub unresolved_expressions: usize,
@@ -83,13 +85,27 @@ impl UcpResult {
 /// new unique cells are learned, then classifies every expression with the
 /// final fact set.
 pub fn analyze_expressions(expressions: &[UcpExpr], initial_facts: UcpFacts) -> UcpResult {
+    analyze_expressions_with_values(expressions, initial_facts, UcpValueFacts::new())
+}
+
+pub fn analyze_expressions_with_values(
+    expressions: &[UcpExpr],
+    initial_facts: UcpFacts,
+    initial_value_facts: UcpValueFacts,
+) -> UcpResult {
     let mut facts = initial_facts;
+    let mut value_facts = initial_value_facts;
     let mut changed = true;
 
     while changed {
         changed = false;
 
         for expr in expressions {
+            for (cell, value) in infer_value_assignments_from_zero_equation(expr, &value_facts) {
+                changed |= value_facts.mark_known(cell.clone(), value);
+                changed |= facts.mark_unique(cell);
+            }
+
             if expression_is_unique(expr, &facts) {
                 continue;
             }
@@ -118,6 +134,7 @@ pub fn analyze_expressions(expressions: &[UcpExpr], initial_facts: UcpFacts) -> 
 
     UcpResult {
         facts,
+        value_facts,
         checked_expressions: expressions.len(),
         unique_expressions,
         unresolved_expressions,

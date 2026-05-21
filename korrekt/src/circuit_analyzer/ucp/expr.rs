@@ -1,10 +1,38 @@
 use super::cell::CellId;
+use num_bigint::BigInt;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UcpScalar {
     Zero,
     NonZero,
     Unknown,
+    Known(BigInt),
+}
+
+impl UcpScalar {
+    pub fn known(value: BigInt) -> Self {
+        if value == BigInt::from(0) {
+            Self::Zero
+        } else {
+            Self::Known(value)
+        }
+    }
+
+    pub fn known_i64(value: i64) -> Self {
+        Self::known(BigInt::from(value))
+    }
+
+    pub fn as_known(&self) -> Option<BigInt> {
+        match self {
+            Self::Zero => Some(BigInt::from(0)),
+            Self::Known(value) => Some(value.clone()),
+            Self::NonZero | Self::Unknown => None,
+        }
+    }
+
+    pub fn is_statically_non_zero(&self) -> bool {
+        matches!(self, Self::NonZero | Self::Known(_))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +62,14 @@ impl UcpExpr {
         Self::Const(UcpScalar::NonZero)
     }
 
+    pub fn known_constant(value: BigInt) -> Self {
+        Self::Const(UcpScalar::known(value))
+    }
+
+    pub fn known_constant_i64(value: i64) -> Self {
+        Self::known_constant(BigInt::from(value))
+    }
+
     pub fn scalar_constant(scalar: UcpScalar) -> Self {
         Self::Const(scalar)
     }
@@ -57,7 +93,9 @@ impl UcpExpr {
     pub fn scale_by(expr: UcpExpr, scalar: UcpScalar) -> Self {
         match scalar {
             UcpScalar::Zero => Self::zero(),
-            UcpScalar::NonZero | UcpScalar::Unknown => Self::Scale(Box::new(expr), scalar),
+            UcpScalar::NonZero | UcpScalar::Unknown | UcpScalar::Known(_) => {
+                Self::Scale(Box::new(expr), scalar)
+            }
         }
     }
 }

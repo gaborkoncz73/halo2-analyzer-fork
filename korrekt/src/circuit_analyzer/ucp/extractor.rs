@@ -82,7 +82,84 @@ pub fn extract_ucp_expressions<F: AnalyzableField>(analyzable: &Analyzable<F>) -
         }
     }
 
+    expressions.extend(extract_copy_constraint_expressions(&analyzable.permutation));
+
     expressions
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn extract_copy_constraint_expressions(
+    permutation: &permutation::keygen::Assembly,
+) -> Vec<UcpExpr> {
+    let mut expressions = Vec::new();
+    let mut seen_edges = HashSet::new();
+
+    for col in 0..permutation.sizes.len() {
+        for row in 0..permutation.sizes[col].len() {
+            let cycle_len = permutation.sizes[col][row];
+            if cycle_len <= 1 {
+                continue;
+            }
+
+            let mut cycle_col = col;
+            let mut cycle_row = row;
+
+            for _ in 0..cycle_len {
+                let (right_col, right_row) = permutation.mapping[cycle_col][cycle_row];
+
+                let Some(left) = permutation_cell_id(permutation, cycle_col, cycle_row) else {
+                    break;
+                };
+                let Some(right) = permutation_cell_id(permutation, right_col, right_row) else {
+                    break;
+                };
+
+                if left != right && seen_edges.insert((left.clone(), right.clone())) {
+                    expressions.push(UcpExpr::add(
+                        UcpExpr::var(left),
+                        UcpExpr::neg(UcpExpr::var(right)),
+                    ));
+                }
+
+                cycle_col = right_col;
+                cycle_row = right_row;
+            }
+        }
+    }
+
+    expressions
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn permutation_cell_id(
+    permutation: &permutation::keygen::Assembly,
+    col: usize,
+    row: usize,
+) -> Option<CellId> {
+    let column = permutation.columns.get(col)?;
+    let row = i32::try_from(row).ok()?;
+
+    #[cfg(feature = "use_zcash_halo2_proofs")]
+    {
+        match column.column_type() {
+            Any::Advice => Some(CellId::advice(column.index, row)),
+            Any::Fixed => Some(CellId::fixed(column.index, row)),
+            Any::Instance => Some(CellId::instance(column.index, row)),
+        }
+    }
+
+    #[cfg(any(
+        feature = "use_pse_halo2_proofs",
+        feature = "use_axiom_halo2_proofs",
+        feature = "use_scroll_halo2_proofs"
+    ))]
+    {
+        match column.column_type() {
+            Any::Advice(_) => Some(CellId::advice(column.index, row)),
+            Any::Fixed => Some(CellId::fixed(column.index, row)),
+            Any::Instance => Some(CellId::instance(column.index, row)),
+        }
+    }
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
@@ -128,8 +205,14 @@ mod tests {
     use super::*;
     use crate::circuit_analyzer::{
         analyzable::Analyzable,
-        ucp::{cell::CellId, engine::analyze_expressions},
+        ucp::{
+            cell::CellId,
+            engine::{analyze_expressions, analyze_expressions_with_values},
+            value::initial_values_from_instance_cells,
+        },
     };
+    use num_bigint::BigInt;
+    use std::collections::HashMap;
     use std::marker::PhantomData;
 
     #[derive(Clone, Debug)]
@@ -140,6 +223,17 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct ExtractorCircuit {
+        _marker: PhantomData<Fr>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct CopyConfig {
+        advice: Column<Advice>,
+        instance: Column<Instance>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct CopyCircuit {
         _marker: PhantomData<Fr>,
     }
 
@@ -188,6 +282,45 @@ mod tests {
         }
     }
 
+    impl Circuit<Fr> for CopyCircuit {
+        type Config = CopyConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+            let advice = meta.advice_column();
+            let instance = meta.instance_column();
+
+            meta.enable_equality(advice);
+            meta.enable_equality(instance);
+
+            CopyConfig { advice, instance }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fr>,
+        ) -> Result<(), Error> {
+            let advice_cell = layouter.assign_region(
+                || "copy row",
+                |mut region| {
+                    region.assign_advice(
+                        || "copied advice",
+                        config.advice,
+                        0,
+                        || Value::known(Fr::from(2)),
+                    )
+                },
+            )?;
+
+            layouter.constrain_instance(advice_cell.cell(), config.instance, 0)
+        }
+    }
+
     #[test]
     fn extracts_problem_from_analyzable_and_runs_ucp() {
         use zcash_halo2_proofs::dev::MockProver;
@@ -217,5 +350,36 @@ mod tests {
         assert_eq!(target_check.checked_targets, 1);
         assert_eq!(target_check.unique_targets, 1);
         assert!(result.all_expressions_unique());
+    }
+
+    #[test]
+    fn extracts_copy_constraints_and_value_facts_can_learn_copied_advice() {
+        use zcash_halo2_proofs::dev::MockProver;
+
+        let circuit = CopyCircuit::default();
+        let k = 4;
+        let public_inputs = vec![vec![Fr::from(2)]];
+        let prover = MockProver::run(k, &circuit, public_inputs).unwrap();
+        prover.assert_satisfied();
+
+        let analyzable = Analyzable::config_and_synthesize(&circuit, k).unwrap();
+        let target = CellId::advice(0, 0);
+        let problem = extract_ucp_problem_with_targets(&analyzable, [target.clone()]);
+
+        let mut instance_cells = HashMap::new();
+        instance_cells.insert("I-0-0".to_string(), 2);
+        let value_facts = initial_values_from_instance_cells(instance_cells.iter());
+
+        let result = analyze_expressions_with_values(
+            &problem.expressions,
+            problem.initial_facts,
+            value_facts,
+        );
+
+        assert!(result.facts.is_unique(&target));
+        assert_eq!(
+            result.value_facts.known_value(&target),
+            Some(&BigInt::from(2))
+        );
     }
 }

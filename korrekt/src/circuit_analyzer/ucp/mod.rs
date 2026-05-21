@@ -6,6 +6,7 @@ pub mod facts;
 pub mod pipeline;
 pub mod plonkish;
 pub mod rules;
+pub mod value;
 
 #[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
 mod pipeline_comparison_tests;
