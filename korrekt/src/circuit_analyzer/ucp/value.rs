@@ -62,6 +62,13 @@ impl UcpValueDomain {
         matches!(self, Self::Exact(_))
     }
 
+    pub fn is_subset_of_range(&self, min: &BigInt, max: &BigInt) -> bool {
+        match self {
+            Self::Exact(value) => value >= min && value <= max,
+            Self::FiniteSet(values) => values.iter().all(|value| value >= min && value <= max),
+        }
+    }
+
     fn intersect(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Exact(left), Self::Exact(right)) if left == right => {
@@ -140,6 +147,12 @@ impl UcpValueFacts {
 
     pub fn domain(&self, cell: &CellId) -> Option<&UcpValueDomain> {
         self.domains.get(cell)
+    }
+
+    pub fn domain_is_subset_of_range(&self, cell: &CellId, min: &BigInt, max: &BigInt) -> bool {
+        self.domain(cell)
+            .map(|domain| domain.is_subset_of_range(min, max))
+            .unwrap_or(false)
     }
 
     pub fn domains(&self) -> &HashMap<CellId, UcpValueDomain> {
@@ -528,5 +541,17 @@ mod tests {
         assert!(values.mark_known(b.clone(), BigInt::from(1)));
 
         assert_eq!(values.known_value(&b), Some(&BigInt::from(1)));
+    }
+
+    #[test]
+    fn finite_domain_can_be_checked_against_digit_range() {
+        let b = CellId::advice(0, 0);
+        let mut values = UcpValueFacts::new();
+
+        values.mark_domain(b.clone(), finite_domain(&[0, 1]));
+
+        assert!(values.domain_is_subset_of_range(&b, &BigInt::from(0), &BigInt::from(1)));
+        assert!(values.domain_is_subset_of_range(&b, &BigInt::from(0), &BigInt::from(9)));
+        assert!(!values.domain_is_subset_of_range(&b, &BigInt::from(1), &BigInt::from(9)));
     }
 }

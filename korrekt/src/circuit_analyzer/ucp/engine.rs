@@ -1,5 +1,6 @@
 use super::{
     all_but_one::infer_all_but_one_zero,
+    base_conv::infer_base_conversions,
     cell::CellId,
     expr::UcpExpr,
     facts::UcpFacts,
@@ -120,6 +121,13 @@ pub fn analyze_expressions_with_values(
         }
 
         for inference in infer_all_but_one_zero(expressions, &facts, &value_facts) {
+            if let Some(value) = inference.value {
+                changed |= value_facts.mark_known(inference.cell.clone(), value);
+            }
+            changed |= facts.mark_unique(inference.cell);
+        }
+
+        for inference in infer_base_conversions(expressions, &facts, &value_facts) {
             if let Some(value) = inference.value {
                 changed |= value_facts.mark_known(inference.cell.clone(), value);
             }
@@ -300,6 +308,44 @@ mod tests {
         assert_eq!(result.value_facts.known_value(&y0), Some(&BigInt::from(0)));
         assert_eq!(result.value_facts.known_value(&y1), Some(&BigInt::from(1)));
         assert_eq!(result.value_facts.known_value(&y2), Some(&BigInt::from(0)));
+    }
+
+    #[test]
+    fn base_conv_marks_binary_decomposition_bits_unique() {
+        use crate::circuit_analyzer::ucp::{expr::UcpScalar, value::UcpValueDomain};
+        use num_bigint::BigInt;
+
+        let x = CellId::instance(0, 0);
+        let b0 = CellId::advice(0, 0);
+        let b1 = CellId::advice(1, 0);
+        let b2 = CellId::advice(2, 0);
+        let expr = UcpExpr::add(
+            UcpExpr::add(
+                UcpExpr::var(b0.clone()),
+                UcpExpr::scale_by(UcpExpr::var(b1.clone()), UcpScalar::known_i64(2)),
+            ),
+            UcpExpr::add(
+                UcpExpr::scale_by(UcpExpr::var(b2.clone()), UcpScalar::known_i64(4)),
+                UcpExpr::neg(UcpExpr::var(x.clone())),
+            ),
+        );
+        let facts = UcpFacts::from_iter([x.clone()]);
+        let boolean_domain =
+            UcpValueDomain::finite_set([BigInt::from(0), BigInt::from(1)]).unwrap();
+        let mut value_facts = UcpValueFacts::new();
+        value_facts.mark_known(x, BigInt::from(5));
+        value_facts.mark_domain(b0.clone(), boolean_domain.clone());
+        value_facts.mark_domain(b1.clone(), boolean_domain.clone());
+        value_facts.mark_domain(b2.clone(), boolean_domain);
+
+        let result = analyze_expressions_with_values(&[expr], facts, value_facts);
+
+        assert!(result.facts.is_unique(&b0));
+        assert!(result.facts.is_unique(&b1));
+        assert!(result.facts.is_unique(&b2));
+        assert_eq!(result.value_facts.known_value(&b0), Some(&BigInt::from(1)));
+        assert_eq!(result.value_facts.known_value(&b1), Some(&BigInt::from(0)));
+        assert_eq!(result.value_facts.known_value(&b2), Some(&BigInt::from(1)));
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]

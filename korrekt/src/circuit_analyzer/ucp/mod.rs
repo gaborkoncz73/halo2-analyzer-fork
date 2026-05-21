@@ -1,4 +1,5 @@
 pub mod all_but_one;
+pub mod base_conv;
 pub mod cell;
 pub mod engine;
 pub mod expr;
