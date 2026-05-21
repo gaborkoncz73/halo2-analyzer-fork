@@ -1,4 +1,5 @@
 use super::{
+    all_but_one::infer_all_but_one_zero,
     cell::CellId,
     expr::UcpExpr,
     facts::UcpFacts,
@@ -116,6 +117,13 @@ pub fn analyze_expressions_with_values(
             if let Some(cell) = infer_assigned_cell_from_zero_equation(expr, &facts) {
                 changed |= facts.mark_unique(cell);
             }
+        }
+
+        for inference in infer_all_but_one_zero(expressions, &facts, &value_facts) {
+            if let Some(value) = inference.value {
+                changed |= value_facts.mark_known(inference.cell.clone(), value);
+            }
+            changed |= facts.mark_unique(inference.cell);
         }
     }
 
@@ -250,6 +258,48 @@ mod tests {
                     .expect("non-empty boolean domain")
             )
         );
+    }
+
+    #[test]
+    fn all_but_one_zero_marks_one_hot_outputs_unique() {
+        use num_bigint::BigInt;
+
+        let x = CellId::instance(0, 0);
+        let e = CellId::instance(1, 0);
+        let y0 = CellId::advice(0, 0);
+        let y1 = CellId::advice(1, 0);
+        let y2 = CellId::advice(2, 0);
+        let product = |y: &CellId, root: i64| {
+            UcpExpr::mul(
+                UcpExpr::var(y.clone()),
+                UcpExpr::add(UcpExpr::var(x.clone()), UcpExpr::known_constant_i64(-root)),
+            )
+        };
+        let expressions = vec![
+            product(&y0, 0),
+            product(&y1, 1),
+            product(&y2, 2),
+            UcpExpr::add(
+                UcpExpr::add(UcpExpr::var(y0.clone()), UcpExpr::var(y1.clone())),
+                UcpExpr::add(
+                    UcpExpr::var(y2.clone()),
+                    UcpExpr::neg(UcpExpr::var(e.clone())),
+                ),
+            ),
+        ];
+        let facts = UcpFacts::from_iter([x.clone(), e.clone()]);
+        let mut value_facts = UcpValueFacts::new();
+        value_facts.mark_known(x, BigInt::from(1));
+        value_facts.mark_known(e, BigInt::from(1));
+
+        let result = analyze_expressions_with_values(&expressions, facts, value_facts);
+
+        assert!(result.facts.is_unique(&y0));
+        assert!(result.facts.is_unique(&y1));
+        assert!(result.facts.is_unique(&y2));
+        assert_eq!(result.value_facts.known_value(&y0), Some(&BigInt::from(0)));
+        assert_eq!(result.value_facts.known_value(&y1), Some(&BigInt::from(1)));
+        assert_eq!(result.value_facts.known_value(&y2), Some(&BigInt::from(0)));
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
