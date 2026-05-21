@@ -1,4 +1,5 @@
 use super::{
+    cell::CellId,
     expr::UcpExpr,
     facts::UcpFacts,
     rules::{expression_is_unique, infer_assigned_cell_from_zero_equation},
@@ -14,6 +15,19 @@ pub enum UcpExpressionStatus {
 pub struct UcpExpressionResult {
     pub index: usize,
     pub status: UcpExpressionStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UcpTargetCheck {
+    pub checked_targets: usize,
+    pub unique_targets: usize,
+    pub unresolved_targets: Vec<CellId>,
+}
+
+impl UcpTargetCheck {
+    pub fn all_targets_unique(&self) -> bool {
+        self.unresolved_targets.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,6 +52,28 @@ impl UcpResult {
                 UcpExpressionStatus::Unresolved => Some(result.index),
             })
             .collect()
+    }
+
+    pub fn all_targets_unique(&self, targets: &[CellId]) -> bool {
+        targets.iter().all(|target| self.facts.is_unique(target))
+    }
+
+    pub fn unresolved_targets(&self, targets: &[CellId]) -> Vec<CellId> {
+        targets
+            .iter()
+            .filter(|target| !self.facts.is_unique(target))
+            .cloned()
+            .collect()
+    }
+
+    pub fn check_targets(&self, targets: &[CellId]) -> UcpTargetCheck {
+        let unresolved_targets = self.unresolved_targets(targets);
+
+        UcpTargetCheck {
+            checked_targets: targets.len(),
+            unique_targets: targets.len() - unresolved_targets.len(),
+            unresolved_targets,
+        }
     }
 }
 
@@ -149,6 +185,28 @@ mod tests {
         assert!(result.facts.is_unique(&unknown));
         assert_eq!(result.facts.unique_cells().len(), 2);
         assert!(result.all_expressions_unique());
+    }
+
+    #[test]
+    fn checks_target_cells_against_final_facts() {
+        let known = CellId::instance(0, 0);
+        let inferred = CellId::advice(0, 0);
+        let unresolved = CellId::advice(1, 0);
+        let facts = UcpFacts::from_iter([known.clone()]);
+        let expressions = vec![UcpExpr::add(
+            UcpExpr::var(known),
+            UcpExpr::var(inferred.clone()),
+        )];
+
+        let result = analyze_expressions(&expressions, facts);
+        let targets = vec![inferred, unresolved.clone()];
+        let target_check = result.check_targets(&targets);
+
+        assert!(!result.all_targets_unique(&targets));
+        assert!(!target_check.all_targets_unique());
+        assert_eq!(target_check.checked_targets, 2);
+        assert_eq!(target_check.unique_targets, 1);
+        assert_eq!(target_check.unresolved_targets, vec![unresolved]);
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]

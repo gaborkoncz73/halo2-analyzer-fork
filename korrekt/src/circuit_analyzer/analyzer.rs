@@ -1,4 +1,8 @@
-use super::{analyzable::AnalyzableField, halo2_proofs_libs::*};
+use super::{
+    analyzable::{Analyzable, AnalyzableField},
+    halo2_proofs_libs::*,
+    ucp::cell::{CellId, CellKind},
+};
 use anyhow::{anyhow, Context, Result};
 use log::info;
 use num::{BigInt, Num};
@@ -27,8 +31,6 @@ use crate::{
     io::analyzer_io_type::LookupMethod,
 };
 
-use super::analyzable::Analyzable;
-
 #[derive(Debug)]
 pub struct Analyzer<F: AnalyzableField> {
     pub cs: ConstraintSystem<F>,
@@ -51,6 +53,7 @@ pub struct Analyzer<F: AnalyzableField> {
     pub cycle_abs_value: HashMap<String, AbsResult>,
     pub cycle_bigint_value: HashMap<String, BigInt>,
     pub selector_indices: HashSet<usize>,
+    pub ucp_unique_variables: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -96,6 +99,14 @@ pub enum Operation {
     NotEqual,
     And,
     Or,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SemanticQueryResult {
+    ProvenUnique,
+    NotUnique,
+    Overconstrained,
+    Unknown,
 }
 
 #[derive(Debug)]
@@ -186,6 +197,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             cycle_abs_value: cycle_abs_value,
             cycle_bigint_value,
             selector_indices,
+            ucp_unique_variables: HashSet::new(),
         };
 
         fs::create_dir_all("src/output/").unwrap();
@@ -733,6 +745,169 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
     #[cfg(test)]
     pub fn log(&self) -> &[String] {
         &self.log
+    }
+
+    pub fn set_ucp_unique_cells<I>(&mut self, cells: I)
+    where
+        I: IntoIterator<Item = CellId>,
+    {
+        self.ucp_unique_variables = cells
+            .into_iter()
+            .filter_map(|cell| self.ucp_cell_to_smt_variable_name(&cell))
+            .collect();
+    }
+
+    pub fn ucp_unique_variables(&self) -> &HashSet<String> {
+        &self.ucp_unique_variables
+    }
+
+    pub fn query_ucp_cell_uniqueness(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+        query_cell: &CellId,
+    ) -> Result<SemanticQueryResult> {
+        let Some(query_variable) = self.ucp_cell_to_smt_variable_name(query_cell) else {
+            return Ok(SemanticQueryResult::ProvenUnique);
+        };
+
+        if self.ucp_unique_variables.contains(&query_variable) {
+            return Ok(SemanticQueryResult::ProvenUnique);
+        }
+
+        let mut vars_to_declare = Vec::new();
+        if self.all_variables.insert(query_variable.clone()) {
+            vars_to_declare.push(query_variable.clone());
+        }
+
+        if matches!(
+            analyzer_input.verification_method,
+            VerificationMethod::Specific
+        ) {
+            for var in analyzer_input.verification_input.instance_cells.keys() {
+                if self.all_variables.insert(var.clone()) {
+                    vars_to_declare.push(var.clone());
+                }
+            }
+        }
+
+        let variables = self.all_variables.clone();
+        let ucp_unique_variables = self.ucp_unique_variables.clone();
+
+        if let Some(smt_file) = self.smt_file.as_mut() {
+            let mut printer = Printer::new(smt_file);
+
+            for var in vars_to_declare {
+                printer.write_var(var);
+            }
+
+            if matches!(
+                analyzer_input.verification_method,
+                VerificationMethod::Specific
+            ) {
+                for var in analyzer_input.verification_input.instance_cells.iter() {
+                    printer.write_assert(
+                        var.0.clone(),
+                        (*var.1).to_string(),
+                        NodeType::Instance,
+                        Operation::Equal,
+                    );
+                }
+            }
+
+            let model = Self::solve_and_get_model(SMT_FILE_PATH.to_string(), &variables)
+                .context("Failed to solve SMT model for semantic uniqueness query!")?;
+            if matches!(model.sat, Satisfiability::Unsatisfiable) {
+                return Ok(SemanticQueryResult::Overconstrained);
+            }
+
+            let Some(query_value) = model.result.get(&query_variable) else {
+                return Ok(SemanticQueryResult::Unknown);
+            };
+
+            printer.write_push(1);
+
+            let mut same_assignments = Vec::new();
+            for var in &ucp_unique_variables {
+                if let Some(result_from_model) = model.result.get(var) {
+                    let assertion = printer
+                        .get_assert(
+                            result_from_model.name.clone(),
+                            result_from_model.value.element.clone(),
+                            NodeType::Advice,
+                            Operation::Equal,
+                        )
+                        .context("Failed to generate UCP equality assertion!")?;
+                    same_assignments.push(assertion);
+                }
+            }
+
+            let instance_variables: Vec<String> = variables
+                .iter()
+                .filter(|var| var.starts_with("I-"))
+                .cloned()
+                .collect();
+            for var in instance_variables {
+                if let Some(result_from_model) = model.result.get(&var) {
+                    let assertion = printer
+                        .get_assert(
+                            result_from_model.name.clone(),
+                            result_from_model.value.element.clone(),
+                            NodeType::Instance,
+                            Operation::Equal,
+                        )
+                        .context("Failed to generate input equality assertion!")?;
+                    same_assignments.push(assertion);
+                }
+            }
+
+            let query_diff = printer
+                .get_assert(
+                    query_value.name.clone(),
+                    query_value.value.element.clone(),
+                    NodeType::Advice,
+                    Operation::NotEqual,
+                )
+                .context("Failed to generate query disequality assertion!")?;
+
+            let mut query_formula = String::new();
+            for assertion in same_assignments {
+                query_formula.push_str(&assertion);
+            }
+            query_formula.push_str(&query_diff);
+
+            let query_formula = printer.get_and(query_formula);
+            printer.write_assert_bool(query_formula, Operation::And);
+
+            let model_with_query = Self::solve_and_get_model(SMT_FILE_PATH.to_string(), &variables)
+                .context("Failed to solve SMT semantic uniqueness query!")?;
+            printer.write_pop(1);
+
+            if matches!(model_with_query.sat, Satisfiability::Unsatisfiable) {
+                Ok(SemanticQueryResult::ProvenUnique)
+            } else {
+                Ok(SemanticQueryResult::NotUnique)
+            }
+        } else {
+            Err(anyhow!("Failed to open SMT file!"))
+        }
+    }
+
+    fn ucp_cell_to_smt_variable_name(&self, cell: &CellId) -> Option<String> {
+        if matches!(cell.kind, CellKind::Fixed) {
+            return None;
+        }
+
+        let name = cell.to_string();
+
+        if let Some(cycle_head) = self.cell_to_cycle_head.get(&name) {
+            if self.cycle_bigint_value.contains_key(cycle_head) {
+                None
+            } else {
+                Some(cycle_head.clone())
+            }
+        } else {
+            Some(name)
+        }
     }
     /**
      * Decomposes an `Expression` into its corresponding SMT-LIB format (`String`) and its type (`NodeType`).
@@ -1620,8 +1795,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
 
                 let t = format!("{:?}", self.fixed[col_indices[col]][row]);
                 let mut poly = cons_str.0.clone();
-                if !matches!(cons_str.1.category(), NodeCategory::Variable)
-                {
+                if !matches!(cons_str.1.category(), NodeCategory::Variable) {
                     poly = format!("({})", cons_str.0.clone());
                 }
                 let sa = printer
@@ -1984,6 +2158,8 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         &mut self,
         analyzer_input: &AnalyzerInput,
     ) -> Result<AnalyzerOutputStatus> {
+        let ucp_unique_variables = self.ucp_unique_variables.clone();
+
         if let Some(smt_file) = self.smt_file.as_mut() {
             let mut printer = Printer::new(smt_file);
             let mut result: AnalyzerOutputStatus = AnalyzerOutputStatus::NotUnderconstrainedLocal;
@@ -2076,13 +2252,14 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                     for var in variables.iter() {
                         // The second condition is needed because the following constraints would've been added already to the solver in the beginning.
                         // It is not strictly necessary, but there is no point in adding redundant constraints to the solver.
-                        if self.instance_cells.contains_key(var)
-                            && !matches!(
-                                analyzer_input.verification_method,
-                                VerificationMethod::Specific
-                            )
+                        if ucp_unique_variables.contains(var)
+                            || (self.instance_cells.contains_key(var)
+                                && !matches!(
+                                    analyzer_input.verification_method,
+                                    VerificationMethod::Specific
+                                ))
                         {
-                            // 1. Fix the public input
+                            // 1. Fix the public input and every variable that UCP has already proven unique.
                             let result_from_model = &model.result[var];
                             let sa = printer
                                 .get_assert(

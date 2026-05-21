@@ -1,0 +1,221 @@
+use super::{cell::CellId, expr::UcpExpr, facts::UcpFacts};
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+use super::{
+    facts::initial_facts_from_expressions,
+    plonkish::expression_to_ucp_expr_with_enabled_selector_indices,
+};
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+use crate::circuit_analyzer::{
+    analyzable::{Analyzable, AnalyzableField},
+    halo2_proofs_libs::*,
+};
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+use std::collections::HashSet;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UcpProblem {
+    pub expressions: Vec<UcpExpr>,
+    pub initial_facts: UcpFacts,
+    pub target_cells: Vec<CellId>,
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+pub fn extract_ucp_problem<F: AnalyzableField>(analyzable: &Analyzable<F>) -> UcpProblem {
+    extract_ucp_problem_with_targets(analyzable, [])
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+pub fn extract_ucp_problem_with_targets<F, I>(
+    analyzable: &Analyzable<F>,
+    target_cells: I,
+) -> UcpProblem
+where
+    F: AnalyzableField,
+    I: IntoIterator<Item = CellId>,
+{
+    let expressions = extract_ucp_expressions(analyzable);
+    let initial_facts = initial_facts_from_expressions(&expressions);
+
+    UcpProblem {
+        expressions,
+        initial_facts,
+        target_cells: target_cells.into_iter().collect(),
+    }
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+pub fn extract_ucp_expressions<F: AnalyzableField>(analyzable: &Analyzable<F>) -> Vec<UcpExpr> {
+    let selector_indices = selector_fixed_column_indices(analyzable);
+    let mut expressions = Vec::new();
+
+    for region in &analyzable.regions {
+        let Some((region_begin, region_end)) = region.rows else {
+            continue;
+        };
+
+        if !analyzable.selectors.is_empty() && region.enabled_selectors.is_empty() {
+            continue;
+        }
+
+        for absolute_row in region_begin..=region_end {
+            if !analyzable.selectors.is_empty() && !row_has_enabled_selector(region, absolute_row) {
+                continue;
+            }
+
+            let row = i32::try_from(absolute_row - region_begin)
+                .expect("UCP local row does not fit into i32");
+            let enabled_selector_indices =
+                enabled_selector_fixed_column_indices(analyzable, region, absolute_row);
+
+            for gate in &analyzable.cs.gates {
+                for poly in &gate.polys {
+                    expressions.push(expression_to_ucp_expr_with_enabled_selector_indices(
+                        poly,
+                        region_begin,
+                        row,
+                        &selector_indices,
+                        &enabled_selector_indices,
+                    ));
+                }
+            }
+        }
+    }
+
+    expressions
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn selector_fixed_column_indices<F: AnalyzableField>(analyzable: &Analyzable<F>) -> HashSet<usize> {
+    analyzable
+        .cs
+        .selector_map
+        .iter()
+        .map(|selector| selector.index)
+        .collect()
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn enabled_selector_fixed_column_indices<F: AnalyzableField>(
+    analyzable: &Analyzable<F>,
+    region: &Region,
+    absolute_row: usize,
+) -> HashSet<usize> {
+    region
+        .enabled_selectors
+        .iter()
+        .filter(|(_, rows)| rows.contains(&absolute_row))
+        .filter_map(|(selector, _)| {
+            analyzable
+                .cs
+                .selector_map
+                .get(selector.0)
+                .map(|fixed_column| fixed_column.index)
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn row_has_enabled_selector(region: &Region, absolute_row: usize) -> bool {
+    region
+        .enabled_selectors
+        .values()
+        .any(|rows| rows.contains(&absolute_row))
+}
+
+#[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
+mod tests {
+    use super::*;
+    use crate::circuit_analyzer::{
+        analyzable::Analyzable,
+        ucp::{cell::CellId, engine::analyze_expressions},
+    };
+    use std::marker::PhantomData;
+
+    #[derive(Clone, Debug)]
+    struct ExtractorConfig {
+        advice: Column<Advice>,
+        selector: Selector,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct ExtractorCircuit {
+        _marker: PhantomData<Fr>,
+    }
+
+    impl Circuit<Fr> for ExtractorCircuit {
+        type Config = ExtractorConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+            let advice = meta.advice_column();
+            let instance = meta.instance_column();
+            let selector = meta.selector();
+
+            meta.create_gate("extractor selected assignment", |meta| {
+                let selector = meta.query_selector(selector);
+                let advice = meta.query_advice(advice, Rotation::cur());
+                let public = meta.query_instance(instance, Rotation::cur());
+
+                vec![selector * (advice + public - Expression::Constant(Fr::from(5)))]
+            });
+
+            ExtractorConfig { advice, selector }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fr>,
+        ) -> Result<(), Error> {
+            layouter.assign_region(
+                || "extractor row",
+                |mut region| {
+                    config.selector.enable(&mut region, 0)?;
+                    region.assign_advice(
+                        || "advice",
+                        config.advice,
+                        0,
+                        || Value::known(Fr::from(3)),
+                    )?;
+                    Ok(())
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn extracts_problem_from_analyzable_and_runs_ucp() {
+        use zcash_halo2_proofs::dev::MockProver;
+        let circuit = ExtractorCircuit::default();
+        let k = 4;
+
+        let public_inputs = vec![vec![Fr::from(2)]];
+        let prover = MockProver::run(k, &circuit, public_inputs).unwrap();
+
+        prover.assert_satisfied();
+        let analyzable = Analyzable::config_and_synthesize(&circuit, 4).unwrap();
+
+        let target = CellId::advice(0, 0);
+        let problem = extract_ucp_problem_with_targets(&analyzable, [target.clone()]);
+
+        assert!(!problem.expressions.is_empty());
+        assert_eq!(problem.target_cells, vec![target.clone()]);
+        assert!(problem.initial_facts.is_unique(&CellId::instance(0, 0)));
+        assert!(!problem.initial_facts.is_unique(&target));
+
+        let result = analyze_expressions(&problem.expressions, problem.initial_facts);
+        let target_check = result.check_targets(&problem.target_cells);
+
+        assert!(result.facts.is_unique(&target));
+        assert!(result.all_targets_unique(&problem.target_cells));
+        assert!(target_check.all_targets_unique());
+        assert_eq!(target_check.checked_targets, 1);
+        assert_eq!(target_check.unique_targets, 1);
+        assert!(result.all_expressions_unique());
+    }
+}
