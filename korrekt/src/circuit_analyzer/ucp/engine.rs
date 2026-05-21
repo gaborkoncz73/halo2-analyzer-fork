@@ -3,7 +3,7 @@ use super::{
     expr::UcpExpr,
     facts::UcpFacts,
     rules::{expression_is_unique, infer_assigned_cell_from_zero_equation},
-    value::{infer_value_assignments_from_zero_equation, UcpValueFacts},
+    value::{infer_value_domains_from_zero_equation, UcpValueFacts},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,9 +101,12 @@ pub fn analyze_expressions_with_values(
         changed = false;
 
         for expr in expressions {
-            for (cell, value) in infer_value_assignments_from_zero_equation(expr, &value_facts) {
-                changed |= value_facts.mark_known(cell.clone(), value);
-                changed |= facts.mark_unique(cell);
+            for (cell, domain) in infer_value_domains_from_zero_equation(expr, &value_facts) {
+                let is_exact = domain.is_singleton();
+                changed |= value_facts.mark_domain(cell.clone(), domain);
+                if is_exact {
+                    changed |= facts.mark_unique(cell);
+                }
             }
 
             if expression_is_unique(expr, &facts) {
@@ -224,6 +227,29 @@ mod tests {
         assert_eq!(target_check.checked_targets, 2);
         assert_eq!(target_check.unique_targets, 1);
         assert_eq!(target_check.unresolved_targets, vec![unresolved]);
+    }
+
+    #[test]
+    fn root_domain_does_not_make_boolean_cell_unique_by_itself() {
+        use crate::circuit_analyzer::ucp::value::UcpValueDomain;
+        use num_bigint::BigInt;
+
+        let b = CellId::advice(0, 0);
+        let expressions = vec![UcpExpr::mul(
+            UcpExpr::var(b.clone()),
+            UcpExpr::add(UcpExpr::var(b.clone()), UcpExpr::known_constant_i64(-1)),
+        )];
+
+        let result = analyze_expressions(&expressions, UcpFacts::new());
+
+        assert!(!result.facts.is_unique(&b));
+        assert_eq!(
+            result.value_facts.domain(&b),
+            Some(
+                &UcpValueDomain::finite_set([BigInt::from(0), BigInt::from(1)])
+                    .expect("non-empty boolean domain")
+            )
+        );
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]

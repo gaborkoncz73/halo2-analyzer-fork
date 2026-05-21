@@ -25,12 +25,12 @@ struct LinearChainCircuit {
 }
 
 #[derive(Clone, Debug)]
-struct SquareZeroConfig {
+struct ExpandedRepeatedRootConfig {
     x: Column<Advice>,
 }
 
 #[derive(Clone, Debug, Default)]
-struct SquareZeroCircuit {
+struct ExpandedRepeatedRootCircuit {
     _marker: PhantomData<Fr>,
 }
 
@@ -84,8 +84,8 @@ impl Circuit<Fr> for LinearChainCircuit {
     }
 }
 
-impl Circuit<Fr> for SquareZeroCircuit {
-    type Config = SquareZeroConfig;
+impl Circuit<Fr> for ExpandedRepeatedRootCircuit {
+    type Config = ExpandedRepeatedRootConfig;
     type FloorPlanner = SimpleFloorPlanner;
 
     fn without_witnesses(&self) -> Self {
@@ -95,13 +95,16 @@ impl Circuit<Fr> for SquareZeroCircuit {
     fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
         let x = meta.advice_column();
 
-        meta.create_gate("square zero", |meta| {
+        meta.create_gate("expanded repeated root", |meta| {
             let x = meta.query_advice(x, Rotation::cur());
 
-            vec![x.clone() * x]
+            vec![
+                x.clone() * x.clone() - Expression::Constant(Fr::from(2)) * x
+                    + Expression::Constant(Fr::from(1)),
+            ]
         });
 
-        SquareZeroConfig { x }
+        ExpandedRepeatedRootConfig { x }
     }
 
     fn synthesize(
@@ -110,9 +113,9 @@ impl Circuit<Fr> for SquareZeroCircuit {
         mut layouter: impl Layouter<Fr>,
     ) -> std::result::Result<(), Error> {
         layouter.assign_region(
-            || "square zero row",
+            || "expanded repeated root row",
             |mut region| {
-                region.assign_advice(|| "x", config.x, 0, || Value::known(Fr::zero()))?;
+                region.assign_advice(|| "x", config.x, 0, || Value::known(Fr::from(1)))?;
                 Ok(())
             },
         )
@@ -205,7 +208,7 @@ fn compares_analyzer_only_with_ucp_pipeline_when_ucp_solves_targets() {
 
 #[test]
 fn compares_analyzer_only_with_ucp_pipeline_when_smt_learns_target() {
-    let circuit = SquareZeroCircuit::default();
+    let circuit = ExpandedRepeatedRootCircuit::default();
     let analyzer_input = no_input();
 
     let (analyzer_status, analyzer_duration) = run_analyzer_only(&circuit, 4, &analyzer_input);
@@ -221,7 +224,7 @@ fn compares_analyzer_only_with_ucp_pipeline_when_smt_learns_target() {
     let pipeline_duration = pipeline_start.elapsed();
 
     println!(
-        "square_zero analyzer_only={:?} analyzer_time={:?} pipeline_status={:?} pipeline_time={:?} used_smt={} semantic_queries={} smt_learned={:?}",
+        "expanded_repeated_root analyzer_only={:?} analyzer_time={:?} pipeline_status={:?} pipeline_time={:?} used_smt={} semantic_queries={} smt_learned={:?}",
         analyzer_status,
         analyzer_duration,
         pipeline_output.status,

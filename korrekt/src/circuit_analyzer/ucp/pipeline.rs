@@ -306,10 +306,13 @@ mod tests {
         fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
             let advice = meta.advice_column();
 
-            meta.create_gate("square zero", |meta| {
+            meta.create_gate("expanded repeated root", |meta| {
                 let x = meta.query_advice(advice, Rotation::cur());
 
-                vec![x.clone() * x]
+                vec![
+                    x.clone() * x.clone() - Expression::Constant(Fr::from(2)) * x
+                        + Expression::Constant(Fr::from(1)),
+                ]
             });
 
             SmtOnlyConfig { advice }
@@ -323,7 +326,7 @@ mod tests {
             layouter.assign_region(
                 || "smt only row",
                 |mut region| {
-                    region.assign_advice(|| "x", config.advice, 0, || Value::known(Fr::zero()))?;
+                    region.assign_advice(|| "x", config.advice, 0, || Value::known(Fr::from(1)))?;
                     Ok(())
                 },
             )
