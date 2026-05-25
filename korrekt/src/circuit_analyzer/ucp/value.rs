@@ -5,17 +5,20 @@ use super::{
 use num_bigint::BigInt;
 use std::collections::{BTreeSet, HashMap};
 
+//Enum a Domain konkrét értékeire (konkrét érték vagy tartomány)
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UcpValueDomain {
     Exact(BigInt),
     FiniteSet(BTreeSet<BigInt>),
 }
 
+//A cellákhoz rendelt domain-t tárolja
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UcpValueFacts {
     domains: HashMap<CellId, UcpValueDomain>,
 }
 
+//Enum az értékekhez
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueKind {
     Zero,
@@ -23,6 +26,7 @@ pub enum ValueKind {
     Unknown,
 }
 
+//Lineárisan felírható kifejezés
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LinearExpr {
     constant: BigInt,
@@ -30,16 +34,19 @@ struct LinearExpr {
 }
 
 impl UcpValueDomain {
+    //Domain létrehozása konkrét értékkel
     pub fn exact(value: BigInt) -> Self {
         Self::Exact(value)
     }
 
+    //Domain létrehozása a megadott tartománnyal
     pub fn finite_set<I>(values: I) -> Option<Self>
     where
         I: IntoIterator<Item = BigInt>,
     {
         let mut set = BTreeSet::new();
 
+        //Biztonsági ellenőrzés
         for value in values {
             set.insert(bounded_value(value)?);
         }
@@ -51,6 +58,7 @@ impl UcpValueDomain {
         }
     }
 
+    //Konkrét értéket visszaadja ha van
     pub fn exact_value(&self) -> Option<&BigInt> {
         match self {
             Self::Exact(value) => Some(value),
@@ -58,10 +66,12 @@ impl UcpValueDomain {
         }
     }
 
+    //Megmondja, hogy tudjuk-e már biztosan
     pub fn is_singleton(&self) -> bool {
         matches!(self, Self::Exact(_))
     }
 
+    //Ellenőrzi, hogy ha konkrét akkor az az érték, ha pedig tartomány, akkor meg az összes érték a min és max közé esik-e
     pub fn is_subset_of_range(&self, min: &BigInt, max: &BigInt) -> bool {
         match self {
             Self::Exact(value) => value >= min && value <= max,
@@ -69,6 +79,18 @@ impl UcpValueDomain {
         }
     }
 
+    //Visszaadja a domain legnagyobb lehetséges értékét, ha erre intervallumos feltételt akarunk ellenőrizni
+    pub fn max_value(&self) -> &BigInt {
+        match self {
+            Self::Exact(value) => value,
+            Self::FiniteSet(values) => values
+                .iter()
+                .next_back()
+                .expect("finite_set never creates an empty set"),
+        }
+    }
+
+    //Két domain metszetét adja vissza
     fn intersect(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Exact(left), Self::Exact(right)) if left == right => {
@@ -87,10 +109,12 @@ impl UcpValueDomain {
         }
     }
 
+    //Visszaadja, hogy milyen típusú a domain értéke
     fn value_kind(&self) -> ValueKind {
         match self {
             Self::Exact(value) if value == &BigInt::from(0) => ValueKind::Zero,
             Self::Exact(_) => ValueKind::NonZero,
+            //Biztonsági okból, ha már domain szerint lehetséges a 0 akkor Unknown lesz
             Self::FiniteSet(values) if values.iter().all(|value| value != &BigInt::from(0)) => {
                 ValueKind::NonZero
             }
@@ -104,16 +128,23 @@ impl UcpValueFacts {
         Self::default()
     }
 
+    //Kényelmi függvény a konkrét érték beállítására
+    //Igazat ad vissza, ha tanultunk újat és menjen még UCP kör
     pub fn mark_known(&mut self, cell: CellId, value: BigInt) -> bool {
         self.mark_domain(cell, UcpValueDomain::exact(value))
     }
 
+    //A domain beállítása
+    //Igazat ad vissza, ha tanultunk újat és menjen még UCP kör
     pub fn mark_domain(&mut self, cell: CellId, domain: UcpValueDomain) -> bool {
+        //A megadott domain ellenőrzése
         let domain = match domain {
+            //A bounded_value-ba esik-e
             UcpValueDomain::Exact(value) => UcpValueDomain::Exact(match bounded_value(value) {
                 Some(value) => value,
                 None => return false,
             }),
+            //Ellenőrzi, hogy tud-e érvényes domaint létrehozni
             UcpValueDomain::FiniteSet(values) => {
                 let Some(domain) = UcpValueDomain::finite_set(values) else {
                     return false;
@@ -122,18 +153,23 @@ impl UcpValueFacts {
             }
         };
 
+        //Megnézi, hogy a korábbi cellának volt-e már domain-je
         match self.domains.get(&cell) {
             Some(existing) => {
+                //Ha van megnézi a korábbi meg a mostani metszetét meg lehet-e határozni
                 let Some(intersection) = existing.intersect(&domain) else {
                     return false;
                 };
+                //Ha meg lehet és megegyezik a kettő
                 if &intersection == existing {
                     false
                 } else {
+                    //Felülírja a korábbit az új metszetre
                     self.domains.insert(cell, intersection);
                     true
                 }
             }
+            //Ha nem volt akkor a fent kapott lesz
             None => {
                 self.domains.insert(cell, domain);
                 true
@@ -141,24 +177,29 @@ impl UcpValueFacts {
         }
     }
 
+    //Visszaadja a konkrét értéket
     pub fn known_value(&self, cell: &CellId) -> Option<&BigInt> {
         self.domains.get(cell)?.exact_value()
     }
 
+    //Visszaadja a tartományt
     pub fn domain(&self, cell: &CellId) -> Option<&UcpValueDomain> {
         self.domains.get(cell)
     }
 
+    //Ellenőrzi, hogy a cellához tartozó domain teljesen a megadott intervallumba esik-e
     pub fn domain_is_subset_of_range(&self, cell: &CellId, min: &BigInt, max: &BigInt) -> bool {
         self.domain(cell)
             .map(|domain| domain.is_subset_of_range(min, max))
             .unwrap_or(false)
     }
 
+    //Visszaadja az összes eddig ismert domain-t
     pub fn domains(&self) -> &HashMap<CellId, UcpValueDomain> {
         &self.domains
     }
 
+    //Kiszedi azokat a cellákat, amelyeknek már konkrét értékük van
     pub fn known_values(&self) -> HashMap<CellId, BigInt> {
         self.domains
             .iter()
@@ -171,6 +212,7 @@ impl UcpValueFacts {
     }
 }
 
+//Az analyzer input instance celláiból létrehozza a kezdeti Delta értékeket (Konkrét értékek)
 pub fn initial_values_from_instance_cells<'a, I>(instance_cells: I) -> UcpValueFacts
 where
     I: IntoIterator<Item = (&'a String, &'a i64)>,
@@ -186,20 +228,30 @@ where
     values
 }
 
+//Megpróbál egy UCP expression-t konkrét értékre kiértékelni a már ismert Delta alapján
 pub fn evaluate_expr(expr: &UcpExpr, values: &UcpValueFacts) -> Option<BigInt> {
     match expr {
+        //Ha az adott cellához van konkrét érték, akkor megadja
         UcpExpr::Var(cell) => bounded_value(values.known_value(cell)?.clone()),
+        //Ha a konstans konkrétan ismert, akkor visszaadja az értékét
         UcpExpr::Const(scalar) => bounded_value(scalar.as_known()?),
+        //Ha a belső kifejezés kiértékelhető, akkor az ellentettjét adja
         UcpExpr::Neg(inner) => bounded_value(-evaluate_expr(inner, values)?),
+        //Akkor értékelhető ki, ha mindkét oldal konkrétan kiértékelhető
         UcpExpr::Add(left, right) => {
             bounded_value(evaluate_expr(left, values)? + evaluate_expr(right, values)?)
         }
+        //Akkor értékelhető ki, ha mindkét szorzótényező konkrétan kiértékelhető
         UcpExpr::Mul(left, right) => {
             bounded_value(evaluate_expr(left, values)? * evaluate_expr(right, values)?)
         }
+        //Skálázásnál csak ismert skálával számolunk, kivéve ha a skála biztosan nulla
         UcpExpr::Scale(inner, scalar) => match scalar {
+            //Nullával szorzás mindig nulla
             UcpScalar::Zero => Some(BigInt::from(0)),
+            //Konkrét skálánál kiszámolja a belső érték és a skála szorzatát
             UcpScalar::Known(scale) => bounded_value(evaluate_expr(inner, values)? * scale),
+            //Ismeretlen, de nem nulla skálánál csak akkor tudunk biztosat, ha a belső érték nulla
             UcpScalar::NonZero | UcpScalar::Unknown => {
                 let inner_value = evaluate_expr(inner, values)?;
                 if inner_value == BigInt::from(0) {
@@ -212,6 +264,7 @@ pub fn evaluate_expr(expr: &UcpExpr, values: &UcpValueFacts) -> Option<BigInt> {
     }
 }
 
+//Biztonsági szűrő: csak kis, integerként kezelhető értékekkel következtetünk
 fn bounded_value(value: BigInt) -> Option<BigInt> {
     if value == BigInt::from(0)
         || (value >= BigInt::from(i64::MIN) && value <= BigInt::from(i64::MAX))
@@ -222,6 +275,7 @@ fn bounded_value(value: BigInt) -> Option<BigInt> {
     }
 }
 
+//Megmondja, hogy egy expression biztosan nulla, biztosan nem nulla, vagy ismeretlen
 pub fn value_kind(expr: &UcpExpr, values: &UcpValueFacts) -> ValueKind {
     if let Some(value) = evaluate_expr(expr, values) {
         if value == BigInt::from(0) {
@@ -250,6 +304,7 @@ pub fn value_kind(expr: &UcpExpr, values: &UcpValueFacts) -> ValueKind {
     }
 }
 
+//Nullára kényszerített expressionből próbál új Delta domain-eket tanulni
 pub fn infer_value_domains_from_zero_equation(
     expr: &UcpExpr,
     values: &UcpValueFacts,
@@ -267,6 +322,7 @@ pub fn infer_value_domains_from_zero_equation(
     inferences
 }
 
+//Csak a konkrét értékű következtetéseket adja vissza
 pub fn infer_value_assignments_from_zero_equation(
     expr: &UcpExpr,
     values: &UcpValueFacts,
@@ -280,6 +336,7 @@ pub fn infer_value_assignments_from_zero_equation(
         .collect()
 }
 
+//Root szabály: például b * (b - 1) = 0 alapján Delta(b) = {0, 1}
 fn infer_root_domain(expr: &UcpExpr, values: &UcpValueFacts) -> Option<(CellId, UcpValueDomain)> {
     let mut factors = Vec::new();
     collect_product_factors(expr, &mut factors);
@@ -306,6 +363,7 @@ fn infer_root_domain(expr: &UcpExpr, values: &UcpValueFacts) -> Option<(CellId, 
     Some((inferred_cell?, UcpValueDomain::finite_set(roots)?))
 }
 
+//Szorzatot faktorokra bont, hogy a root szabály felismerhető legyen
 fn collect_product_factors<'a>(expr: &'a UcpExpr, factors: &mut Vec<&'a UcpExpr>) {
     match expr {
         UcpExpr::Mul(left, right) => {
@@ -321,6 +379,7 @@ fn collect_product_factors<'a>(expr: &'a UcpExpr, factors: &mut Vec<&'a UcpExpr>
     }
 }
 
+//Egy faktorból kinyeri, hogy melyik cellára milyen gyököt jelent
 fn factor_root(factor: &UcpExpr, values: &UcpValueFacts) -> Option<(CellId, BigInt)> {
     let linear = linearize(factor, values)?;
     if linear.terms.len() != 1 {
@@ -340,6 +399,7 @@ fn factor_root(factor: &UcpExpr, values: &UcpValueFacts) -> Option<(CellId, BigI
     Some((cell, bounded_value(numerator / coefficient)?))
 }
 
+//Null-egyenletből konkrét cellaértéket próbál kikövetkeztetni
 fn infer_from_zero_expr(expr: &UcpExpr, values: &UcpValueFacts) -> Option<(CellId, BigInt)> {
     match expr {
         UcpExpr::Mul(left, right) => match (value_kind(left, values), value_kind(right, values)) {
@@ -356,6 +416,7 @@ fn infer_from_zero_expr(expr: &UcpExpr, values: &UcpValueFacts) -> Option<(CellI
     }
 }
 
+//Lineáris null-egyenletet old meg, ha pontosan egy ismeretlen cella marad
 fn infer_linear_assignment(expr: &UcpExpr, values: &UcpValueFacts) -> Option<(CellId, BigInt)> {
     let linear = linearize(expr, values)?;
 
@@ -376,6 +437,7 @@ fn infer_linear_assignment(expr: &UcpExpr, values: &UcpValueFacts) -> Option<(Ce
     Some((cell, bounded_value(numerator / coefficient)?))
 }
 
+//UcpExpr-ből lineáris alakot készít: constant + coefficient * cell + ...
 fn linearize(expr: &UcpExpr, values: &UcpValueFacts) -> Option<LinearExpr> {
     if let Some(value) = evaluate_expr(expr, values) {
         return Some(LinearExpr::constant(value));
@@ -407,6 +469,7 @@ fn linearize(expr: &UcpExpr, values: &UcpValueFacts) -> Option<LinearExpr> {
     }
 }
 
+//String cellanévből CellId-t készít, például "I-0-0" -> instance(0, 0)
 fn parse_cell_id(name: &str) -> Option<CellId> {
     let mut parts = name.split('-');
     let kind = parts.next()?;
@@ -416,6 +479,7 @@ fn parse_cell_id(name: &str) -> Option<CellId> {
         return None;
     }
 
+    //Meghívja a megfelelő konstruktort
     match kind {
         "A" => Some(CellId::advice(column, row)),
         "I" => Some(CellId::instance(column, row)),
@@ -425,6 +489,7 @@ fn parse_cell_id(name: &str) -> Option<CellId> {
 }
 
 impl LinearExpr {
+    //Konstans lineáris kifejezést hoz létre
     fn constant(value: BigInt) -> Self {
         Self {
             constant: value,
@@ -432,6 +497,7 @@ impl LinearExpr {
         }
     }
 
+    //Egy darab cellatagot hoz létre a megadott együtthatóval
     fn term(cell: CellId, coefficient: BigInt) -> Self {
         Self {
             constant: BigInt::from(0),
@@ -439,6 +505,7 @@ impl LinearExpr {
         }
     }
 
+    //Két lineáris kifejezést összead, az azonos cellák együtthatóit összevonva
     fn add(mut self, other: Self) -> Self {
         self.constant += other.constant;
         for (cell, coefficient) in other.terms {
@@ -450,6 +517,7 @@ impl LinearExpr {
         self
     }
 
+    //Lineáris kifejezést beszoroz egy skalárral
     fn scale(mut self, scalar: BigInt) -> Self {
         self.constant *= &scalar;
         for coefficient in self.terms.values_mut() {
@@ -469,6 +537,7 @@ mod tests {
         UcpValueDomain::finite_set(values.iter().map(|value| BigInt::from(*value))).unwrap()
     }
 
+    //Azt ellenőrzi, hogy ismert értékekkel egy egyszerű aritmetikai expression kiértékelhető
     #[test]
     fn evaluates_known_arithmetic_expression() {
         let x = CellId::instance(0, 0);
@@ -480,6 +549,7 @@ mod tests {
         assert_eq!(value_kind(&expr, &values), ValueKind::NonZero);
     }
 
+    //Azt ellenőrzi, hogy nonzero * y = 0 alakból y = 0 következik
     #[test]
     fn learns_zero_from_nonzero_product_equation() {
         let x = CellId::instance(0, 0);
@@ -495,6 +565,7 @@ mod tests {
         );
     }
 
+    //Azt ellenőrzi, hogy x - 5 = 0 alakból konkrétan x = 5 tanulható
     #[test]
     fn learns_linear_assignment_value() {
         let x = CellId::advice(0, 0);
@@ -506,6 +577,7 @@ mod tests {
         );
     }
 
+    //Azt ellenőrzi, hogy b * (b - 1) = 0 alapján Delta(b) = {0, 1}
     #[test]
     fn root_rule_learns_boolean_domain() {
         let b = CellId::advice(0, 0);
@@ -519,6 +591,7 @@ mod tests {
         assert_eq!(inferences, vec![(b, finite_domain(&[0, 1]))]);
     }
 
+    //Azt ellenőrzi, hogy x * x = 0 alapján konkrétan x = 0 tanulható
     #[test]
     fn root_rule_learns_exact_zero_from_square_zero() {
         let x = CellId::advice(0, 0);
@@ -532,6 +605,7 @@ mod tests {
         );
     }
 
+    //Azt ellenőrzi, hogy két domain metszete szűkítheti a boolean domaint konkrét értékre
     #[test]
     fn intersecting_domain_can_refine_boolean_to_exact_value() {
         let b = CellId::advice(0, 0);
@@ -543,6 +617,7 @@ mod tests {
         assert_eq!(values.known_value(&b), Some(&BigInt::from(1)));
     }
 
+    //Azt ellenőrzi, hogy egy finite domain teljesen beleesik-e egy adott intervallumba
     #[test]
     fn finite_domain_can_be_checked_against_digit_range() {
         let b = CellId::advice(0, 0);

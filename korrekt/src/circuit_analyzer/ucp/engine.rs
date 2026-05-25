@@ -8,18 +8,23 @@ use super::{
     value::{infer_value_domains_from_zero_equation, UcpValueFacts},
 };
 
+//Egy expression végső UCP státusza
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UcpExpressionStatus {
+    //A végső K alapján unique
     Unique,
+    //A végső K alapján még nem bizonyított unique
     Unresolved,
 }
 
+//Egy expression indexéhez tartozó kiértékelési eredmény
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpExpressionResult {
     pub index: usize,
     pub status: UcpExpressionStatus,
 }
 
+//A megadott target/output cellák constrainedness ellenőrzésének eredménye
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpTargetCheck {
     pub checked_targets: usize,
@@ -28,26 +33,36 @@ pub struct UcpTargetCheck {
 }
 
 impl UcpTargetCheck {
+    //Igaz, ha nincs unresolved target cella
     pub fn all_targets_unique(&self) -> bool {
         self.unresolved_targets.is_empty()
     }
 }
 
+//A teljes UCP futás eredménye
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpResult {
+    //A végső K halmaz
     pub facts: UcpFacts,
+    //A végső Delta érték/domain információ
     pub value_facts: UcpValueFacts,
+    //Hány expressiont ellenőriztünk
     pub checked_expressions: usize,
+    //Hány expression lett unique
     pub unique_expressions: usize,
+    //Hány expression maradt unresolved
     pub unresolved_expressions: usize,
+    //Expressionenkénti státusz index alapján
     pub expression_results: Vec<UcpExpressionResult>,
 }
 
 impl UcpResult {
+    //Igaz, ha minden expression unique lett
     pub fn all_expressions_unique(&self) -> bool {
         self.unresolved_expressions == 0
     }
 
+    //Visszaadja az unresolved expressionök indexeit
     pub fn unresolved_indices(&self) -> Vec<usize> {
         self.expression_results
             .iter()
@@ -58,10 +73,12 @@ impl UcpResult {
             .collect()
     }
 
+    //Igaz, ha minden megadott target cella szerepel a végső K halmazban
     pub fn all_targets_unique(&self, targets: &[CellId]) -> bool {
         targets.iter().all(|target| self.facts.is_unique(target))
     }
 
+    //Kigyűjti azokat a target cellákat, amelyek nem kerültek be a K halmazba
     pub fn unresolved_targets(&self, targets: &[CellId]) -> Vec<CellId> {
         targets
             .iter()
@@ -70,6 +87,7 @@ impl UcpResult {
             .collect()
     }
 
+    //Összefoglaló target check eredményt készít
     pub fn check_targets(&self, targets: &[CellId]) -> UcpTargetCheck {
         let unresolved_targets = self.unresolved_targets(targets);
 
@@ -81,45 +99,50 @@ impl UcpResult {
     }
 }
 
-/// Runs lightweight UCP over already-extracted zero-equation expressions.
-///
-/// The engine repeatedly applies the Assign-style propagation rule until no
-/// new unique cells are learned, then classifies every expression with the
-/// final fact set.
+//UCP futtatása value inference nélkül megadott kezdeti K halmazból
 pub fn analyze_expressions(expressions: &[UcpExpr], initial_facts: UcpFacts) -> UcpResult {
     analyze_expressions_with_values(expressions, initial_facts, UcpValueFacts::new())
 }
 
+//UCP fixpoint futtatása kezdeti K és Delta információval
 pub fn analyze_expressions_with_values(
     expressions: &[UcpExpr],
     initial_facts: UcpFacts,
     initial_value_facts: UcpValueFacts,
 ) -> UcpResult {
+    //K halmaz: unique-nak ismert cellák
     let mut facts = initial_facts;
+    //Delta: ismert értékek és domainek
     let mut value_facts = initial_value_facts;
+    //Addig futunk, amíg valamelyik szabály új információt tanul
     let mut changed = true;
 
     while changed {
         changed = false;
 
         for expr in expressions {
+            //Először érték/domain információt próbálunk tanulni a zero equationből
             for (cell, domain) in infer_value_domains_from_zero_equation(expr, &value_facts) {
                 let is_exact = domain.is_singleton();
                 changed |= value_facts.mark_domain(cell.clone(), domain);
+                //Konkrét egyértékű domainből uniqueness is következik
                 if is_exact {
                     changed |= facts.mark_unique(cell);
                 }
             }
 
+            //Ha az expression már unique, nincs mit assign szabállyal tanulni belőle
             if expression_is_unique(expr, &facts) {
                 continue;
             }
 
+            //Assign-szerű szabály: egyetlen lineáris ismeretlen cellát unique-nak jelöl
             if let Some(cell) = infer_assigned_cell_from_zero_equation(expr, &facts) {
                 changed |= facts.mark_unique(cell);
             }
         }
 
+        //Több constraintes all-but-one-0 szabály futtatása
         for inference in infer_all_but_one_zero(expressions, &facts, &value_facts) {
             if let Some(value) = inference.value {
                 changed |= value_facts.mark_known(inference.cell.clone(), value);
@@ -127,6 +150,7 @@ pub fn analyze_expressions_with_values(
             changed |= facts.mark_unique(inference.cell);
         }
 
+        //Base conversion szabály futtatása, például bit decomposition esetekhez
         for inference in infer_base_conversions(expressions, &facts, &value_facts) {
             if let Some(value) = inference.value {
                 changed |= value_facts.mark_known(inference.cell.clone(), value);
@@ -135,11 +159,13 @@ pub fn analyze_expressions_with_values(
         }
     }
 
+    //Fixpoint után minden expressiont a végső K alapján osztályozunk
     let mut unique_expressions = 0;
     let mut unresolved_expressions = 0;
     let mut expression_results = Vec::with_capacity(expressions.len());
 
     for (index, expr) in expressions.iter().enumerate() {
+        //Expression unique, ha a végső facts alapján expression_is_unique igaz rá
         let status = if expression_is_unique(expr, &facts) {
             unique_expressions += 1;
             UcpExpressionStatus::Unique
@@ -151,6 +177,7 @@ pub fn analyze_expressions_with_values(
         expression_results.push(UcpExpressionResult { index, status });
     }
 
+    //A teljes eredmény visszaadása a végső K-val és Deltával együtt
     UcpResult {
         facts,
         value_facts,
@@ -166,6 +193,7 @@ mod tests {
     use super::*;
     use crate::circuit_analyzer::ucp::cell::CellId;
 
+    //Azt ellenőrzi, hogy az engine külön tudja választani a unique és unresolved expressionöket
     #[test]
     fn classifies_unique_and_unresolved_expressions() {
         let x = CellId::advice(0, 0);
@@ -186,6 +214,7 @@ mod tests {
         assert!(!result.all_expressions_unique());
     }
 
+    //Azt ellenőrzi, hogy minden expression unique esetén a summary is all unique
     #[test]
     fn reports_all_unique_when_every_expression_is_known() {
         let x = CellId::instance(0, 0);
@@ -205,6 +234,7 @@ mod tests {
         assert!(result.all_expressions_unique());
     }
 
+    //Azt ellenőrzi, hogy egy zero equationből az assign szabály új advice cellát tanul
     #[test]
     fn propagates_single_unknown_from_zero_equation() {
         let known = CellId::instance(0, 0);
@@ -223,6 +253,7 @@ mod tests {
         assert!(result.all_expressions_unique());
     }
 
+    //Azt ellenőrzi, hogy a target check csak a megadott output/target cellákat nézi
     #[test]
     fn checks_target_cells_against_final_facts() {
         let known = CellId::instance(0, 0);
@@ -245,6 +276,7 @@ mod tests {
         assert_eq!(target_check.unresolved_targets, vec![unresolved]);
     }
 
+    //Azt ellenőrzi, hogy boolean domain önmagában még nem jelent uniqueness-t
     #[test]
     fn root_domain_does_not_make_boolean_cell_unique_by_itself() {
         use crate::circuit_analyzer::ucp::value::UcpValueDomain;
@@ -268,6 +300,7 @@ mod tests {
         );
     }
 
+    //Azt ellenőrzi, hogy all-but-one-0 szabály az engine-ben is unique-ként jelöli a kimeneteket
     #[test]
     fn all_but_one_zero_marks_one_hot_outputs_unique() {
         use num_bigint::BigInt;
@@ -310,6 +343,7 @@ mod tests {
         assert_eq!(result.value_facts.known_value(&y2), Some(&BigInt::from(0)));
     }
 
+    //Azt ellenőrzi, hogy base-conv szabály az engine-ben is unique-ként jelöli a biteket
     #[test]
     fn base_conv_marks_binary_decomposition_bits_unique() {
         use crate::circuit_analyzer::ucp::{expr::UcpScalar, value::UcpValueDomain};
@@ -349,6 +383,7 @@ mod tests {
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
+    //Azt ellenőrzi, hogy Halo2 gate expressionök UCP-re fordítva is elemezhetők
     #[test]
     fn classifies_plonkish_constraint_system_gate_expressions() {
         use crate::circuit_analyzer::halo2_proofs_libs::*;
@@ -388,6 +423,7 @@ mod tests {
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
+    //Azt ellenőrzi, hogy plonkish expressionökből automatikusan kigyűjthetők az initial facts elemei
     #[test]
     fn extracts_initial_facts_from_plonkish_expressions() {
         use crate::circuit_analyzer::halo2_proofs_libs::*;
@@ -425,6 +461,7 @@ mod tests {
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
+    //Azt ellenőrzi, hogy aktív selectoros assignment láncon végig tud propagálni az UCP
     #[test]
     fn propagates_through_selected_plonkish_assignment_chain() {
         use crate::circuit_analyzer::halo2_proofs_libs::*;

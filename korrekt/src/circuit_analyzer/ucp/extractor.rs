@@ -13,6 +13,7 @@ use crate::circuit_analyzer::{
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use std::collections::HashSet;
 
+//Egy teljes UCP bemenet: constraint expressionök, kezdeti K és ellenőrizendő target cellák
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpProblem {
     pub expressions: Vec<UcpExpr>,
@@ -21,11 +22,13 @@ pub struct UcpProblem {
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Analyzable circuitből UCP problem létrehozása targetek nélkül
 pub fn extract_ucp_problem<F: AnalyzableField>(analyzable: &Analyzable<F>) -> UcpProblem {
     extract_ucp_problem_with_targets(analyzable, [])
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Analyzable circuitből UCP problem létrehozása megadott target cellákkal
 pub fn extract_ucp_problem_with_targets<F, I>(
     analyzable: &Analyzable<F>,
     target_cells: I,
@@ -35,6 +38,7 @@ where
     I: IntoIterator<Item = CellId>,
 {
     let expressions = extract_ucp_expressions(analyzable);
+    //Az expressionökben szereplő instance/fixed cellákból indul a K halmaz
     let initial_facts = initial_facts_from_expressions(&expressions);
 
     UcpProblem {
@@ -45,29 +49,39 @@ where
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Kiszed minden UCP zero-equation expressiont a gate-ekből és copy constraint-ekből
 pub fn extract_ucp_expressions<F: AnalyzableField>(analyzable: &Analyzable<F>) -> Vec<UcpExpr> {
+    //Ezek azok a fixed oszlopok, amelyek selectorokat reprezentálnak
     let selector_indices = selector_fixed_column_indices(analyzable);
     let mut expressions = Vec::new();
 
+    //Végigmegyünk az analyzable által rögzített régiókon
     for region in &analyzable.regions {
+        //Sor nélküli régióból nem tudunk konkrét UCP cellákat képezni
         let Some((region_begin, region_end)) = region.rows else {
             continue;
         };
 
+        //Ha vannak selectorok, de ebben a régióban egyik sincs engedélyezve, kihagyjuk
         if !analyzable.selectors.is_empty() && region.enabled_selectors.is_empty() {
             continue;
         }
 
+        //A régió minden abszolút sorára külön kiértékeljük az aktív gate-eket
         for absolute_row in region_begin..=region_end {
+            //Selectoros circuitnél csak olyan sort nézünk, ahol legalább egy selector aktív
             if !analyzable.selectors.is_empty() && !row_has_enabled_selector(region, absolute_row) {
                 continue;
             }
 
+            //A Halo2 expression konverzió lokális sort vár a region_begin-hez képest
             let row = i32::try_from(absolute_row - region_begin)
                 .expect("UCP local row does not fit into i32");
+            //Az adott sorban aktív selectorok fixed oszlop indexei
             let enabled_selector_indices =
                 enabled_selector_fixed_column_indices(analyzable, region, absolute_row);
 
+            //Minden gate minden polynomial constraintjét UCP expressionné alakítjuk
             for gate in &analyzable.cs.gates {
                 for poly in &gate.polys {
                     expressions.push(expression_to_ucp_expr_with_enabled_selector_indices(
@@ -82,21 +96,26 @@ pub fn extract_ucp_expressions<F: AnalyzableField>(analyzable: &Analyzable<F>) -
         }
     }
 
+    //A permutation/copy constraint-ekből is zero-equation expressionöket készítünk
     expressions.extend(extract_copy_constraint_expressions(&analyzable.permutation));
 
     expressions
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Copy/permutation constraint-ekből A - B = 0 alakú UCP expressionöket készít
 fn extract_copy_constraint_expressions(
     permutation: &permutation::keygen::Assembly,
 ) -> Vec<UcpExpr> {
     let mut expressions = Vec::new();
+    //Ugyanazt az élt ne vegyük fel többször
     let mut seen_edges = HashSet::new();
 
+    //Bejárjuk a permutation mappingben szereplő oszlopokat és sorokat
     for col in 0..permutation.sizes.len() {
         for row in 0..permutation.sizes[col].len() {
             let cycle_len = permutation.sizes[col][row];
+            //Egyelemű cycle nem jelent valódi copy constraint-et
             if cycle_len <= 1 {
                 continue;
             }
@@ -104,6 +123,7 @@ fn extract_copy_constraint_expressions(
             let mut cycle_col = col;
             let mut cycle_row = row;
 
+            //A permutation cycle mentén minden szomszédos kapcsolatból egyenlőséget készítünk
             for _ in 0..cycle_len {
                 let (right_col, right_row) = permutation.mapping[cycle_col][cycle_row];
 
@@ -114,6 +134,7 @@ fn extract_copy_constraint_expressions(
                     break;
                 };
 
+                //left == right constraint UCP-ben: left - right = 0
                 if left != right && seen_edges.insert((left.clone(), right.clone())) {
                     expressions.push(UcpExpr::add(
                         UcpExpr::var(left),
@@ -131,6 +152,7 @@ fn extract_copy_constraint_expressions(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Permutation oszlop/sor pozícióból UCP CellId-t készít
 fn permutation_cell_id(
     permutation: &permutation::keygen::Assembly,
     col: usize,
@@ -141,6 +163,7 @@ fn permutation_cell_id(
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
     {
+        //Zcash halo2-ben az Any variánsok nem hordoznak plusz adatot
         match column.column_type() {
             Any::Advice => Some(CellId::advice(column.index, row)),
             Any::Fixed => Some(CellId::fixed(column.index, row)),
@@ -154,6 +177,7 @@ fn permutation_cell_id(
         feature = "use_scroll_halo2_proofs"
     ))]
     {
+        //Más halo2 forkokban az Advice variáns hordozhat plusz adatot
         match column.column_type() {
             Any::Advice(_) => Some(CellId::advice(column.index, row)),
             Any::Fixed => Some(CellId::fixed(column.index, row)),
@@ -163,6 +187,7 @@ fn permutation_cell_id(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Kigyűjti, mely fixed oszlopok tartoznak selectorokhoz
 fn selector_fixed_column_indices<F: AnalyzableField>(analyzable: &Analyzable<F>) -> HashSet<usize> {
     analyzable
         .cs
@@ -173,6 +198,7 @@ fn selector_fixed_column_indices<F: AnalyzableField>(analyzable: &Analyzable<F>)
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Az adott sorban aktív selectorokhoz tartozó fixed oszlop indexeket adja vissza
 fn enabled_selector_fixed_column_indices<F: AnalyzableField>(
     analyzable: &Analyzable<F>,
     region: &Region,
@@ -193,6 +219,7 @@ fn enabled_selector_fixed_column_indices<F: AnalyzableField>(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Megmondja, hogy az adott abszolút sorban van-e engedélyezett selector
 fn row_has_enabled_selector(region: &Region, absolute_row: usize) -> bool {
     region
         .enabled_selectors
@@ -215,6 +242,7 @@ mod tests {
     use std::collections::HashMap;
     use std::marker::PhantomData;
 
+    //Teszt circuit egy aktív selectoros assignment gate-hez
     #[derive(Clone, Debug)]
     struct ExtractorConfig {
         advice: Column<Advice>,
@@ -226,6 +254,7 @@ mod tests {
         _marker: PhantomData<Fr>,
     }
 
+    //Teszt circuit copy constraint ellenőrzéséhez
     #[derive(Clone, Debug)]
     struct CopyConfig {
         advice: Column<Advice>,
@@ -250,6 +279,7 @@ mod tests {
             let instance = meta.instance_column();
             let selector = meta.selector();
 
+            //Constraint: selector * (advice + public - 5) = 0
             meta.create_gate("extractor selected assignment", |meta| {
                 let selector = meta.query_selector(selector);
                 let advice = meta.query_advice(advice, Rotation::cur());
@@ -269,6 +299,7 @@ mod tests {
             layouter.assign_region(
                 || "extractor row",
                 |mut region| {
+                    //A gate csak ezen a soron aktív
                     config.selector.enable(&mut region, 0)?;
                     region.assign_advice(
                         || "advice",
@@ -294,6 +325,7 @@ mod tests {
             let advice = meta.advice_column();
             let instance = meta.instance_column();
 
+            //Equality engedélyezése kell a copy/permutation constraintekhez
             meta.enable_equality(advice);
             meta.enable_equality(instance);
 
@@ -305,6 +337,7 @@ mod tests {
             config: Self::Config,
             mut layouter: impl Layouter<Fr>,
         ) -> Result<(), Error> {
+            //Advice cellát hozzárendeljük egy instance cellához
             let advice_cell = layouter.assign_region(
                 || "copy row",
                 |mut region| {
@@ -321,6 +354,7 @@ mod tests {
         }
     }
 
+    //Azt ellenőrzi, hogy Analyzable circuitből UCP problem készül és UCP lefut rajta
     #[test]
     fn extracts_problem_from_analyzable_and_runs_ucp() {
         use zcash_halo2_proofs::dev::MockProver;
@@ -352,6 +386,7 @@ mod tests {
         assert!(result.all_expressions_unique());
     }
 
+    //Azt ellenőrzi, hogy copy constraintből UCP egyenlet készül, és abból advice érték tanulható
     #[test]
     fn extracts_copy_constraints_and_value_facts_can_learn_copied_advice() {
         use zcash_halo2_proofs::dev::MockProver;
