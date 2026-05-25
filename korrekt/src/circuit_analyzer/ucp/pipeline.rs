@@ -9,7 +9,7 @@
 // Így az SMT-nek kevesebb változót kell szabadon kezelnie, az UCP pedig új információból tovább tud propagálni.
 use super::{
     cell::{CellId, CellKind},
-    engine::{analyze_expressions_with_values, UcpResult, UcpTargetCheck},
+    engine::{analyze_expressions_with_values_and_modulus, UcpResult, UcpTargetCheck},
     expr::UcpExpr,
     extractor::extract_ucp_problem_with_targets,
     facts::UcpFacts,
@@ -93,10 +93,11 @@ where
 
     loop {
         //UCP fixpoint futtatása az aktuális K és Delta mellett
-        let ucp_result = analyze_expressions_with_values(
+        let ucp_result = analyze_expressions_with_values_and_modulus(
             &problem.expressions,
             facts.clone(),
             value_facts.clone(),
+            &problem.field_modulus,
         );
         //Megnézzük, hogy a targetek bekerültek-e a végső K halmazba
         let target_check = ucp_result.check_targets(&problem.target_cells);

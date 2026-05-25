@@ -9,8 +9,6 @@ use super::{
     facts::UcpFacts,
     value::UcpValueFacts,
 };
-use crate::circuit_analyzer::halo2_proofs_libs::bn256;
-use num::Num;
 use num_bigint::BigInt;
 use std::collections::BTreeMap;
 
@@ -36,15 +34,6 @@ struct LinearExpr {
     constant: BigInt,
     //A lineáris változótagok: cella -> együttható
     terms: BTreeMap<CellId, BigInt>,
-}
-
-//Base-Conv futtatása az alapértelmezett mezőmodulussal
-pub fn infer_base_conversions(
-    expressions: &[UcpExpr],
-    facts: &UcpFacts,
-    values: &UcpValueFacts,
-) -> Vec<BaseConvInference> {
-    infer_base_conversions_with_modulus(expressions, facts, values, &default_field_modulus())
 }
 
 //Base-Conv futtatása explicit p modulussal, hogy a cikk no-wrap feltételét is ellenőrizzük
@@ -369,12 +358,6 @@ fn bounded_value(value: BigInt) -> Option<BigInt> {
     }
 }
 
-fn default_field_modulus() -> BigInt {
-    //A projekt jelenlegi alapértelmezett mezőmodulusa, ugyanaz, amit az analyzer SMT része is használ
-    let without_prefix = bn256::fr::MODULUS_STR.trim_start_matches("0x");
-    BigInt::from_str_radix(without_prefix, 16).expect("bn256 scalar modulus must parse")
-}
-
 impl LinearExpr {
     //Konstans lineáris kifejezést hoz létre
     fn constant(value: BigInt) -> Self {
@@ -433,6 +416,10 @@ mod tests {
         }
     }
 
+    fn modulus() -> BigInt {
+        BigInt::from(101)
+    }
+
     //Ellenőrzi, hogy ismert x esetén a konkrét binary digitértékeket is megtanuljuk
     #[test]
     fn infers_binary_decomposition_digits_from_exact_x() {
@@ -455,7 +442,7 @@ mod tests {
         values.mark_known(x, BigInt::from(5));
         mark_bits(&mut values, &[b0.clone(), b1.clone(), b2.clone()]);
 
-        let inferences = infer_base_conversions(&[expr], &facts, &values);
+        let inferences = infer_base_conversions_with_modulus(&[expr], &facts, &values, &modulus());
 
         assert_eq!(
             inferences,
@@ -493,7 +480,7 @@ mod tests {
         let mut values = UcpValueFacts::new();
         mark_bits(&mut values, &[b0.clone(), b1.clone()]);
 
-        let inferences = infer_base_conversions(&[expr], &facts, &values);
+        let inferences = infer_base_conversions_with_modulus(&[expr], &facts, &values, &modulus());
 
         assert_eq!(
             inferences,
@@ -526,7 +513,9 @@ mod tests {
         let facts = UcpFacts::from_iter([x]);
         let values = UcpValueFacts::new();
 
-        assert!(infer_base_conversions(&[expr], &facts, &values).is_empty());
+        assert!(
+            infer_base_conversions_with_modulus(&[expr], &facts, &values, &modulus()).is_empty()
+        );
     }
 
     //Ellenőrzi, hogy nem 1,c,c^2 alakú együtthatókra nem következtetünk
@@ -550,7 +539,9 @@ mod tests {
         let mut values = UcpValueFacts::new();
         mark_bits(&mut values, &[b0, b1, b2]);
 
-        assert!(infer_base_conversions(&[expr], &facts, &values).is_empty());
+        assert!(
+            infer_base_conversions_with_modulus(&[expr], &facts, &values, &modulus()).is_empty()
+        );
     }
 
     //Ellenőrzi, hogy ha a legfelső digit modulo p átfordulást engedhet, akkor nem következtetünk

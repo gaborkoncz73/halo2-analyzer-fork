@@ -9,16 +9,16 @@ use super::halo2_proofs_libs::*;
 
 // Conditionally require `Group` based on the presence of a feature flag
 #[cfg(feature = "use_pse_v1_halo2_proofs")]
-pub trait AnalyzableField: Field + Group {}
+pub trait AnalyzableField: Field + PrimeField + Group {}
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-pub trait AnalyzableField: Field {}
+pub trait AnalyzableField: Field + PrimeField {}
 
 // Since Rust traits cannot have conditional supertraits directly based on cfg attributes,
 // you would still need to ensure that any type implementing `AnalyzableField` meets the necessary bounds:
 #[cfg(feature = "use_pse_v1_halo2_proofs")]
-impl<F: Field + Group> AnalyzableField for F {}
+impl<F: Field + PrimeField + Group> AnalyzableField for F {}
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-impl<F: Field> AnalyzableField for F {}
+impl<F: Field + PrimeField> AnalyzableField for F {}
 
 #[derive(Debug)]
 pub struct Analyzable<F: AnalyzableField> {

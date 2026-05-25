@@ -1,12 +1,14 @@
 use super::{
     all_but_one::infer_all_but_one_zero,
-    base_conv::infer_base_conversions,
+    base_conv::infer_base_conversions_with_modulus,
+    bigint_mul::infer_bigint_mul_with_modulus,
     cell::CellId,
     expr::UcpExpr,
     facts::UcpFacts,
     rules::{expression_is_unique, infer_assigned_cell_from_zero_equation},
     value::{infer_value_domains_from_zero_equation, UcpValueFacts},
 };
+use num_bigint::BigInt;
 
 //Egy expression végső UCP státusza
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,11 +106,35 @@ pub fn analyze_expressions(expressions: &[UcpExpr], initial_facts: UcpFacts) -> 
     analyze_expressions_with_values(expressions, initial_facts, UcpValueFacts::new())
 }
 
-//UCP fixpoint futtatása kezdeti K és Delta információval
+//UCP fixpoint futtatása kezdeti K és Delta információval, modulusfüggő szabályok nélkül
 pub fn analyze_expressions_with_values(
     expressions: &[UcpExpr],
     initial_facts: UcpFacts,
     initial_value_facts: UcpValueFacts,
+) -> UcpResult {
+    analyze_expressions_with_optional_modulus(expressions, initial_facts, initial_value_facts, None)
+}
+
+//UCP fixpoint futtatása a circuit tényleges mezőmodulusával
+pub fn analyze_expressions_with_values_and_modulus(
+    expressions: &[UcpExpr],
+    initial_facts: UcpFacts,
+    initial_value_facts: UcpValueFacts,
+    field_modulus: &BigInt,
+) -> UcpResult {
+    analyze_expressions_with_optional_modulus(
+        expressions,
+        initial_facts,
+        initial_value_facts,
+        Some(field_modulus),
+    )
+}
+
+fn analyze_expressions_with_optional_modulus(
+    expressions: &[UcpExpr],
+    initial_facts: UcpFacts,
+    initial_value_facts: UcpValueFacts,
+    field_modulus: Option<&BigInt>,
 ) -> UcpResult {
     //K halmaz: unique-nak ismert cellák
     let mut facts = initial_facts;
@@ -150,12 +176,24 @@ pub fn analyze_expressions_with_values(
             changed |= facts.mark_unique(inference.cell);
         }
 
-        //Base conversion szabály futtatása, például bit decomposition esetekhez
-        for inference in infer_base_conversions(expressions, &facts, &value_facts) {
-            if let Some(value) = inference.value {
-                changed |= value_facts.mark_known(inference.cell.clone(), value);
+        if let Some(field_modulus) = field_modulus {
+            //Base conversion szabály futtatása a circuit tényleges field modulusával
+            for inference in infer_base_conversions_with_modulus(
+                expressions,
+                &facts,
+                &value_facts,
+                field_modulus,
+            ) {
+                if let Some(value) = inference.value {
+                    changed |= value_facts.mark_known(inference.cell.clone(), value);
+                }
+                changed |= facts.mark_unique(inference.cell);
             }
-            changed |= facts.mark_unique(inference.cell);
+
+            //BigInt-Mul/lineáris rendszer szabály futtatása a circuit tényleges field modulusával
+            for inference in infer_bigint_mul_with_modulus(expressions, &facts, field_modulus) {
+                changed |= facts.mark_unique(inference.cell);
+            }
         }
     }
 
@@ -372,7 +410,12 @@ mod tests {
         value_facts.mark_domain(b1.clone(), boolean_domain.clone());
         value_facts.mark_domain(b2.clone(), boolean_domain);
 
-        let result = analyze_expressions_with_values(&[expr], facts, value_facts);
+        let result = analyze_expressions_with_values_and_modulus(
+            &[expr],
+            facts,
+            value_facts,
+            &BigInt::from(101),
+        );
 
         assert!(result.facts.is_unique(&b0));
         assert!(result.facts.is_unique(&b1));
@@ -380,6 +423,40 @@ mod tests {
         assert_eq!(result.value_facts.known_value(&b0), Some(&BigInt::from(1)));
         assert_eq!(result.value_facts.known_value(&b1), Some(&BigInt::from(0)));
         assert_eq!(result.value_facts.known_value(&b2), Some(&BigInt::from(1)));
+    }
+
+    //Azt ellenőrzi, hogy a BigInt-Mul/lineáris rendszer szabály az engine-ben is fut
+    #[test]
+    fn bigint_mul_marks_full_rank_linear_system_unique() {
+        let a = CellId::instance(0, 0);
+        let b = CellId::instance(1, 0);
+        let x = CellId::advice(0, 0);
+        let y = CellId::advice(1, 0);
+        let facts = UcpFacts::from_iter([a.clone(), b.clone()]);
+        let expressions = vec![
+            UcpExpr::add(
+                UcpExpr::add(UcpExpr::var(x.clone()), UcpExpr::var(y.clone())),
+                UcpExpr::neg(UcpExpr::var(a)),
+            ),
+            UcpExpr::add(
+                UcpExpr::add(
+                    UcpExpr::var(x.clone()),
+                    UcpExpr::neg(UcpExpr::var(y.clone())),
+                ),
+                UcpExpr::neg(UcpExpr::var(b)),
+            ),
+        ];
+
+        let result = analyze_expressions_with_values_and_modulus(
+            &expressions,
+            facts,
+            UcpValueFacts::new(),
+            &BigInt::from(101),
+        );
+
+        assert!(result.facts.is_unique(&x));
+        assert!(result.facts.is_unique(&y));
+        assert!(result.all_expressions_unique());
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]

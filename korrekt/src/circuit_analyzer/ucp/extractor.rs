@@ -11,6 +11,9 @@ use crate::circuit_analyzer::{
     halo2_proofs_libs::*,
 };
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+use num::Num;
+use num_bigint::BigInt;
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use std::collections::HashSet;
 
 //Egy teljes UCP bemenet: constraint expressionök, kezdeti K és ellenőrizendő target cellák
@@ -19,6 +22,7 @@ pub struct UcpProblem {
     pub expressions: Vec<UcpExpr>,
     pub initial_facts: UcpFacts,
     pub target_cells: Vec<CellId>,
+    pub field_modulus: BigInt,
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
@@ -45,6 +49,22 @@ where
         expressions,
         initial_facts,
         target_cells: target_cells.into_iter().collect(),
+        field_modulus: field_modulus::<F>(),
+    }
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//A circuit mezőjének p modulusát adja vissza BigInt-ként
+pub fn field_modulus<F: AnalyzableField>() -> BigInt {
+    parse_field_modulus(F::MODULUS)
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn parse_field_modulus(raw_modulus: &str) -> BigInt {
+    if let Some(hex) = raw_modulus.strip_prefix("0x") {
+        BigInt::from_str_radix(hex, 16).expect("field modulus hex string must parse")
+    } else {
+        BigInt::from_str_radix(raw_modulus, 10).expect("field modulus decimal string must parse")
     }
 }
 
@@ -372,6 +392,7 @@ mod tests {
 
         assert!(!problem.expressions.is_empty());
         assert_eq!(problem.target_cells, vec![target.clone()]);
+        assert_eq!(problem.field_modulus, field_modulus::<Fr>());
         assert!(problem.initial_facts.is_unique(&CellId::instance(0, 0)));
         assert!(!problem.initial_facts.is_unique(&target));
 

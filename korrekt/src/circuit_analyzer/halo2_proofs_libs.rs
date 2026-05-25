@@ -1,4 +1,6 @@
 /// ZCASH
+pub use ff::PrimeField;
+
 #[cfg(feature = "use_zcash_halo2_proofs")]
 pub use zcash_halo2_proofs::{
     circuit::{self, AssignedCell, Cell, Layouter, SimpleFloorPlanner, Value},
