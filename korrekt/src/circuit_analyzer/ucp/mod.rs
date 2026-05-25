@@ -12,5 +12,11 @@ pub mod plonkish;
 pub mod rules;
 pub mod value;
 
+#[cfg(test)]
+mod demo_tests;
+
 #[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
 mod pipeline_comparison_tests;
+
+#[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
+mod sample_circuit_demo_tests;
