@@ -2,8 +2,7 @@ use super::{cell::CellId, expr::UcpExpr, facts::UcpFacts};
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use super::{
-    facts::initial_facts_from_expressions,
-    plonkish::expression_to_ucp_expr_with_enabled_selector_indices,
+    facts::initial_facts_from_expressions, plonkish::expression_to_ucp_expr_with_fixed_values,
 };
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use crate::circuit_analyzer::{
@@ -71,8 +70,6 @@ fn parse_field_modulus(raw_modulus: &str) -> BigInt {
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 //Kiszed minden UCP zero-equation expressiont a gate-ekből és copy constraint-ekből
 pub fn extract_ucp_expressions<F: AnalyzableField>(analyzable: &Analyzable<F>) -> Vec<UcpExpr> {
-    //Ezek azok a fixed oszlopok, amelyek selectorokat reprezentálnak
-    let selector_indices = selector_fixed_column_indices(analyzable);
     let mut expressions = Vec::new();
 
     //Végigmegyünk az analyzable által rögzített régiókon
@@ -97,19 +94,14 @@ pub fn extract_ucp_expressions<F: AnalyzableField>(analyzable: &Analyzable<F>) -
             //A Halo2 expression konverzió lokális sort vár a region_begin-hez képest
             let row = i32::try_from(absolute_row - region_begin)
                 .expect("UCP local row does not fit into i32");
-            //Az adott sorban aktív selectorok fixed oszlop indexei
-            let enabled_selector_indices =
-                enabled_selector_fixed_column_indices(analyzable, region, absolute_row);
-
             //Minden gate minden polynomial constraintjét UCP expressionné alakítjuk
             for gate in &analyzable.cs.gates {
                 for poly in &gate.polys {
-                    expressions.push(expression_to_ucp_expr_with_enabled_selector_indices(
+                    expressions.push(expression_to_ucp_expr_with_fixed_values(
                         poly,
                         region_begin,
                         row,
-                        &selector_indices,
-                        &enabled_selector_indices,
+                        &analyzable.fixed,
                     ));
                 }
             }
@@ -207,37 +199,6 @@ fn permutation_cell_id(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Kigyűjti, mely fixed oszlopok tartoznak selectorokhoz
-fn selector_fixed_column_indices<F: AnalyzableField>(analyzable: &Analyzable<F>) -> HashSet<usize> {
-    analyzable
-        .cs
-        .selector_map
-        .iter()
-        .map(|selector| selector.index)
-        .collect()
-}
-
-#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Az adott sorban aktív selectorokhoz tartozó fixed oszlop indexeket adja vissza
-fn enabled_selector_fixed_column_indices<F: AnalyzableField>(
-    analyzable: &Analyzable<F>,
-    region: &Region,
-    absolute_row: usize,
-) -> HashSet<usize> {
-    region
-        .enabled_selectors
-        .iter()
-        .filter(|(_, rows)| rows.contains(&absolute_row))
-        .filter_map(|(selector, _)| {
-            analyzable
-                .cs
-                .selector_map
-                .get(selector.0)
-                .map(|fixed_column| fixed_column.index)
-        })
-        .collect()
-}
-
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 //Megmondja, hogy az adott abszolút sorban van-e engedélyezett selector
 fn row_has_enabled_selector(region: &Region, absolute_row: usize) -> bool {
@@ -254,8 +215,11 @@ mod tests {
         analyzable::Analyzable,
         ucp::{
             cell::CellId,
-            engine::{analyze_expressions, analyze_expressions_with_values},
-            value::initial_values_from_instance_cells,
+            engine::{
+                analyze_expressions, analyze_expressions_with_values,
+                analyze_expressions_with_values_and_modulus,
+            },
+            value::{initial_values_from_instance_cells, UcpValueFacts},
         },
     };
     use num_bigint::BigInt;
@@ -283,6 +247,19 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct CopyCircuit {
+        _marker: PhantomData<Fr>,
+    }
+
+    //Két selectoros teszt circuit, ahol csak a második gate aktív
+    #[derive(Clone, Debug)]
+    struct CompressedSelectorConfig {
+        advice_a: Column<Advice>,
+        advice_b: Column<Advice>,
+        selector_b: Selector,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct CompressedSelectorCircuit {
         _marker: PhantomData<Fr>,
     }
 
@@ -374,6 +351,72 @@ mod tests {
         }
     }
 
+    impl Circuit<Fr> for CompressedSelectorCircuit {
+        type Config = CompressedSelectorConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+            let advice_a = meta.advice_column();
+            let advice_b = meta.advice_column();
+            let instance = meta.instance_column();
+            let selector_a = meta.selector();
+            let selector_b = meta.selector();
+
+            meta.create_gate("first selected assignment", |meta| {
+                let selector = meta.query_selector(selector_a);
+                let advice = meta.query_advice(advice_a, Rotation::cur());
+                let public = meta.query_instance(instance, Rotation::cur());
+
+                vec![selector * (advice + public - Expression::Constant(Fr::from(5)))]
+            });
+
+            meta.create_gate("second selected assignment", |meta| {
+                let selector = meta.query_selector(selector_b);
+                let advice = meta.query_advice(advice_b, Rotation::cur());
+                let public = meta.query_instance(instance, Rotation::cur());
+
+                vec![selector * (advice + public - Expression::Constant(Fr::from(7)))]
+            });
+
+            CompressedSelectorConfig {
+                advice_a,
+                advice_b,
+                selector_b,
+            }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fr>,
+        ) -> Result<(), Error> {
+            layouter.assign_region(
+                || "compressed selector row",
+                |mut region| {
+                    //Csak a második selector aktív ezen a soron
+                    config.selector_b.enable(&mut region, 0)?;
+                    region.assign_advice(
+                        || "inactive advice",
+                        config.advice_a,
+                        0,
+                        || Value::known(Fr::from(11)),
+                    )?;
+                    region.assign_advice(
+                        || "active advice",
+                        config.advice_b,
+                        0,
+                        || Value::known(Fr::from(5)),
+                    )?;
+                    Ok(())
+                },
+            )
+        }
+    }
+
     //Azt ellenőrzi, hogy Analyzable circuitből UCP problem készül és UCP lefut rajta
     #[test]
     fn extracts_problem_from_analyzable_and_runs_ucp() {
@@ -437,5 +480,35 @@ mod tests {
             result.value_facts.known_value(&target),
             Some(&BigInt::from(2))
         );
+    }
+
+    //Azt ellenőrzi, hogy kompresszált selector fixed értéknél csak az aktív gate-ből tanulunk
+    #[test]
+    fn extracts_compressed_selectors_using_actual_fixed_values() {
+        use zcash_halo2_proofs::dev::MockProver;
+
+        let circuit = CompressedSelectorCircuit::default();
+        let k = 4;
+        let public_inputs = vec![vec![Fr::from(2)]];
+        let prover = MockProver::run(k, &circuit, public_inputs).unwrap();
+        prover.assert_satisfied();
+
+        let analyzable = Analyzable::config_and_synthesize(&circuit, k).unwrap();
+        let inactive_advice = CellId::advice(0, 0);
+        let active_advice = CellId::advice(1, 0);
+        let problem = extract_ucp_problem_with_targets(
+            &analyzable,
+            [inactive_advice.clone(), active_advice.clone()],
+        );
+
+        let result = analyze_expressions_with_values_and_modulus(
+            &problem.expressions,
+            problem.initial_facts,
+            UcpValueFacts::new(),
+            &problem.field_modulus,
+        );
+
+        assert!(!result.facts.is_unique(&inactive_advice));
+        assert!(result.facts.is_unique(&active_advice));
     }
 }

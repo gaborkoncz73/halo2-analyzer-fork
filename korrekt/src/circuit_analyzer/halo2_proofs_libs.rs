@@ -9,7 +9,7 @@ pub use zcash_halo2_proofs::{
     pasta::Fp as Fr,
     plonk::{
         permutation, Advice, Any, Assigned, Assignment, Circuit, Column, ConstraintSystem, Error,
-        Expression, Fixed, FloorPlanner, Instance, Selector,
+        Expression, Fixed, FixedQuery, FloorPlanner, Instance, Selector,
     },
     poly::Rotation,
 };
@@ -31,8 +31,8 @@ pub use pse_halo2_proofs::{
     halo2curves::bn256::Fr,
     plonk::{
         permutation, sealed, sealed::SealedPhase, Advice, Any, Assigned, Assignment, Challenge,
-        Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FloorPlanner,
-        Instance, Phase, Selector,
+        Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FixedQuery,
+        FloorPlanner, Instance, Phase, Selector,
     },
     poly::Rotation,
 };
@@ -53,7 +53,7 @@ pub use pse_v1_halo2_proofs::{
     halo2curves::bn256::Fr,
     plonk::{
         permutation, Advice, Any, Assigned, Assignment, Circuit, Column, ConstraintSystem, Error,
-        Expression, Fixed, FloorPlanner, Instance, Selector, TableColumn,
+        Expression, Fixed, FixedQuery, FloorPlanner, Instance, Selector, TableColumn,
     },
     poly::Rotation,
 };
@@ -72,8 +72,8 @@ pub use axiom_halo2_proofs::{
     halo2curves::bn256::Fr,
     plonk::{
         permutation, sealed, sealed::SealedPhase, Advice, Any, Assigned, Assignment, Challenge,
-        Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FloorPlanner,
-        Instance, Phase, Selector,
+        Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FixedQuery,
+        FloorPlanner, Instance, Phase, Selector,
     },
     poly::Rotation,
 };
@@ -92,8 +92,8 @@ pub use scroll_halo2_proofs::{
     halo2curves::bn256::Fr,
     plonk::{
         permutation, sealed, sealed::SealedPhase, Advice, Any, Assigned, Assignment, Challenge,
-        Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FloorPlanner,
-        Instance, Phase, Selector,
+        Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FixedQuery,
+        FloorPlanner, Instance, Phase, Selector,
     },
     poly,
     poly::Rotation,

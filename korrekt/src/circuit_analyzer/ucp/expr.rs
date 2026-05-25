@@ -99,17 +99,44 @@ impl UcpExpr {
 
     //Negált expression létrehozása
     pub fn neg(expr: UcpExpr) -> Self {
-        Self::Neg(Box::new(expr))
+        match expr {
+            Self::Const(UcpScalar::Zero) => Self::zero(),
+            Self::Const(UcpScalar::Known(value)) => Self::known_constant(-value),
+            expr => Self::Neg(Box::new(expr)),
+        }
     }
 
     //Két expression összeadásának létrehozása
     pub fn add(left: UcpExpr, right: UcpExpr) -> Self {
-        Self::Add(Box::new(left), Box::new(right))
+        match (left, right) {
+            (Self::Const(UcpScalar::Zero), right) => right,
+            (left, Self::Const(UcpScalar::Zero)) => left,
+            (Self::Const(left), Self::Const(right)) => match (left.as_known(), right.as_known()) {
+                (Some(left), Some(right)) => Self::known_constant(left + right),
+                _ => Self::Add(Box::new(Self::Const(left)), Box::new(Self::Const(right))),
+            },
+            (left, right) => Self::Add(Box::new(left), Box::new(right)),
+        }
     }
 
     //Két expression szorzatának létrehozása
     pub fn mul(left: UcpExpr, right: UcpExpr) -> Self {
-        Self::Mul(Box::new(left), Box::new(right))
+        match (left, right) {
+            (Self::Const(UcpScalar::Zero), _) | (_, Self::Const(UcpScalar::Zero)) => Self::zero(),
+            (Self::Const(UcpScalar::Known(value)), expr) if value == BigInt::from(1) => expr,
+            (expr, Self::Const(UcpScalar::Known(value))) if value == BigInt::from(1) => expr,
+            (Self::Const(UcpScalar::Known(value)), expr) if value == BigInt::from(-1) => {
+                Self::neg(expr)
+            }
+            (expr, Self::Const(UcpScalar::Known(value))) if value == BigInt::from(-1) => {
+                Self::neg(expr)
+            }
+            (Self::Const(left), Self::Const(right)) => match (left.as_known(), right.as_known()) {
+                (Some(left), Some(right)) => Self::known_constant(left * right),
+                _ => Self::Mul(Box::new(Self::Const(left)), Box::new(Self::Const(right))),
+            },
+            (left, right) => Self::Mul(Box::new(left), Box::new(right)),
+        }
     }
 
     //Nem nulla, de konkrétan nem ismert skálával szoroz
@@ -121,6 +148,8 @@ impl UcpExpr {
     pub fn scale_by(expr: UcpExpr, scalar: UcpScalar) -> Self {
         match scalar {
             UcpScalar::Zero => Self::zero(),
+            UcpScalar::Known(value) if value == BigInt::from(1) => expr,
+            UcpScalar::Known(value) if value == BigInt::from(-1) => Self::neg(expr),
             UcpScalar::NonZero | UcpScalar::Unknown | UcpScalar::Known(_) => {
                 Self::Scale(Box::new(expr), scalar)
             }

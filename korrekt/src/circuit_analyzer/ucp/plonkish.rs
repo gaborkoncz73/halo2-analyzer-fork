@@ -22,6 +22,30 @@ fn field_to_bigint<F: AnalyzableField>(value: &F) -> BigInt {
     BigInt::from_str_radix(format!("{:?}", value).strip_prefix("0x").unwrap(), 16).unwrap()
 }
 
+//Halo2 field elemből UCP konstans expressiont készít
+fn field_to_ucp_constant<F: AnalyzableField>(value: &F) -> UcpExpr {
+    if bool::from(value.is_zero()) {
+        UcpExpr::zero()
+    } else {
+        UcpExpr::known_constant(field_to_bigint(value))
+    }
+}
+
+//Assigned fixed/selector cella értékét olvassa ki, ha az adott sorban ismert
+fn fixed_query_value<F: AnalyzableField>(
+    query: &FixedQuery,
+    region_begin: usize,
+    row: i32,
+    fixed_values: &[Vec<CellValue<F>>],
+) -> Option<UcpExpr> {
+    let absolute_row = usize::try_from(absolute_row(region_begin, row, query.rotation)).ok()?;
+
+    match fixed_values.get(query.column_index)?.get(absolute_row)? {
+        CellValue::Assigned(value) => Some(field_to_ucp_constant(value)),
+        CellValue::Unassigned | CellValue::Poison(_) => None,
+    }
+}
+
 //Alap Halo2 Expression -> UcpExpr konverzió, selectorokról még nem tud konkrét értéket
 pub fn expression_to_ucp_expr<F: AnalyzableField>(
     expr: &Expression<F>,
@@ -33,6 +57,22 @@ pub fn expression_to_ucp_expr<F: AnalyzableField>(
         region_begin,
         row,
         &HashSet::new(),
+        UcpScalar::Unknown,
+    )
+}
+
+//Konverzió úgy, hogy a fixed/selector cellák konkrét assigned értékeit is felhasználjuk
+pub fn expression_to_ucp_expr_with_fixed_values<F: AnalyzableField>(
+    expr: &Expression<F>,
+    region_begin: usize,
+    row: i32,
+    fixed_values: &[Vec<CellValue<F>>],
+) -> UcpExpr {
+    expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
+        expr,
+        region_begin,
+        row,
+        fixed_values,
         UcpScalar::Unknown,
     )
 }
@@ -96,13 +136,7 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
 ) -> UcpExpr {
     match expr {
         //Konstans érték átvitele UCP konstansként
-        Expression::Constant(value) => {
-            if bool::from(value.is_zero()) {
-                UcpExpr::zero()
-            } else {
-                UcpExpr::known_constant(field_to_bigint(value))
-            }
-        }
+        Expression::Constant(value) => field_to_ucp_constant(value),
         //Selector értéke attól függ, hogy az adott sorban engedélyezve van-e
         Expression::Selector(selector) => selector_constant(selector.0, enabled_selector_indices),
         //Fixed oszlop lehet valódi fixed cella vagy selector fixed oszlop
@@ -198,12 +232,108 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Selector indexből UCP konstans: aktív esetben nonzero, inaktív esetben zero
+//Selector indexből UCP konstans: aktív esetben 1, inaktív esetben zero
 fn selector_constant(selector_index: usize, enabled_selector_indices: &HashSet<usize>) -> UcpExpr {
     if enabled_selector_indices.contains(&selector_index) {
-        UcpExpr::non_zero_constant()
+        UcpExpr::known_constant_i64(1)
     } else {
         UcpExpr::zero()
+    }
+}
+
+//Általános fixed-value aware konverzió, ahol a caller mondja meg az absztrakt selector skalárt
+pub fn expression_to_ucp_expr_with_fixed_values_and_selector_scalar<F: AnalyzableField>(
+    expr: &Expression<F>,
+    region_begin: usize,
+    row: i32,
+    fixed_values: &[Vec<CellValue<F>>],
+    selector_scalar: UcpScalar,
+) -> UcpExpr {
+    match expr {
+        //Konstans érték átvitele UCP konstansként
+        Expression::Constant(value) => field_to_ucp_constant(value),
+        //Raw selector csak nem-kompresszált expressionben fordulhat elő
+        Expression::Selector(_) => UcpExpr::scalar_constant(selector_scalar.clone()),
+        //Fixed query-nél ha van assigned érték, konstansként használjuk; különben fixed cella marad
+        Expression::Fixed(query) => fixed_query_value(query, region_begin, row, fixed_values)
+            .unwrap_or_else(|| {
+                UcpExpr::var(CellId::fixed(
+                    query.column_index,
+                    absolute_row(region_begin, row, query.rotation),
+                ))
+            }),
+        //Advice query-ből UCP advice cella lesz
+        Expression::Advice(query) => UcpExpr::var(CellId::advice(
+            query.column_index,
+            absolute_row(region_begin, row, query.rotation),
+        )),
+        //Instance query-ből UCP instance cella lesz
+        Expression::Instance(query) => UcpExpr::var(CellId::instance(
+            query.column_index,
+            absolute_row(region_begin, row, query.rotation),
+        )),
+        //Negált Halo2 expression rekurzívan UCP negálássá alakul
+        Expression::Negated(inner) => UcpExpr::neg(
+            expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
+                inner,
+                region_begin,
+                row,
+                fixed_values,
+                selector_scalar.clone(),
+            ),
+        ),
+        //Halo2 összeg rekurzívan UCP összeadássá alakul
+        Expression::Sum(left, right) => UcpExpr::add(
+            expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
+                left,
+                region_begin,
+                row,
+                fixed_values,
+                selector_scalar.clone(),
+            ),
+            expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
+                right,
+                region_begin,
+                row,
+                fixed_values,
+                selector_scalar.clone(),
+            ),
+        ),
+        //Halo2 szorzat rekurzívan UCP szorzássá alakul
+        Expression::Product(left, right) => UcpExpr::mul(
+            expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
+                left,
+                region_begin,
+                row,
+                fixed_values,
+                selector_scalar.clone(),
+            ),
+            expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
+                right,
+                region_begin,
+                row,
+                fixed_values,
+                selector_scalar.clone(),
+            ),
+        ),
+        //Halo2 skálázásnál nulla skála azonnal nulla expression
+        Expression::Scaled(inner, scale) => UcpExpr::scale_by(
+            expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
+                inner,
+                region_begin,
+                row,
+                fixed_values,
+                selector_scalar.clone(),
+            ),
+            UcpScalar::known(field_to_bigint(scale)),
+        ),
+        #[cfg(any(
+            feature = "use_pse_halo2_proofs",
+            feature = "use_axiom_halo2_proofs",
+            feature = "use_scroll_halo2_proofs"
+        ))]
+        //Challenge értékét itt nem modellezzük pontosan, ezért absztrakt konstans lesz
+        Expression::Challenge(_) => UcpExpr::constant(),
     }
 }
 
@@ -217,13 +347,7 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
 ) -> UcpExpr {
     match expr {
         //Konstans érték átvitele UCP konstansként
-        Expression::Constant(value) => {
-            if bool::from(value.is_zero()) {
-                UcpExpr::zero()
-            } else {
-                UcpExpr::known_constant(field_to_bigint(value))
-            }
-        }
+        Expression::Constant(value) => field_to_ucp_constant(value),
         //Selector értékét a caller által megadott absztrakt skalár adja
         Expression::Selector(_) => UcpExpr::scalar_constant(selector_scalar.clone()),
         //Fixed query lehet selector fixed oszlop vagy valódi fixed cella
@@ -471,5 +595,79 @@ mod tests {
 
         assert!(!inactive_result.facts.is_unique(&CellId::advice(0, 0)));
         assert!(inactive_result.all_expressions_unique());
+    }
+
+    //Azt ellenőrzi, hogy assigned fixed selector értékből konkrét 1 lesz, így tiszta gate marad
+    #[test]
+    fn fixed_value_conversion_uses_assigned_one_selector() {
+        use crate::circuit_analyzer::ucp::engine::analyze_expressions;
+        use crate::circuit_analyzer::ucp::facts::initial_facts;
+
+        let mut cs = ConstraintSystem::<Fr>::default();
+        let selector_fixed = cs.fixed_column();
+        let advice = cs.advice_column();
+        let instance = cs.instance_column();
+
+        cs.create_gate("fixed selected assignment", |meta| {
+            let selector = meta.query_fixed(selector_fixed);
+            let advice = meta.query_advice(advice, Rotation::cur());
+            let public = meta.query_instance(instance, Rotation::cur());
+
+            vec![selector * (advice + public - Expression::Constant(Fr::from(5)))]
+        });
+
+        let fixed_values = vec![vec![CellValue::Assigned(Fr::from(1))]];
+        let expr =
+            expression_to_ucp_expr_with_fixed_values(&cs.gates[0].polys[0], 0, 0, &fixed_values);
+        let result = analyze_expressions(&[expr], initial_facts([CellId::instance(0, 0)], []));
+
+        assert!(result.facts.is_unique(&CellId::advice(0, 0)));
+        assert!(result.all_expressions_unique());
+    }
+
+    //Azt ellenőrzi, hogy assigned fixed selector 0 esetén az egész constraint nulla lesz
+    #[test]
+    fn fixed_value_conversion_uses_assigned_zero_selector() {
+        use crate::circuit_analyzer::ucp::{
+            engine::analyze_expressions_with_values_and_modulus,
+            facts::initial_facts,
+            value::{UcpValueDomain, UcpValueFacts},
+        };
+        use num_bigint::BigInt;
+
+        let mut cs = ConstraintSystem::<Fr>::default();
+        let selector_fixed = cs.fixed_column();
+        let x = cs.instance_column();
+        let b0 = cs.advice_column();
+        let b1 = cs.advice_column();
+
+        cs.create_gate("inactive fixed selected base conv", |meta| {
+            let selector = meta.query_fixed(selector_fixed);
+            let x = meta.query_instance(x, Rotation::cur());
+            let b0 = meta.query_advice(b0, Rotation::cur());
+            let b1 = meta.query_advice(b1, Rotation::cur());
+
+            vec![selector * (b0 + Expression::Constant(Fr::from(2)) * b1 - x)]
+        });
+
+        let fixed_values = vec![vec![CellValue::Assigned(Fr::from(0))]];
+        let expr =
+            expression_to_ucp_expr_with_fixed_values(&cs.gates[0].polys[0], 0, 0, &fixed_values);
+        let mut value_facts = UcpValueFacts::new();
+        let boolean_domain =
+            UcpValueDomain::finite_set([BigInt::from(0), BigInt::from(1)]).unwrap();
+        value_facts.mark_domain(CellId::advice(0, 0), boolean_domain.clone());
+        value_facts.mark_domain(CellId::advice(1, 0), boolean_domain);
+
+        let result = analyze_expressions_with_values_and_modulus(
+            &[expr],
+            initial_facts([CellId::instance(0, 0)], []),
+            value_facts,
+            &BigInt::from(101),
+        );
+
+        assert!(!result.facts.is_unique(&CellId::advice(0, 0)));
+        assert!(!result.facts.is_unique(&CellId::advice(1, 0)));
+        assert!(result.all_expressions_unique());
     }
 }
