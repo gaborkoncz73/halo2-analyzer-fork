@@ -8,11 +8,10 @@
 //   4. Ha az SMT unique-nak bizonyítja, hozzáadjuk K-hoz, és újra futtatjuk az UCP-t.
 // Így az SMT-nek kevesebb változót kell szabadon kezelnie, az UCP pedig új információból tovább tud propagálni.
 use super::{
-    cell::{CellId, CellKind},
+    cell::CellId,
+    choose_var::choose_query_cell,
     engine::{analyze_expressions_with_values_and_modulus, UcpResult, UcpTargetCheck},
-    expr::UcpExpr,
     extractor::extract_ucp_problem_with_targets,
-    facts::UcpFacts,
     value::initial_values_from_instance_cells,
 };
 use crate::{
@@ -126,6 +125,8 @@ where
         let Some(query_cell) = choose_query_cell(
             &problem.expressions,
             &ucp_result.facts,
+            &ucp_result.value_facts,
+            &problem.field_modulus,
             &problem.target_cells,
             &queried_cells,
         ) else {
@@ -217,56 +218,6 @@ where
                 value_facts = ucp_result.value_facts.clone();
                 facts = ucp_result.facts;
             }
-        }
-    }
-}
-
-//Kiválasztja, melyik cellára kérdezzünk rá SMT-vel
-fn choose_query_cell(
-    expressions: &[UcpExpr],
-    facts: &UcpFacts,
-    target_cells: &[CellId],
-    queried_cells: &HashSet<CellId>,
-) -> Option<CellId> {
-    //Először mindig a még nem unique targeteket kérdezzük, mert ezek döntik el a végső választ
-    for target in target_cells {
-        if !facts.is_unique(target) && !queried_cells.contains(target) {
-            return Some(target.clone());
-        }
-    }
-
-    //Ha target nincs, akkor gyűjtünk minden advice cellát az expressionökből
-    let mut advice_cells = HashSet::new();
-    for expr in expressions {
-        collect_advice_cells(expr, &mut advice_cells);
-    }
-
-    //Csak olyan advice cellát kérdezünk, ami még nem unique és még nem kérdeztük
-    let mut advice_cells: Vec<CellId> = advice_cells
-        .into_iter()
-        .filter(|cell| !facts.is_unique(cell) && !queried_cells.contains(cell))
-        .collect();
-    //Deterministikus választás, hogy a tesztek és futások reprodukálhatók legyenek
-    advice_cells.sort();
-    advice_cells.into_iter().next()
-}
-
-//Expressionből kigyűjti az advice cellákat SMT query választáshoz
-fn collect_advice_cells(expr: &UcpExpr, cells: &mut HashSet<CellId>) {
-    match expr {
-        UcpExpr::Var(cell) => {
-            //Csak advice cellát kérdezünk SMT-vel; instance/fixed eleve kezdeti K-ban lehet
-            if matches!(cell.kind, CellKind::Advice) {
-                cells.insert(cell.clone());
-            }
-        }
-        UcpExpr::Const(_) => {}
-        //Unary expressionnél a belső részt járjuk be
-        UcpExpr::Neg(inner) | UcpExpr::Scale(inner, _) => collect_advice_cells(inner, cells),
-        //Binary expressionnél mindkét oldalt bejárjuk
-        UcpExpr::Add(left, right) | UcpExpr::Mul(left, right) => {
-            collect_advice_cells(left, cells);
-            collect_advice_cells(right, cells);
         }
     }
 }
