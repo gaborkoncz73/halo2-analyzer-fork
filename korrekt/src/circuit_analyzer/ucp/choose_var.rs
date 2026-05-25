@@ -37,25 +37,26 @@ struct CandidateScore {
     target_distance: usize,
 }
 
-//Kiválasztja, melyik cellára kérdezzünk rá SMT-vel
+//Kiválasztja, melyik cellára kérdezzünk rá SMT-vel a cikk szerinti V = (O unio W) \ K halmazból
 pub(crate) fn choose_query_cell(
     expressions: &[UcpExpr],
     facts: &UcpFacts,
     value_facts: &UcpValueFacts,
     field_modulus: &BigInt,
-    target_cells: &[CellId],
+    output_cells: &[CellId],
+    witness_cells: &[CellId],
     queried_cells: &HashSet<CellId>,
 ) -> Option<CellId> {
-    let candidates = collect_candidate_cells(expressions, facts, target_cells, queried_cells);
+    let candidates = collect_candidate_cells(output_cells, witness_cells, facts, queried_cells);
     if candidates.is_empty() {
         return None;
     }
 
     let expression_infos = expression_infos(expressions, facts);
-    let target_distances = target_distances(&expression_infos, target_cells);
-    let target_set: HashSet<CellId> = target_cells.iter().cloned().collect();
+    let target_distances = target_distances(&expression_infos, output_cells);
+    let target_set: HashSet<CellId> = output_cells.iter().cloned().collect();
     let baseline_unique_expressions = count_unique_expressions(expressions, facts);
-    let baseline_unique_targets = count_unique_targets(target_cells, facts);
+    let baseline_unique_targets = count_unique_targets(output_cells, facts);
     let baseline_unique_cells = facts.unique_cells().len();
 
     candidates
@@ -67,7 +68,7 @@ pub(crate) fn choose_query_cell(
                 facts,
                 value_facts,
                 field_modulus,
-                target_cells,
+                output_cells,
                 &target_set,
                 &expression_infos,
                 &target_distances,
@@ -81,29 +82,31 @@ pub(crate) fn choose_query_cell(
 }
 
 fn collect_candidate_cells(
-    expressions: &[UcpExpr],
+    output_cells: &[CellId],
+    witness_cells: &[CellId],
     facts: &UcpFacts,
-    target_cells: &[CellId],
     queried_cells: &HashSet<CellId>,
 ) -> BTreeSet<CellId> {
     let mut candidates = BTreeSet::new();
 
-    //Targetek mindig jelöltek lehetnek, mert ezek döntik el a végső választ
-    for target in target_cells {
-        if !facts.is_unique(target) && !queried_cells.contains(target) {
-            candidates.insert(target.clone());
+    //O: output/target cellák
+    for output in output_cells {
+        if !facts.is_unique(output) && !queried_cells.contains(output) {
+            candidates.insert(output.clone());
         }
     }
 
-    //Nem-target esetben csak advice cellát kérdezünk SMT-vel
-    for expr in expressions {
-        collect_advice_cells(expr, &mut candidates);
+    //W: witness/advice cellák. Instance/fixed cellára nem kérdezünk SMT-vel.
+    for witness in witness_cells {
+        if matches!(witness.kind, CellKind::Advice)
+            && !facts.is_unique(witness)
+            && !queried_cells.contains(witness)
+        {
+            candidates.insert(witness.clone());
+        }
     }
 
     candidates
-        .into_iter()
-        .filter(|cell| !facts.is_unique(cell) && !queried_cells.contains(cell))
-        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -277,22 +280,6 @@ fn count_unique_targets(target_cells: &[CellId], facts: &UcpFacts) -> usize {
         .count()
 }
 
-fn collect_advice_cells(expr: &UcpExpr, cells: &mut BTreeSet<CellId>) {
-    match expr {
-        UcpExpr::Var(cell) => {
-            if matches!(cell.kind, CellKind::Advice) {
-                cells.insert(cell.clone());
-            }
-        }
-        UcpExpr::Const(_) => {}
-        UcpExpr::Neg(inner) | UcpExpr::Scale(inner, _) => collect_advice_cells(inner, cells),
-        UcpExpr::Add(left, right) | UcpExpr::Mul(left, right) => {
-            collect_advice_cells(left, cells);
-            collect_advice_cells(right, cells);
-        }
-    }
-}
-
 fn collect_cells(expr: &UcpExpr, cells: &mut BTreeSet<CellId>) {
     match expr {
         UcpExpr::Var(cell) => {
@@ -343,11 +330,12 @@ mod tests {
             &UcpFacts::from_iter([e]),
             &UcpValueFacts::new(),
             &modulus(),
-            &[target_a, target_b],
+            &[target_a.clone(), target_b.clone()],
+            &[x, target_a, target_b],
             &HashSet::new(),
         );
 
-        assert_eq!(chosen, Some(x));
+        assert_eq!(chosen, Some(CellId::advice(0, 0)));
     }
 
     //Azt ellenőrzi, hogy valódi holtversenyben target cellát választunk
@@ -357,7 +345,7 @@ mod tests {
         let other = CellId::advice(1, 0);
         let expressions = vec![UcpExpr::add(
             UcpExpr::var(target.clone()),
-            UcpExpr::var(other),
+            UcpExpr::var(other.clone()),
         )];
 
         let chosen = choose_query_cell(
@@ -366,6 +354,7 @@ mod tests {
             &UcpValueFacts::new(),
             &modulus(),
             &[target.clone()],
+            &[target.clone(), other],
             &HashSet::new(),
         );
 
@@ -378,7 +367,7 @@ mod tests {
         let first = CellId::advice(0, 0);
         let second = CellId::advice(1, 0);
         let expressions = vec![UcpExpr::var(first.clone()), UcpExpr::var(second.clone())];
-        let queried = HashSet::from([first]);
+        let queried = HashSet::from([first.clone()]);
 
         let chosen = choose_query_cell(
             &expressions,
@@ -386,9 +375,31 @@ mod tests {
             &UcpValueFacts::new(),
             &modulus(),
             &[],
+            &[first, second.clone()],
             &queried,
         );
 
         assert_eq!(chosen, Some(second));
+    }
+
+    //Azt ellenőrzi, hogy nem minden expressionben szereplő advice automatikus jelölt,
+    //hanem tényleg az explicit V = O unio W halmazból választunk
+    #[test]
+    fn uses_explicit_output_and_witness_candidate_set() {
+        let allowed = CellId::advice(0, 0);
+        let decoy = CellId::advice(1, 0);
+        let expressions = vec![UcpExpr::var(allowed.clone()), UcpExpr::var(decoy)];
+
+        let chosen = choose_query_cell(
+            &expressions,
+            &UcpFacts::new(),
+            &UcpValueFacts::new(),
+            &modulus(),
+            &[],
+            &[allowed.clone()],
+            &HashSet::new(),
+        );
+
+        assert_eq!(chosen, Some(allowed));
     }
 }

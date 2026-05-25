@@ -101,7 +101,6 @@ impl UcpExpr {
     pub fn neg(expr: UcpExpr) -> Self {
         match expr {
             Self::Const(UcpScalar::Zero) => Self::zero(),
-            Self::Const(UcpScalar::Known(value)) => Self::known_constant(-value),
             expr => Self::Neg(Box::new(expr)),
         }
     }
@@ -111,10 +110,6 @@ impl UcpExpr {
         match (left, right) {
             (Self::Const(UcpScalar::Zero), right) => right,
             (left, Self::Const(UcpScalar::Zero)) => left,
-            (Self::Const(left), Self::Const(right)) => match (left.as_known(), right.as_known()) {
-                (Some(left), Some(right)) => Self::known_constant(left + right),
-                _ => Self::Add(Box::new(Self::Const(left)), Box::new(Self::Const(right))),
-            },
             (left, right) => Self::Add(Box::new(left), Box::new(right)),
         }
     }
@@ -131,10 +126,6 @@ impl UcpExpr {
             (expr, Self::Const(UcpScalar::Known(value))) if value == BigInt::from(-1) => {
                 Self::neg(expr)
             }
-            (Self::Const(left), Self::Const(right)) => match (left.as_known(), right.as_known()) {
-                (Some(left), Some(right)) => Self::known_constant(left * right),
-                _ => Self::Mul(Box::new(Self::Const(left)), Box::new(Self::Const(right))),
-            },
             (left, right) => Self::Mul(Box::new(left), Box::new(right)),
         }
     }

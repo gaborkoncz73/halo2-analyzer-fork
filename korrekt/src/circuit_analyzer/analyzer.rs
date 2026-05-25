@@ -1,7 +1,10 @@
 use super::{
     analyzable::{Analyzable, AnalyzableField},
     halo2_proofs_libs::*,
-    ucp::cell::{CellId, CellKind},
+    ucp::{
+        cell::{CellId, CellKind},
+        value::{UcpValueDomain, UcpValueFacts},
+    },
 };
 use anyhow::{anyhow, Context, Result};
 use log::info;
@@ -54,6 +57,7 @@ pub struct Analyzer<F: AnalyzableField> {
     pub cycle_bigint_value: HashMap<String, BigInt>,
     pub selector_indices: HashSet<usize>,
     pub ucp_unique_variables: HashSet<String>,
+    pub ucp_value_domains: Vec<(String, UcpValueDomain)>,
 }
 
 #[derive(Debug)]
@@ -138,11 +142,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         analysis_type: AnalyzerType,
         analyzer_input: Option<&AnalyzerInput>,
     ) -> Result<Self, anyhow::Error> {
-        let modulus = bn256::fr::MODULUS_STR;
-        let without_prefix = modulus.trim_start_matches("0x");
-        let prime = BigInt::from_str_radix(without_prefix, 16)
-            .unwrap()
-            .to_string();
+        let prime = Self::analyzer_field_modulus()?.to_string();
         let analyzable = Analyzable::config_and_synthesize(circuit, k)?;
 
         // Convert fixed to an equivalent matrix with BigInt type instead of CellValue
@@ -198,6 +198,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             cycle_bigint_value,
             selector_indices,
             ucp_unique_variables: HashSet::new(),
+            ucp_value_domains: Vec::new(),
         };
 
         fs::create_dir_all("src/output/").unwrap();
@@ -761,6 +762,21 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         &self.ucp_unique_variables
     }
 
+    pub fn set_ucp_value_facts(&mut self, value_facts: &UcpValueFacts) {
+        self.ucp_value_domains = value_facts
+            .domains()
+            .iter()
+            .filter_map(|(cell, domain)| {
+                self.ucp_cell_to_smt_variable_name(cell)
+                    .map(|variable| (variable, domain.clone()))
+            })
+            .collect();
+    }
+
+    pub fn ucp_value_domains(&self) -> &[(String, UcpValueDomain)] {
+        &self.ucp_value_domains
+    }
+
     pub fn query_ucp_cell_uniqueness(
         &mut self,
         analyzer_input: &AnalyzerInput,
@@ -779,6 +795,12 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             vars_to_declare.push(query_variable.clone());
         }
 
+        for (var, _) in &self.ucp_value_domains {
+            if self.all_variables.insert(var.clone()) {
+                vars_to_declare.push(var.clone());
+            }
+        }
+
         if matches!(
             analyzer_input.verification_method,
             VerificationMethod::Specific
@@ -792,6 +814,9 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
 
         let variables = self.all_variables.clone();
         let ucp_unique_variables = self.ucp_unique_variables.clone();
+        let ucp_value_domains = self.ucp_value_domains.clone();
+        let prime =
+            BigInt::from_str_radix(&self.prime, 10).context("Failed to parse analyzer prime!")?;
 
         if let Some(smt_file) = self.smt_file.as_mut() {
             let mut printer = Printer::new(smt_file);
@@ -799,6 +824,8 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             for var in vars_to_declare {
                 printer.write_var(var);
             }
+
+            Self::write_ucp_value_domain_assertions(&mut printer, &ucp_value_domains, &prime)?;
 
             if matches!(
                 analyzer_input.verification_method,
@@ -889,6 +916,70 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             }
         } else {
             Err(anyhow!("Failed to open SMT file!"))
+        }
+    }
+
+    fn write_ucp_value_domain_assertions(
+        printer: &mut Printer<File>,
+        value_domains: &[(String, UcpValueDomain)],
+        prime: &BigInt,
+    ) -> Result<()> {
+        for (var, domain) in value_domains {
+            match domain {
+                UcpValueDomain::Exact(value) => {
+                    printer.write_assert(
+                        var.clone(),
+                        Self::normalize_ucp_field_value(value, prime),
+                        NodeType::Advice,
+                        Operation::Equal,
+                    );
+                }
+                UcpValueDomain::FiniteSet(values) => {
+                    let mut domain_assertion = String::new();
+                    for value in values {
+                        domain_assertion.push_str(&Self::smt_field_equality(var, value, prime));
+                    }
+                    printer.write_assert_bool(domain_assertion, Operation::Or);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn smt_field_equality(var: &str, value: &BigInt, prime: &BigInt) -> String {
+        format!(
+            "( = {} (as ff{} F))",
+            var,
+            Self::normalize_ucp_field_value(value, prime)
+        )
+    }
+
+    fn normalize_ucp_field_value(value: &BigInt, prime: &BigInt) -> String {
+        let mut normalized = value % prime;
+        if normalized.sign() == Sign::Minus {
+            normalized += prime;
+        }
+        normalized.to_string()
+    }
+
+    fn analyzer_field_modulus() -> Result<BigInt> {
+        #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+        {
+            Self::parse_field_modulus(F::MODULUS)
+        }
+
+        #[cfg(feature = "use_pse_v1_halo2_proofs")]
+        {
+            Self::parse_field_modulus(bn256::fr::MODULUS_STR)
+        }
+    }
+
+    fn parse_field_modulus(raw_modulus: &str) -> Result<BigInt> {
+        if let Some(hex) = raw_modulus.strip_prefix("0x") {
+            BigInt::from_str_radix(hex, 16).context("Failed to parse hex field modulus")
+        } else {
+            BigInt::from_str_radix(raw_modulus, 10).context("Failed to parse decimal field modulus")
         }
     }
 

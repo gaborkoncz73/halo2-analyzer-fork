@@ -140,6 +140,12 @@ fn analyze_expressions_with_optional_modulus(
     let mut facts = initial_facts;
     //Delta: ismert értékek és domainek
     let mut value_facts = initial_value_facts;
+    //Ha Delta már induláskor pontos értéket tud egy cellára, abból uniqueness is következik
+    for (cell, domain) in value_facts.domains() {
+        if domain.is_singleton() {
+            facts.mark_unique(cell.clone());
+        }
+    }
     //Addig futunk, amíg valamelyik szabály új információt tanul
     let mut changed = true;
 

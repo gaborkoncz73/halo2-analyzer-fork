@@ -9,7 +9,7 @@ pub use zcash_halo2_proofs::{
     pasta::Fp as Fr,
     plonk::{
         permutation, Advice, Any, Assigned, Assignment, Circuit, Column, ConstraintSystem, Error,
-        Expression, Fixed, FixedQuery, FloorPlanner, Instance, Selector,
+        Expression, Fixed, FixedQuery, FloorPlanner, Instance, Selector, TableColumn,
     },
     poly::Rotation,
 };
@@ -32,7 +32,7 @@ pub use pse_halo2_proofs::{
     plonk::{
         permutation, sealed, sealed::SealedPhase, Advice, Any, Assigned, Assignment, Challenge,
         Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FixedQuery,
-        FloorPlanner, Instance, Phase, Selector,
+        FloorPlanner, Instance, Phase, Selector, TableColumn,
     },
     poly::Rotation,
 };
@@ -73,7 +73,7 @@ pub use axiom_halo2_proofs::{
     plonk::{
         permutation, sealed, sealed::SealedPhase, Advice, Any, Assigned, Assignment, Challenge,
         Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FixedQuery,
-        FloorPlanner, Instance, Phase, Selector,
+        FloorPlanner, Instance, Phase, Selector, TableColumn,
     },
     poly::Rotation,
 };
@@ -93,7 +93,7 @@ pub use scroll_halo2_proofs::{
     plonk::{
         permutation, sealed, sealed::SealedPhase, Advice, Any, Assigned, Assignment, Challenge,
         Circuit, Column, ConstraintSystem, Error, Expression, FirstPhase, Fixed, FixedQuery,
-        FloorPlanner, Instance, Phase, Selector,
+        FloorPlanner, Instance, Phase, Selector, TableColumn,
     },
     poly,
     poly::Rotation,

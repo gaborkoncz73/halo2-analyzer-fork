@@ -1,8 +1,14 @@
-use super::{cell::CellId, expr::UcpExpr, facts::UcpFacts};
+use super::{
+    cell::{CellId, CellKind},
+    expr::UcpExpr,
+    facts::UcpFacts,
+};
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use super::{
-    facts::initial_facts_from_expressions, plonkish::expression_to_ucp_expr_with_fixed_values,
+    facts::initial_facts_from_expressions,
+    plonkish::{expression_to_ucp_expr_with_fixed_values, field_to_bigint},
+    value::{UcpValueDomain, UcpValueFacts},
 };
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use crate::circuit_analyzer::{
@@ -12,15 +18,23 @@ use crate::circuit_analyzer::{
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use num::Num;
 use num_bigint::BigInt;
+use std::collections::BTreeSet;
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use std::collections::HashSet;
 
-//Egy teljes UCP bemenet: constraint expressionök, kezdeti K és ellenőrizendő target cellák
+//Egy teljes UCP bemenet: constraint expressionök, kezdeti K, outputok, witnessek és field modulus
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpProblem {
     pub expressions: Vec<UcpExpr>,
     pub initial_facts: UcpFacts,
+    //A régi név kompatibilitás miatt marad: ugyanaz, mint az output_cells
     pub target_cells: Vec<CellId>,
+    //O halmaz: azok az output/target cellák, amelyek constrained voltát végül bizonyítani akarjuk
+    pub output_cells: Vec<CellId>,
+    //W halmaz: a constraint rendszerben szereplő witness/advice cellák
+    pub witness_cells: Vec<CellId>,
+    //Delta kezdeti része: lookup/range table domainekből tanult értékhalmazok
+    pub initial_value_facts: UcpValueFacts,
     pub field_modulus: BigInt,
 }
 
@@ -43,13 +57,245 @@ where
     let expressions = extract_ucp_expressions(analyzable);
     //Az expressionökben szereplő instance/fixed cellákból indul a K halmaz
     let initial_facts = initial_facts_from_expressions(&expressions);
+    //O: a caller által megadott output/target cellák
+    let output_cells = dedup_cells_preserving_order(target_cells);
+    //W: a circuitben assignolt és/vagy constraintben hivatkozott advice cellák
+    let witness_cells = witness_cells_from_analyzable(analyzable, &expressions);
+    //Delta: lookup táblákból biztonságosan kinyerhető finite domainek
+    let initial_value_facts = extract_lookup_value_facts(analyzable);
 
     UcpProblem {
         expressions,
         initial_facts,
-        target_cells: target_cells.into_iter().collect(),
+        target_cells: output_cells.clone(),
+        output_cells,
+        witness_cells,
+        initial_value_facts,
         field_modulus: field_modulus::<F>(),
     }
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Lookup argumentekből kezdeti Delta domaineket tanul.
+//Csak akkor következtetünk, ha az input az adott aktív sorban egy sima advice cellára egyszerűsödik,
+//a table oldal pedig konkrét assigned fixed/table értékek véges halmaza.
+pub fn extract_lookup_value_facts<F: AnalyzableField>(analyzable: &Analyzable<F>) -> UcpValueFacts {
+    let mut values = UcpValueFacts::new();
+
+    for region in &analyzable.regions {
+        if !region_has_advice_cell(region) {
+            continue;
+        }
+
+        let Some((region_begin, region_end)) = region.rows else {
+            continue;
+        };
+
+        for absolute_row in region_begin..=region_end {
+            let row = i32::try_from(absolute_row - region_begin)
+                .expect("UCP local row does not fit into i32");
+
+            for lookup in &analyzable.cs.lookups {
+                for (input_expr, table_expr) in lookup
+                    .input_expressions
+                    .iter()
+                    .zip(lookup.table_expressions.iter())
+                {
+                    let Some(domain) = lookup_table_domain(table_expr, &analyzable.fixed) else {
+                        continue;
+                    };
+
+                    let input = expression_to_ucp_expr_with_fixed_values(
+                        input_expr,
+                        region_begin,
+                        row,
+                        &analyzable.fixed,
+                    );
+
+                    if let Some(cell) = lookup_input_cell(&input) {
+                        values.mark_domain(cell, domain);
+                    }
+                }
+            }
+        }
+    }
+
+    values
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn region_has_advice_cell(region: &Region) -> bool {
+    #[cfg(feature = "use_zcash_halo2_proofs")]
+    {
+        region
+            .cells
+            .iter()
+            .any(|(column, row)| assigned_advice_cell_id(column, *row).is_some())
+    }
+
+    #[cfg(any(
+        feature = "use_pse_halo2_proofs",
+        feature = "use_axiom_halo2_proofs",
+        feature = "use_scroll_halo2_proofs"
+    ))]
+    {
+        region
+            .cells
+            .iter()
+            .any(|((column, row), _)| assigned_advice_cell_id(column, *row).is_some())
+    }
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn lookup_input_cell(expr: &UcpExpr) -> Option<CellId> {
+    match expr {
+        UcpExpr::Var(cell) if matches!(cell.kind, CellKind::Advice) => Some(cell.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn lookup_table_domain<F: AnalyzableField>(
+    expr: &Expression<F>,
+    fixed_values: &[Vec<CellValue<F>>],
+) -> Option<UcpValueDomain> {
+    let Expression::Fixed(query) = expr else {
+        return None;
+    };
+
+    //A Halo2 table expression normál esetben Rotation::cur(); ettől eltérő fixed expressiont
+    //nem kezelünk range-domain táblaként.
+    if query.rotation != Rotation::cur() {
+        return None;
+    }
+
+    let column_values = fixed_values.get(query.column_index)?;
+    let mut domain_values = Vec::with_capacity(column_values.len());
+
+    for value in column_values {
+        match value {
+            CellValue::Assigned(value) => domain_values.push(field_to_bigint(value)),
+            //Lookup table domainhez csak ténylegesen assignolt table értékeket veszünk fel.
+            //Az Unassigned itt nem bizonyított table entry, ezért nem tanulunk belőle nullát.
+            CellValue::Unassigned => {}
+            //Poison nem valódi table érték; ilyenkor inkább semmit nem tanulunk.
+            CellValue::Poison(_) => return None,
+        }
+    }
+
+    UcpValueDomain::finite_set(domain_values)
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+//Analyzable circuitből és expressionökből kigyűjti a W halmazt
+pub fn witness_cells_from_analyzable<F: AnalyzableField>(
+    analyzable: &Analyzable<F>,
+    expressions: &[UcpExpr],
+) -> Vec<CellId> {
+    let mut cells = BTreeSet::new();
+
+    for region in &analyzable.regions {
+        collect_region_witness_cells(region, &mut cells);
+    }
+
+    for expr in expressions {
+        collect_witness_cells(expr, &mut cells);
+    }
+
+    cells.into_iter().collect()
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn collect_region_witness_cells(region: &Region, cells: &mut BTreeSet<CellId>) {
+    #[cfg(feature = "use_zcash_halo2_proofs")]
+    {
+        for (column, row) in &region.cells {
+            if let Some(cell) = assigned_advice_cell_id(column, *row) {
+                cells.insert(cell);
+            }
+        }
+    }
+
+    #[cfg(any(
+        feature = "use_pse_halo2_proofs",
+        feature = "use_axiom_halo2_proofs",
+        feature = "use_scroll_halo2_proofs"
+    ))]
+    {
+        for ((column, row), _) in &region.cells {
+            if let Some(cell) = assigned_advice_cell_id(column, *row) {
+                cells.insert(cell);
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+fn assigned_advice_cell_id(column: &Column<Any>, row: usize) -> Option<CellId> {
+    let row = i32::try_from(row).ok()?;
+
+    #[cfg(feature = "use_zcash_halo2_proofs")]
+    {
+        match column.column_type() {
+            Any::Advice => Some(CellId::advice(column.index, row)),
+            Any::Fixed | Any::Instance => None,
+        }
+    }
+
+    #[cfg(any(
+        feature = "use_pse_halo2_proofs",
+        feature = "use_axiom_halo2_proofs",
+        feature = "use_scroll_halo2_proofs"
+    ))]
+    {
+        match column.column_type() {
+            Any::Advice(_) => Some(CellId::advice(column.index, row)),
+            Any::Fixed | Any::Instance => None,
+        }
+    }
+}
+
+//Expression listából kigyűjti a W halmaz expressionökben hivatkozott részét
+pub fn witness_cells_from_expressions(expressions: &[UcpExpr]) -> Vec<CellId> {
+    let mut cells = BTreeSet::new();
+
+    for expr in expressions {
+        collect_witness_cells(expr, &mut cells);
+    }
+
+    cells.into_iter().collect()
+}
+
+fn collect_witness_cells(expr: &UcpExpr, cells: &mut BTreeSet<CellId>) {
+    match expr {
+        UcpExpr::Var(cell) => {
+            if matches!(cell.kind, CellKind::Advice) {
+                cells.insert(cell.clone());
+            }
+        }
+        UcpExpr::Const(_) => {}
+        UcpExpr::Neg(inner) | UcpExpr::Scale(inner, _) => collect_witness_cells(inner, cells),
+        UcpExpr::Add(left, right) | UcpExpr::Mul(left, right) => {
+            collect_witness_cells(left, cells);
+            collect_witness_cells(right, cells);
+        }
+    }
+}
+
+fn dedup_cells_preserving_order<I>(cells: I) -> Vec<CellId>
+where
+    I: IntoIterator<Item = CellId>,
+{
+    let mut seen = BTreeSet::new();
+    let mut unique_cells = Vec::new();
+
+    for cell in cells {
+        if seen.insert(cell.clone()) {
+            unique_cells.push(cell);
+        }
+    }
+
+    unique_cells
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
@@ -199,7 +445,6 @@ fn permutation_cell_id(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 //Megmondja, hogy az adott abszolút sorban van-e engedélyezett selector
 fn row_has_enabled_selector(region: &Region, absolute_row: usize) -> bool {
     region
@@ -219,7 +464,7 @@ mod tests {
                 analyze_expressions, analyze_expressions_with_values,
                 analyze_expressions_with_values_and_modulus,
             },
-            value::{initial_values_from_instance_cells, UcpValueFacts},
+            value::{initial_values_from_instance_cells, UcpValueDomain, UcpValueFacts},
         },
     };
     use num_bigint::BigInt;
@@ -260,6 +505,19 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct CompressedSelectorCircuit {
+        _marker: PhantomData<Fr>,
+    }
+
+    //Lookup/range-check teszt circuit: selector * advice szerepel egy 0..3 lookup táblában
+    #[derive(Clone, Debug)]
+    struct LookupRangeConfig {
+        advice: Column<Advice>,
+        selector: Selector,
+        table: TableColumn,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct LookupRangeCircuit {
         _marker: PhantomData<Fr>,
     }
 
@@ -417,6 +675,69 @@ mod tests {
         }
     }
 
+    impl Circuit<Fr> for LookupRangeCircuit {
+        type Config = LookupRangeConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+            let advice = meta.advice_column();
+            let selector = meta.complex_selector();
+            let table = meta.lookup_table_column();
+
+            meta.lookup(|meta| {
+                let selector = meta.query_selector(selector);
+                let value = meta.query_advice(advice, Rotation::cur());
+
+                vec![(selector * value, table)]
+            });
+
+            LookupRangeConfig {
+                advice,
+                selector,
+                table,
+            }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fr>,
+        ) -> Result<(), Error> {
+            layouter.assign_table(
+                || "range table",
+                |mut table| {
+                    for value in 0..4 {
+                        table.assign_cell(
+                            || "range value",
+                            config.table,
+                            value,
+                            || Value::known(Fr::from(value as u64)),
+                        )?;
+                    }
+                    Ok(())
+                },
+            )?;
+
+            layouter.assign_region(
+                || "lookup input",
+                |mut region| {
+                    config.selector.enable(&mut region, 0)?;
+                    region.assign_advice(
+                        || "range checked advice",
+                        config.advice,
+                        0,
+                        || Value::known(Fr::from(2)),
+                    )?;
+                    Ok(())
+                },
+            )
+        }
+    }
+
     //Azt ellenőrzi, hogy Analyzable circuitből UCP problem készül és UCP lefut rajta
     #[test]
     fn extracts_problem_from_analyzable_and_runs_ucp() {
@@ -435,6 +756,8 @@ mod tests {
 
         assert!(!problem.expressions.is_empty());
         assert_eq!(problem.target_cells, vec![target.clone()]);
+        assert_eq!(problem.output_cells, vec![target.clone()]);
+        assert!(problem.witness_cells.contains(&target));
         assert_eq!(problem.field_modulus, field_modulus::<Fr>());
         assert!(problem.initial_facts.is_unique(&CellId::instance(0, 0)));
         assert!(!problem.initial_facts.is_unique(&target));
@@ -464,6 +787,9 @@ mod tests {
         let analyzable = Analyzable::config_and_synthesize(&circuit, k).unwrap();
         let target = CellId::advice(0, 0);
         let problem = extract_ucp_problem_with_targets(&analyzable, [target.clone()]);
+
+        assert_eq!(problem.output_cells, vec![target.clone()]);
+        assert!(problem.witness_cells.contains(&target));
 
         let mut instance_cells = HashMap::new();
         instance_cells.insert("I-0-0".to_string(), 2);
@@ -501,6 +827,13 @@ mod tests {
             [inactive_advice.clone(), active_advice.clone()],
         );
 
+        assert_eq!(
+            problem.output_cells,
+            vec![inactive_advice.clone(), active_advice.clone()]
+        );
+        assert!(problem.witness_cells.contains(&inactive_advice));
+        assert!(problem.witness_cells.contains(&active_advice));
+
         let result = analyze_expressions_with_values_and_modulus(
             &problem.expressions,
             problem.initial_facts,
@@ -510,5 +843,63 @@ mod tests {
 
         assert!(!result.facts.is_unique(&inactive_advice));
         assert!(result.facts.is_unique(&active_advice));
+    }
+
+    //Azt ellenőrzi, hogy lookup táblából finite Delta domain készül a range-checkelt advice cellára
+    #[test]
+    fn extracts_lookup_table_domain_for_active_range_checked_advice() {
+        use zcash_halo2_proofs::dev::MockProver;
+
+        let circuit = LookupRangeCircuit::default();
+        let k = 4;
+        let prover = MockProver::run(k, &circuit, vec![]).unwrap();
+        prover.assert_satisfied();
+
+        let analyzable = Analyzable::config_and_synthesize(&circuit, k).unwrap();
+        let target = CellId::advice(0, 0);
+        let problem = extract_ucp_problem_with_targets(&analyzable, [target.clone()]);
+        let expected_domain =
+            UcpValueDomain::finite_set((0..4).map(BigInt::from)).expect("non-empty range domain");
+
+        assert_eq!(
+            problem.initial_value_facts.domain(&target),
+            Some(&expected_domain)
+        );
+
+        let result = analyze_expressions_with_values_and_modulus(
+            &problem.expressions,
+            problem.initial_facts,
+            problem.initial_value_facts,
+            &problem.field_modulus,
+        );
+
+        assert!(result.value_facts.domain_is_subset_of_range(
+            &target,
+            &BigInt::from(0),
+            &BigInt::from(3)
+        ));
+        assert!(!result.facts.is_unique(&target));
+    }
+
+    //Azt ellenőrzi, hogy poisonos lookup table-ből nem tanulunk túl szűk Delta domaint
+    #[test]
+    fn lookup_table_domain_does_not_learn_from_poisoned_table() {
+        use zcash_halo2_proofs::dev::MockProver;
+
+        let circuit = LookupRangeCircuit::default();
+        let k = 4;
+        let prover = MockProver::run(k, &circuit, vec![]).unwrap();
+        prover.assert_satisfied();
+
+        let mut analyzable = Analyzable::config_and_synthesize(&circuit, k).unwrap();
+        let Expression::Fixed(query) = &analyzable.cs.lookups[0].table_expressions[0] else {
+            panic!("test lookup table should be a fixed/table column");
+        };
+        analyzable.fixed[query.column_index][0] = CellValue::Poison(0);
+
+        let target = CellId::advice(0, 0);
+        let problem = extract_ucp_problem_with_targets(&analyzable, [target.clone()]);
+
+        assert_eq!(problem.initial_value_facts.domain(&target), None);
     }
 }

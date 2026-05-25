@@ -18,7 +18,7 @@ fn absolute_row(region_begin: usize, row: i32, rotation: Rotation) -> i32 {
 }
 
 //Halo2 field elemből BigInt-et készít, hogy UCP konstansként tudjuk használni
-fn field_to_bigint<F: AnalyzableField>(value: &F) -> BigInt {
+pub(crate) fn field_to_bigint<F: AnalyzableField>(value: &F) -> BigInt {
     BigInt::from_str_radix(format!("{:?}", value).strip_prefix("0x").unwrap(), 16).unwrap()
 }
 

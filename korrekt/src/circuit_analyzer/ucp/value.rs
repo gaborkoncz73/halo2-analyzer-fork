@@ -290,7 +290,17 @@ pub fn value_kind(expr: &UcpExpr, values: &UcpValueFacts) -> ValueKind {
                 .map(UcpValueDomain::value_kind)
                 .unwrap_or(ValueKind::Unknown),
             UcpExpr::Const(UcpScalar::Zero) => ValueKind::Zero,
-            UcpExpr::Const(UcpScalar::NonZero | UcpScalar::Known(_)) => ValueKind::NonZero,
+            UcpExpr::Const(UcpScalar::NonZero) => ValueKind::NonZero,
+            //Nagy field reprezentánsoknál modulus nélkül nem döntjük el integerből, hogy nonzero-e
+            UcpExpr::Const(UcpScalar::Known(value)) => bounded_value(value.clone())
+                .map(|value| {
+                    if value == BigInt::from(0) {
+                        ValueKind::Zero
+                    } else {
+                        ValueKind::NonZero
+                    }
+                })
+                .unwrap_or(ValueKind::Unknown),
             UcpExpr::Scale(_, UcpScalar::Zero) => ValueKind::Zero,
             UcpExpr::Mul(left, right) => {
                 match (value_kind(left, values), value_kind(right, values)) {
