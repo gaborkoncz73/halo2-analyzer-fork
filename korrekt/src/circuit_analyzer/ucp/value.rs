@@ -379,6 +379,7 @@ where
     UcpValueDomain::finite_set(set)
 }
 
+//A domainből BigInt vektort csinál
 fn domain_values(domain: &UcpValueDomain) -> Vec<BigInt> {
     match domain {
         UcpValueDomain::Exact(value) => vec![value.clone()],
@@ -498,6 +499,10 @@ fn infer_value_domains_from_zero_equation_with_optional_modulus(
     }
 
     for (cell, domain) in infer_linear_domains(expr, values, field_modulus) {
+        push_domain_inference(&mut inferences, cell, domain);
+    }
+
+    for (cell, domain) in infer_base_conv_value_domains(expr, values, field_modulus) {
         push_domain_inference(&mut inferences, cell, domain);
     }
 
@@ -621,6 +626,7 @@ fn infer_root_domain(expr: &UcpExpr, values: &UcpValueFacts) -> Option<(CellId, 
 }
 
 //Szorzatot faktorokra bont, hogy a root szabály felismerhető legyen
+//Például: [x,x-1,x-2]
 fn collect_product_factors<'a>(expr: &'a UcpExpr, factors: &mut Vec<&'a UcpExpr>) {
     match expr {
         UcpExpr::Mul(left, right) => {
@@ -721,6 +727,137 @@ fn infer_linear_domains(
     }
 
     inferences
+}
+
+//Base-Conv value rule: y0 + c*y1 + ... + c^n*yn - x = 0 esetén
+//ha minden yi domainje [0, c-1]-ben van, akkor x domainje [0, c^(n+1)-1].
+//Intervallum domainünk nincs, ezért csak akkor tanulunk, ha ez explicit finite setként kicsi marad.
+fn infer_base_conv_value_domains(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+) -> Vec<(CellId, UcpValueDomain)> {
+    let Some(linear) = linearize(expr, values) else {
+        return Vec::new();
+    };
+
+    if linear.constant != BigInt::from(0) {
+        return Vec::new();
+    }
+
+    let mut inferences = Vec::new();
+
+    for (target, target_coefficient) in &linear.terms {
+        if !is_plus_or_minus_one(target_coefficient) {
+            continue;
+        }
+
+        let Some(domain) = infer_base_conv_value_domain_for_target(
+            &linear,
+            target,
+            target_coefficient,
+            values,
+            field_modulus,
+        ) else {
+            continue;
+        };
+
+        push_domain_inference(&mut inferences, target.clone(), domain);
+    }
+
+    inferences
+}
+
+fn infer_base_conv_value_domain_for_target(
+    linear: &LinearExpr,
+    target: &CellId,
+    target_coefficient: &BigInt,
+    values: &UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+) -> Option<UcpValueDomain> {
+    let mut digits_with_coefficients = Vec::new();
+
+    for (cell, coefficient) in &linear.terms {
+        if cell == target {
+            continue;
+        }
+
+        let digit_coefficient = -coefficient * target_coefficient;
+        if digit_coefficient <= BigInt::from(0) {
+            return None;
+        }
+
+        digits_with_coefficients.push((cell.clone(), digit_coefficient));
+    }
+
+    let (base, digits) = parse_base_conv_digit_powers(digits_with_coefficients)?;
+    let max_digit = &base - BigInt::from(1);
+
+    if digits
+        .iter()
+        .any(|digit| !values.domain_is_subset_of_range(digit, &BigInt::from(0), &max_digit))
+    {
+        return None;
+    }
+
+    let domain_size = pow_bigint(&base, digits.len());
+    if domain_size <= BigInt::from(0) || domain_size > BigInt::from(MAX_FINITE_DOMAIN_SIZE as i64) {
+        return None;
+    }
+
+    let mut domain_values = Vec::new();
+    let mut value = BigInt::from(0);
+    while value < domain_size {
+        domain_values.push(value.clone());
+        value += 1;
+    }
+
+    finite_domain_from_values(domain_values, field_modulus)
+}
+
+fn parse_base_conv_digit_powers(
+    mut digits_with_coefficients: Vec<(CellId, BigInt)>,
+) -> Option<(BigInt, Vec<CellId>)> {
+    if digits_with_coefficients.len() < 2 {
+        return None;
+    }
+
+    digits_with_coefficients.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+
+    if digits_with_coefficients[0].1 != BigInt::from(1) {
+        return None;
+    }
+
+    let base = digits_with_coefficients[1].1.clone();
+    if base <= BigInt::from(1) {
+        return None;
+    }
+
+    let mut expected = BigInt::from(1);
+    let mut digits = Vec::with_capacity(digits_with_coefficients.len());
+
+    for (digit, coefficient) in digits_with_coefficients {
+        if coefficient != expected {
+            return None;
+        }
+
+        digits.push(digit);
+        expected *= &base;
+    }
+
+    Some((base, digits))
+}
+
+fn pow_bigint(base: &BigInt, exponent: usize) -> BigInt {
+    let mut result = BigInt::from(1);
+    for _ in 0..exponent {
+        result *= base;
+    }
+    result
+}
+
+fn is_plus_or_minus_one(value: &BigInt) -> bool {
+    value == &BigInt::from(1) || value == &BigInt::from(-1)
 }
 
 fn solve_linear_domain_for_cell(
@@ -1111,5 +1248,58 @@ mod tests {
             infer_domains_from_expression_domain(&expr, &table_domain, &UcpValueFacts::new());
 
         assert_eq!(inferences, vec![(x, finite_domain(&[0, 1, 2]))]);
+    }
+
+    //Azt ellenőrzi, hogy a Fig. 10 Base-Conv value szabály explicit finite domainként tanulja x tartományát
+    #[test]
+    fn base_conv_value_rule_learns_target_range_as_finite_set() {
+        let x = CellId::advice(0, 0);
+        let b0 = CellId::advice(1, 0);
+        let b1 = CellId::advice(2, 0);
+        let b2 = CellId::advice(3, 0);
+        let boolean = finite_domain(&[0, 1]);
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(b0.clone(), boolean.clone());
+        values.mark_domain(b1.clone(), boolean.clone());
+        values.mark_domain(b2.clone(), boolean);
+
+        let expr = UcpExpr::add(
+            UcpExpr::add(
+                UcpExpr::var(b0),
+                UcpExpr::scale_by(UcpExpr::var(b1), UcpScalar::known_i64(2)),
+            ),
+            UcpExpr::add(
+                UcpExpr::scale_by(UcpExpr::var(b2), UcpScalar::known_i64(4)),
+                UcpExpr::neg(UcpExpr::var(x.clone())),
+            ),
+        );
+
+        let inferences = infer_base_conv_value_domains(&expr, &values, None);
+
+        assert_eq!(
+            inferences,
+            vec![(x, finite_domain(&[0, 1, 2, 3, 4, 5, 6, 7]))]
+        );
+    }
+
+    //Azt ellenőrzi, hogy túl nagy base-conv tartományt nem listázunk ki finite setként
+    #[test]
+    fn base_conv_value_rule_respects_finite_domain_limit() {
+        let x = CellId::advice(0, 0);
+        let mut values = UcpValueFacts::new();
+        let boolean = finite_domain(&[0, 1]);
+        let mut expr = UcpExpr::neg(UcpExpr::var(x.clone()));
+
+        for index in 0..9 {
+            let bit = CellId::advice(index + 1, 0);
+            values.mark_domain(bit.clone(), boolean.clone());
+            let coefficient = 1_i64 << index;
+            expr = UcpExpr::add(
+                UcpExpr::scale_by(UcpExpr::var(bit), UcpScalar::known_i64(coefficient)),
+                expr,
+            );
+        }
+
+        assert!(infer_base_conv_value_domains(&expr, &values, None).is_empty());
     }
 }
