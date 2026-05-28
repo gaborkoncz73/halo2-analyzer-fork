@@ -6,7 +6,10 @@ use super::{
     expr::UcpExpr,
     facts::UcpFacts,
     rules::{expression_is_unique, infer_assigned_cell_from_zero_equation},
-    value::{infer_value_domains_from_zero_equation, UcpValueFacts},
+    value::{
+        infer_value_domains_from_zero_equation,
+        infer_value_domains_from_zero_equation_with_modulus, UcpValueFacts,
+    },
 };
 use num_bigint::BigInt;
 
@@ -154,7 +157,16 @@ fn analyze_expressions_with_optional_modulus(
 
         for expr in expressions {
             //Először érték/domain információt próbálunk tanulni a zero equationből
-            for (cell, domain) in infer_value_domains_from_zero_equation(expr, &value_facts) {
+            let value_inferences = match field_modulus {
+                Some(field_modulus) => infer_value_domains_from_zero_equation_with_modulus(
+                    expr,
+                    &value_facts,
+                    field_modulus,
+                ),
+                None => infer_value_domains_from_zero_equation(expr, &value_facts),
+            };
+
+            for (cell, domain) in value_inferences {
                 let is_exact = domain.is_singleton();
                 changed |= value_facts.mark_domain(cell.clone(), domain);
                 //Konkrét egyértékű domainből uniqueness is következik

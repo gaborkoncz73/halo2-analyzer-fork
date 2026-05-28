@@ -5,6 +5,8 @@ use super::{
 use num_bigint::BigInt;
 use std::collections::{BTreeSet, HashMap};
 
+const MAX_FINITE_DOMAIN_SIZE: usize = 256;
+
 //Enum a Domain konkrét értékeire (konkrét érték vagy tartomány)
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UcpValueDomain {
@@ -264,6 +266,65 @@ pub fn evaluate_expr(expr: &UcpExpr, values: &UcpValueFacts) -> Option<BigInt> {
     }
 }
 
+//Megpróbál egy expressionhöz teljes véges Delta domaint számolni modulus nélkül
+pub fn expression_domain(expr: &UcpExpr, values: &UcpValueFacts) -> Option<UcpValueDomain> {
+    expression_domain_with_optional_modulus(expr, values, None)
+}
+
+//Megpróbál egy expressionhöz teljes véges Delta domaint számolni a field modulus szerint
+pub fn expression_domain_with_modulus(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    field_modulus: &BigInt,
+) -> Option<UcpValueDomain> {
+    expression_domain_with_optional_modulus(expr, values, Some(field_modulus))
+}
+
+fn expression_domain_with_optional_modulus(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+) -> Option<UcpValueDomain> {
+    match expr {
+        UcpExpr::Var(cell) => values.domain(cell).cloned(),
+        UcpExpr::Const(scalar) => finite_domain_from_values([scalar.as_known()?], field_modulus),
+        UcpExpr::Neg(inner) => {
+            let inner = expression_domain_with_optional_modulus(inner, values, field_modulus)?;
+            map_domain_values(&inner, field_modulus, |value| -value)
+        }
+        UcpExpr::Add(left, right) => {
+            let left = expression_domain_with_optional_modulus(left, values, field_modulus)?;
+            let right = expression_domain_with_optional_modulus(right, values, field_modulus)?;
+            combine_domain_values(&left, &right, field_modulus, |left, right| left + right)
+        }
+        UcpExpr::Mul(left, right) => {
+            if value_kind(left, values) == ValueKind::Zero
+                || value_kind(right, values) == ValueKind::Zero
+            {
+                return Some(UcpValueDomain::exact(BigInt::from(0)));
+            }
+
+            let left = expression_domain_with_optional_modulus(left, values, field_modulus)?;
+            let right = expression_domain_with_optional_modulus(right, values, field_modulus)?;
+            combine_domain_values(&left, &right, field_modulus, |left, right| left * right)
+        }
+        UcpExpr::Scale(inner, scalar) => match scalar {
+            UcpScalar::Zero => Some(UcpValueDomain::exact(BigInt::from(0))),
+            UcpScalar::Known(scale) => {
+                let inner = expression_domain_with_optional_modulus(inner, values, field_modulus)?;
+                map_domain_values(&inner, field_modulus, |value| value * scale)
+            }
+            UcpScalar::NonZero | UcpScalar::Unknown => {
+                if value_kind(inner, values) == ValueKind::Zero {
+                    Some(UcpValueDomain::exact(BigInt::from(0)))
+                } else {
+                    None
+                }
+            }
+        },
+    }
+}
+
 //Biztonsági szűrő: csak kis, integerként kezelhető értékekkel következtetünk
 fn bounded_value(value: BigInt) -> Option<BigInt> {
     if value == BigInt::from(0)
@@ -273,6 +334,96 @@ fn bounded_value(value: BigInt) -> Option<BigInt> {
     } else {
         None
     }
+}
+
+fn normalize_value(value: BigInt, field_modulus: Option<&BigInt>) -> Option<BigInt> {
+    match field_modulus {
+        Some(modulus) => normalize_field_value(value, modulus),
+        None => bounded_value(value),
+    }
+}
+
+fn normalize_field_value(value: BigInt, modulus: &BigInt) -> Option<BigInt> {
+    if modulus <= &BigInt::from(1) {
+        return None;
+    }
+
+    let mut normalized = value % modulus;
+    if normalized < BigInt::from(0) {
+        normalized += modulus;
+    }
+
+    //Kis signed reprezentánst használunk: p-1 például -1-ként tárolható,
+    //az analyzer SMT bridge később ezt újra visszanormalizálja field elemre.
+    if normalized > modulus / BigInt::from(2) {
+        normalized -= modulus;
+    }
+
+    bounded_value(normalized)
+}
+
+fn finite_domain_from_values<I>(values: I, field_modulus: Option<&BigInt>) -> Option<UcpValueDomain>
+where
+    I: IntoIterator<Item = BigInt>,
+{
+    let mut set = BTreeSet::new();
+
+    for value in values {
+        let value = normalize_value(value, field_modulus)?;
+        if !set.contains(&value) && set.len() >= MAX_FINITE_DOMAIN_SIZE {
+            return None;
+        }
+        set.insert(value);
+    }
+
+    UcpValueDomain::finite_set(set)
+}
+
+fn domain_values(domain: &UcpValueDomain) -> Vec<BigInt> {
+    match domain {
+        UcpValueDomain::Exact(value) => vec![value.clone()],
+        UcpValueDomain::FiniteSet(values) => values.iter().cloned().collect(),
+    }
+}
+
+fn map_domain_values<F>(
+    domain: &UcpValueDomain,
+    field_modulus: Option<&BigInt>,
+    mut op: F,
+) -> Option<UcpValueDomain>
+where
+    F: FnMut(BigInt) -> BigInt,
+{
+    finite_domain_from_values(
+        domain_values(domain).into_iter().map(|value| op(value)),
+        field_modulus,
+    )
+}
+
+fn combine_domain_values<F>(
+    left: &UcpValueDomain,
+    right: &UcpValueDomain,
+    field_modulus: Option<&BigInt>,
+    mut op: F,
+) -> Option<UcpValueDomain>
+where
+    F: FnMut(BigInt, BigInt) -> BigInt,
+{
+    let left_values = domain_values(left);
+    let right_values = domain_values(right);
+
+    if left_values.len().saturating_mul(right_values.len()) > MAX_FINITE_DOMAIN_SIZE {
+        return None;
+    }
+
+    let mut values = Vec::with_capacity(left_values.len() * right_values.len());
+    for left in &left_values {
+        for right in &right_values {
+            values.push(op(left.clone(), right.clone()));
+        }
+    }
+
+    finite_domain_from_values(values, field_modulus)
 }
 
 //Megmondja, hogy egy expression biztosan nulla, biztosan nem nulla, vagy ismeretlen
@@ -319,14 +470,35 @@ pub fn infer_value_domains_from_zero_equation(
     expr: &UcpExpr,
     values: &UcpValueFacts,
 ) -> Vec<(CellId, UcpValueDomain)> {
+    infer_value_domains_from_zero_equation_with_optional_modulus(expr, values, None)
+}
+
+//Nullára kényszerített expressionből modulus-aware Delta domain-eket tanul
+pub fn infer_value_domains_from_zero_equation_with_modulus(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    field_modulus: &BigInt,
+) -> Vec<(CellId, UcpValueDomain)> {
+    infer_value_domains_from_zero_equation_with_optional_modulus(expr, values, Some(field_modulus))
+}
+
+fn infer_value_domains_from_zero_equation_with_optional_modulus(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+) -> Vec<(CellId, UcpValueDomain)> {
     let mut inferences = Vec::new();
 
     if let Some((cell, domain)) = infer_root_domain(expr, values) {
-        inferences.push((cell, domain));
+        push_domain_inference(&mut inferences, cell, domain);
     }
 
     if let Some((cell, value)) = infer_from_zero_expr(expr, values) {
-        inferences.push((cell, UcpValueDomain::exact(value)));
+        push_domain_inference(&mut inferences, cell, UcpValueDomain::exact(value));
+    }
+
+    for (cell, domain) in infer_linear_domains(expr, values, field_modulus) {
+        push_domain_inference(&mut inferences, cell, domain);
     }
 
     inferences
@@ -344,6 +516,81 @@ pub fn infer_value_assignments_from_zero_equation(
             UcpValueDomain::FiniteSet(_) => None,
         })
         .collect()
+}
+
+//Expression-domain feltételből tanul cella-domain-eket: ha e egy lookup táblában van, Delta(e) a tábla domainje
+pub fn infer_domains_from_expression_domain(
+    expr: &UcpExpr,
+    expr_domain: &UcpValueDomain,
+    values: &UcpValueFacts,
+) -> Vec<(CellId, UcpValueDomain)> {
+    infer_domains_from_expression_domain_with_optional_modulus(expr, expr_domain, values, None)
+}
+
+//Ugyanez field modulussal, hogy c*x inverzét fieldben tudjuk venni
+pub fn infer_domains_from_expression_domain_with_modulus(
+    expr: &UcpExpr,
+    expr_domain: &UcpValueDomain,
+    values: &UcpValueFacts,
+    field_modulus: &BigInt,
+) -> Vec<(CellId, UcpValueDomain)> {
+    infer_domains_from_expression_domain_with_optional_modulus(
+        expr,
+        expr_domain,
+        values,
+        Some(field_modulus),
+    )
+}
+
+fn infer_domains_from_expression_domain_with_optional_modulus(
+    expr: &UcpExpr,
+    expr_domain: &UcpValueDomain,
+    values: &UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+) -> Vec<(CellId, UcpValueDomain)> {
+    let Some(linear) = linearize(expr, values) else {
+        return Vec::new();
+    };
+
+    let mut inferences = Vec::new();
+
+    for (cell, coefficient) in &linear.terms {
+        if coefficient == &BigInt::from(0) {
+            continue;
+        }
+
+        let Some(domain) = solve_linear_domain_for_cell_with_rhs(
+            &linear,
+            cell,
+            coefficient,
+            expr_domain,
+            values,
+            field_modulus,
+        ) else {
+            continue;
+        };
+
+        push_domain_inference(&mut inferences, cell.clone(), domain);
+    }
+
+    inferences
+}
+
+fn push_domain_inference(
+    inferences: &mut Vec<(CellId, UcpValueDomain)>,
+    cell: CellId,
+    domain: UcpValueDomain,
+) {
+    if let Some((_, existing_domain)) = inferences
+        .iter_mut()
+        .find(|(existing_cell, _)| existing_cell == &cell)
+    {
+        if let Some(intersection) = existing_domain.intersect(&domain) {
+            *existing_domain = intersection;
+        }
+    } else {
+        inferences.push((cell, domain));
+    }
 }
 
 //Root szabály: például b * (b - 1) = 0 alapján Delta(b) = {0, 1}
@@ -445,6 +692,157 @@ fn infer_linear_assignment(expr: &UcpExpr, values: &UcpValueFacts) -> Option<(Ce
     }
 
     Some((cell, bounded_value(numerator / coefficient)?))
+}
+
+//Lineáris null-egyenletből domain-t tanul, ha egy cellán kívül minden más tagnak véges Delta domainje van
+fn infer_linear_domains(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+) -> Vec<(CellId, UcpValueDomain)> {
+    let Some(linear) = linearize(expr, values) else {
+        return Vec::new();
+    };
+
+    let mut inferences = Vec::new();
+
+    for (cell, coefficient) in &linear.terms {
+        if coefficient == &BigInt::from(0) {
+            continue;
+        }
+
+        let Some(domain) =
+            solve_linear_domain_for_cell(&linear, cell, coefficient, values, field_modulus)
+        else {
+            continue;
+        };
+
+        inferences.push((cell.clone(), domain));
+    }
+
+    inferences
+}
+
+fn solve_linear_domain_for_cell(
+    linear: &LinearExpr,
+    target: &CellId,
+    coefficient: &BigInt,
+    values: &UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+) -> Option<UcpValueDomain> {
+    solve_linear_domain_for_cell_with_rhs(
+        linear,
+        target,
+        coefficient,
+        &UcpValueDomain::exact(BigInt::from(0)),
+        values,
+        field_modulus,
+    )
+}
+
+fn solve_linear_domain_for_cell_with_rhs(
+    linear: &LinearExpr,
+    target: &CellId,
+    coefficient: &BigInt,
+    rhs_domain: &UcpValueDomain,
+    values: &UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+) -> Option<UcpValueDomain> {
+    let mut rest_values = vec![normalize_value(linear.constant.clone(), field_modulus)?];
+
+    for (cell, term_coefficient) in &linear.terms {
+        if cell == target {
+            continue;
+        }
+
+        let domain = values.domain(cell)?;
+        let term_values = domain_values(domain);
+
+        if rest_values.len().saturating_mul(term_values.len()) > MAX_FINITE_DOMAIN_SIZE {
+            return None;
+        }
+
+        let mut next_values = Vec::with_capacity(rest_values.len() * term_values.len());
+        for rest in &rest_values {
+            for value in &term_values {
+                next_values.push(normalize_value(
+                    rest + term_coefficient * value,
+                    field_modulus,
+                )?);
+            }
+        }
+        rest_values = next_values;
+    }
+
+    let rhs_values = domain_values(rhs_domain);
+    if rhs_values.len().saturating_mul(rest_values.len()) > MAX_FINITE_DOMAIN_SIZE {
+        return None;
+    }
+
+    let mut solved_values = Vec::with_capacity(rhs_values.len() * rest_values.len());
+    for rhs in &rhs_values {
+        for rest in &rest_values {
+            solved_values.push(solve_linear_value(
+                &(rhs - rest),
+                coefficient,
+                field_modulus,
+            )?);
+        }
+    }
+
+    finite_domain_from_values(solved_values, field_modulus)
+}
+
+fn solve_linear_value(
+    numerator: &BigInt,
+    coefficient: &BigInt,
+    field_modulus: Option<&BigInt>,
+) -> Option<BigInt> {
+    match field_modulus {
+        Some(modulus) => {
+            let inverse = mod_inverse(coefficient, modulus)?;
+            normalize_value(numerator * inverse, Some(modulus))
+        }
+        None => {
+            if numerator % coefficient != BigInt::from(0) {
+                return None;
+            }
+            bounded_value(numerator / coefficient)
+        }
+    }
+}
+
+fn mod_inverse(value: &BigInt, modulus: &BigInt) -> Option<BigInt> {
+    let mut t = BigInt::from(0);
+    let mut new_t = BigInt::from(1);
+    let mut r = modulus.clone();
+    let mut new_r = mod_field(value.clone(), modulus);
+
+    while new_r != BigInt::from(0) {
+        let quotient = &r / &new_r;
+
+        let old_t = t;
+        t = new_t.clone();
+        new_t = old_t - &quotient * &new_t;
+
+        let old_r = r;
+        r = new_r.clone();
+        new_r = old_r - quotient * new_r;
+    }
+
+    if r != BigInt::from(1) {
+        return None;
+    }
+
+    Some(mod_field(t, modulus))
+}
+
+fn mod_field(value: BigInt, modulus: &BigInt) -> BigInt {
+    let mut value = value % modulus;
+    if value < BigInt::from(0) {
+        value += modulus;
+    }
+    value
 }
 
 //UcpExpr-ből lineáris alakot készít: constant + coefficient * cell + ...
@@ -638,5 +1036,80 @@ mod tests {
         assert!(values.domain_is_subset_of_range(&b, &BigInt::from(0), &BigInt::from(1)));
         assert!(values.domain_is_subset_of_range(&b, &BigInt::from(0), &BigInt::from(9)));
         assert!(!values.domain_is_subset_of_range(&b, &BigInt::from(1), &BigInt::from(9)));
+    }
+
+    //Azt ellenőrzi, hogy a Fig. 9 szerinti expression-domain szabályok működnek finite domainekkel
+    #[test]
+    fn expression_domain_combines_finite_sets() {
+        let x = CellId::advice(0, 0);
+        let y = CellId::advice(1, 0);
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(x.clone(), finite_domain(&[0, 1]));
+        values.mark_domain(y.clone(), finite_domain(&[2, 3]));
+
+        let sum = UcpExpr::add(UcpExpr::var(x.clone()), UcpExpr::var(y.clone()));
+        let product = UcpExpr::mul(UcpExpr::var(x), UcpExpr::var(y));
+
+        assert_eq!(
+            expression_domain(&sum, &values),
+            Some(finite_domain(&[2, 3, 4]))
+        );
+        assert_eq!(
+            expression_domain(&product, &values),
+            Some(finite_domain(&[0, 2, 3]))
+        );
+    }
+
+    //Azt ellenőrzi, hogy x - (b + 1) = 0 alapján Delta(b)={0,1} esetén Delta(x)={1,2}
+    #[test]
+    fn linear_equation_learns_domain_from_expression_domain() {
+        let b = CellId::advice(0, 0);
+        let x = CellId::advice(1, 0);
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(b.clone(), finite_domain(&[0, 1]));
+
+        let expr = UcpExpr::add(
+            UcpExpr::var(x.clone()),
+            UcpExpr::neg(UcpExpr::add(
+                UcpExpr::var(b),
+                UcpExpr::known_constant_i64(1),
+            )),
+        );
+
+        let inferences = infer_value_domains_from_zero_equation(&expr, &values);
+
+        assert_eq!(inferences, vec![(x, finite_domain(&[1, 2]))]);
+    }
+
+    //Azt ellenőrzi, hogy c*x - e = 0 esetén modulus mellett c inverzével számolunk
+    #[test]
+    fn scaled_linear_equation_uses_field_modulus_for_domain_division() {
+        let b = CellId::advice(0, 0);
+        let x = CellId::advice(1, 0);
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(b.clone(), finite_domain(&[0, 2]));
+
+        let expr = UcpExpr::add(
+            UcpExpr::scale_by(UcpExpr::var(x.clone()), UcpScalar::known_i64(2)),
+            UcpExpr::neg(UcpExpr::var(b)),
+        );
+
+        let inferences =
+            infer_value_domains_from_zero_equation_with_modulus(&expr, &values, &BigInt::from(5));
+
+        assert_eq!(inferences, vec![(x, finite_domain(&[0, 1]))]);
+    }
+
+    //Azt ellenőrzi, hogy lookup-szerű e in Omega feltételből is tudunk cella-domaint tanulni
+    #[test]
+    fn expression_membership_learns_affine_input_domain() {
+        let x = CellId::advice(0, 0);
+        let expr = UcpExpr::add(UcpExpr::var(x.clone()), UcpExpr::known_constant_i64(1));
+        let table_domain = finite_domain(&[1, 2, 3]);
+
+        let inferences =
+            infer_domains_from_expression_domain(&expr, &table_domain, &UcpValueFacts::new());
+
+        assert_eq!(inferences, vec![(x, finite_domain(&[0, 1, 2]))]);
     }
 }

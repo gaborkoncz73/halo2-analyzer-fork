@@ -8,7 +8,7 @@ use super::{
 use super::{
     facts::initial_facts_from_expressions,
     plonkish::{expression_to_ucp_expr_with_fixed_values, field_to_bigint},
-    value::{UcpValueDomain, UcpValueFacts},
+    value::{infer_domains_from_expression_domain_with_modulus, UcpValueDomain, UcpValueFacts},
 };
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use crate::circuit_analyzer::{
@@ -77,10 +77,11 @@ where
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 //Lookup argumentekből kezdeti Delta domaineket tanul.
-//Csak akkor következtetünk, ha az input az adott aktív sorban egy sima advice cellára egyszerűsödik,
-//a table oldal pedig konkrét assigned fixed/table értékek véges halmaza.
+//A table oldal konkrét assigned fixed/table értékek véges halmaza.
+//Az input lehet sima advice cella vagy egyszerű lineáris expression, például x + 1 vagy 2*x.
 pub fn extract_lookup_value_facts<F: AnalyzableField>(analyzable: &Analyzable<F>) -> UcpValueFacts {
     let mut values = UcpValueFacts::new();
+    let field_modulus = field_modulus::<F>();
 
     for region in &analyzable.regions {
         if !region_has_advice_cell(region) {
@@ -112,8 +113,15 @@ pub fn extract_lookup_value_facts<F: AnalyzableField>(analyzable: &Analyzable<F>
                         &analyzable.fixed,
                     );
 
-                    if let Some(cell) = lookup_input_cell(&input) {
-                        values.mark_domain(cell, domain);
+                    for (cell, inferred_domain) in infer_domains_from_expression_domain_with_modulus(
+                        &input,
+                        &domain,
+                        &values,
+                        &field_modulus,
+                    ) {
+                        if matches!(&cell.kind, CellKind::Advice) {
+                            values.mark_domain(cell, inferred_domain);
+                        }
                     }
                 }
             }
@@ -143,14 +151,6 @@ fn region_has_advice_cell(region: &Region) -> bool {
             .cells
             .iter()
             .any(|((column, row), _)| assigned_advice_cell_id(column, *row).is_some())
-    }
-}
-
-#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-fn lookup_input_cell(expr: &UcpExpr) -> Option<CellId> {
-    match expr {
-        UcpExpr::Var(cell) if matches!(cell.kind, CellKind::Advice) => Some(cell.clone()),
-        _ => None,
     }
 }
 
@@ -521,6 +521,19 @@ mod tests {
         _marker: PhantomData<Fr>,
     }
 
+    //Lookup/range-check teszt circuit, ahol a lookup input egy skálázott advice expression: 2*x
+    #[derive(Clone, Debug)]
+    struct ScaledLookupRangeConfig {
+        advice: Column<Advice>,
+        selector: Selector,
+        table: TableColumn,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct ScaledLookupRangeCircuit {
+        _marker: PhantomData<Fr>,
+    }
+
     impl Circuit<Fr> for ExtractorCircuit {
         type Config = ExtractorConfig;
         type FloorPlanner = SimpleFloorPlanner;
@@ -738,6 +751,70 @@ mod tests {
         }
     }
 
+    impl Circuit<Fr> for ScaledLookupRangeCircuit {
+        type Config = ScaledLookupRangeConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+            let advice = meta.advice_column();
+            let selector = meta.complex_selector();
+            let table = meta.lookup_table_column();
+
+            meta.lookup(|meta| {
+                let selector = meta.query_selector(selector);
+                let value = meta.query_advice(advice, Rotation::cur());
+                let scaled_value = Expression::Constant(Fr::from(2)) * value;
+
+                vec![(selector * scaled_value, table)]
+            });
+
+            ScaledLookupRangeConfig {
+                advice,
+                selector,
+                table,
+            }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fr>,
+        ) -> Result<(), Error> {
+            layouter.assign_table(
+                || "scaled range table",
+                |mut table| {
+                    for (row, value) in [0u64, 2, 4].into_iter().enumerate() {
+                        table.assign_cell(
+                            || "scaled range value",
+                            config.table,
+                            row,
+                            || Value::known(Fr::from(value)),
+                        )?;
+                    }
+                    Ok(())
+                },
+            )?;
+
+            layouter.assign_region(
+                || "scaled lookup input",
+                |mut region| {
+                    config.selector.enable(&mut region, 0)?;
+                    region.assign_advice(
+                        || "scaled range checked advice",
+                        config.advice,
+                        0,
+                        || Value::known(Fr::from(2)),
+                    )?;
+                    Ok(())
+                },
+            )
+        }
+    }
+
     //Azt ellenőrzi, hogy Analyzable circuitből UCP problem készül és UCP lefut rajta
     #[test]
     fn extracts_problem_from_analyzable_and_runs_ucp() {
@@ -879,6 +956,28 @@ mod tests {
             &BigInt::from(3)
         ));
         assert!(!result.facts.is_unique(&target));
+    }
+
+    //Azt ellenőrzi, hogy lookup input expressionből is tanulunk domaint: 2*x in {0,2,4} => x in {0,1,2}
+    #[test]
+    fn extracts_lookup_domain_from_scaled_input_expression() {
+        use zcash_halo2_proofs::dev::MockProver;
+
+        let circuit = ScaledLookupRangeCircuit::default();
+        let k = 4;
+        let prover = MockProver::run(k, &circuit, vec![]).unwrap();
+        prover.assert_satisfied();
+
+        let analyzable = Analyzable::config_and_synthesize(&circuit, k).unwrap();
+        let target = CellId::advice(0, 0);
+        let problem = extract_ucp_problem_with_targets(&analyzable, [target.clone()]);
+        let expected_domain =
+            UcpValueDomain::finite_set((0..3).map(BigInt::from)).expect("non-empty range domain");
+
+        assert_eq!(
+            problem.initial_value_facts.domain(&target),
+            Some(&expected_domain)
+        );
     }
 
     //Azt ellenőrzi, hogy poisonos lookup table-ből nem tanulunk túl szűk Delta domaint
