@@ -10,7 +10,7 @@ pub enum UcpScalar {
     NonZero,
     //Nem tudjuk, hogy nulla-e vagy nem nulla
     Unknown,
-    //Konkrétan ismert kis integer érték
+    //Konkreten ismert BigInt ertek; a Delta tarolas kulon bitkorlatot alkalmaz
     Known(BigInt),
 }
 
@@ -40,7 +40,25 @@ impl UcpScalar {
 
     //Azt jelzi, hogy a skalár statikusan biztosan nem nulla-e
     pub fn is_statically_non_zero(&self) -> bool {
-        matches!(self, Self::NonZero | Self::Known(_))
+        match self {
+            Self::NonZero => true,
+            Self::Known(value) => value != &BigInt::from(0),
+            Self::Zero | Self::Unknown => false,
+        }
+    }
+
+    pub(crate) fn is_zero(&self) -> bool {
+        matches!(self, Self::Zero)
+            || matches!(self, Self::Known(value) if value == &BigInt::from(0))
+    }
+
+    pub(crate) fn is_non_zero_with_modulus(&self, modulus: Option<&BigInt>) -> bool {
+        match (self, modulus) {
+            (Self::Known(value), Some(modulus)) => {
+                modulus > &BigInt::from(1) && value % modulus != BigInt::from(0)
+            }
+            _ => self.is_statically_non_zero(),
+        }
     }
 }
 
@@ -94,7 +112,11 @@ impl UcpExpr {
 
     //Tetszőleges UcpScalar-ból konstans expressiont készít
     pub fn scalar_constant(scalar: UcpScalar) -> Self {
-        Self::Const(scalar)
+        if scalar.is_zero() {
+            Self::zero()
+        } else {
+            Self::Const(scalar)
+        }
     }
 
     //Negált expression létrehozása
@@ -137,6 +159,9 @@ impl UcpExpr {
 
     //Expression skálázása, nulla skála esetén azonnal nulla expression lesz
     pub fn scale_by(expr: UcpExpr, scalar: UcpScalar) -> Self {
+        if scalar.is_zero() {
+            return Self::zero();
+        }
         match scalar {
             UcpScalar::Zero => Self::zero(),
             UcpScalar::Known(value) if value == BigInt::from(1) => expr,

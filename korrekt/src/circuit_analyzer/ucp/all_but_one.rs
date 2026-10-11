@@ -8,7 +8,7 @@ use super::{
     cell::CellId,
     expr::{UcpExpr, UcpScalar},
     facts::UcpFacts,
-    value::{evaluate_expr, UcpValueFacts},
+    value::{bounded_value, evaluate_expr, normalize_field_value, UcpValueFacts},
 };
 use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -53,13 +53,38 @@ pub fn infer_all_but_one_zero(
     facts: &UcpFacts,
     values: &UcpValueFacts,
 ) -> Vec<AllButOneInference> {
+    infer_all_but_one_with_optional_modulus(expressions, facts, values, None)
+}
+
+pub fn infer_all_but_one_zero_with_modulus(
+    expressions: &[UcpExpr],
+    facts: &UcpFacts,
+    values: &UcpValueFacts,
+    modulus: &BigInt,
+) -> Vec<AllButOneInference> {
+    if modulus <= &BigInt::from(1) {
+        return Vec::new();
+    }
+    infer_all_but_one_with_optional_modulus(expressions, facts, values, Some(modulus))
+}
+
+fn infer_all_but_one_with_optional_modulus(
+    expressions: &[UcpExpr],
+    facts: &UcpFacts,
+    values: &UcpValueFacts,
+    modulus: Option<&BigInt>,
+) -> Vec<AllButOneInference> {
     //Külön kigyűjtjük a y_i * (x - root_i) = 0 típusú constraint-eket
-    let product_constraints = collect_product_constraints(expressions, facts);
+    let product_constraints = collect_product_constraints(expressions, facts, modulus);
     //Külön kigyűjtjük a sum(y_i) = e típusú constraint-eket
-    let sum_constraints = collect_sum_constraints(expressions, facts, values);
+    let sum_constraints = collect_sum_constraints(expressions, facts, values, modulus);
     let mut inferences = BTreeMap::new();
 
     for sum in sum_constraints {
+        //The roots 0..n must remain distinct in the actual field.
+        if modulus.is_some_and(|modulus| BigInt::from(sum.y_cells.len()) > *modulus) {
+            continue;
+        }
         for (x, products_by_y) in &product_constraints {
             //Csak akkor illeszkedik a szabály, ha minden y_i-hez pontosan egy root tartozik,
             //és ezek a rootok pontosan a cikk szerinti 0..n értékek
@@ -72,8 +97,15 @@ pub fn infer_all_but_one_zero(
 
             for (cell, root) in root_by_y {
                 let value = x_value.as_ref().and_then(|x_value| {
-                    if &root == x_value {
-                        sum.e_value.clone()
+                    let matches = match modulus {
+                        Some(modulus) => (&root - x_value) % modulus == BigInt::from(0),
+                        None => &root == x_value,
+                    };
+                    if matches {
+                        sum.e_value.clone().and_then(|value| match modulus {
+                            Some(modulus) => normalize_field_value(value, modulus),
+                            None => Some(value),
+                        })
                     } else {
                         Some(BigInt::from(0))
                     }
@@ -94,12 +126,13 @@ pub fn infer_all_but_one_zero(
 fn collect_product_constraints(
     expressions: &[UcpExpr],
     facts: &UcpFacts,
+    modulus: Option<&BigInt>,
 ) -> HashMap<CellId, HashMap<CellId, BTreeSet<BigInt>>> {
     //Felépítés: x -> y_i -> {rootok}
     let mut constraints: HashMap<CellId, HashMap<CellId, BTreeSet<BigInt>>> = HashMap::new();
 
     for expr in expressions {
-        let Some(product) = parse_product_constraint(expr) else {
+        let Some(product) = parse_product_constraint(expr, modulus) else {
             continue;
         };
 
@@ -123,11 +156,12 @@ fn collect_sum_constraints(
     expressions: &[UcpExpr],
     facts: &UcpFacts,
     values: &UcpValueFacts,
+    modulus: Option<&BigInt>,
 ) -> Vec<SumConstraint> {
     //Minden expressiont megpróbálunk összeg-constraintként értelmezni
     expressions
         .iter()
-        .filter_map(|expr| parse_sum_constraint(expr, facts, values))
+        .filter_map(|expr| parse_sum_constraint(expr, facts, values, modulus))
         .collect()
 }
 
@@ -165,21 +199,25 @@ fn roots_for_sum(
     Some(root_by_y)
 }
 
-fn parse_product_constraint(expr: &UcpExpr) -> Option<ProductConstraint> {
+fn parse_product_constraint(expr: &UcpExpr, modulus: Option<&BigInt>) -> Option<ProductConstraint> {
     //A termékből kidobjuk a nem érdemi konstans szorzókat, és két tényleges faktort várunk
-    let factors = meaningful_product_factors(expr);
+    let factors = meaningful_product_factors(expr, modulus);
     if factors.len() != 2 {
         return None;
     }
 
     //A két faktor sorrendje mindegy: y * (x-root) és (x-root) * y is jó
-    parse_product_pair(factors[0], factors[1])
-        .or_else(|| parse_product_pair(factors[1], factors[0]))
+    parse_product_pair(factors[0], factors[1], modulus)
+        .or_else(|| parse_product_pair(factors[1], factors[0], modulus))
 }
 
-fn parse_product_pair(y_expr: &UcpExpr, root_expr: &UcpExpr) -> Option<ProductConstraint> {
+fn parse_product_pair(
+    y_expr: &UcpExpr,
+    root_expr: &UcpExpr,
+    modulus: Option<&BigInt>,
+) -> Option<ProductConstraint> {
     //Az egyik oldalnak egy sima y változónak kell lennie
-    let y = parse_plain_var(y_expr)?;
+    let y = parse_plain_var(y_expr, modulus)?;
     //A másik oldalnak x - root vagy root - x alakúnak kell lennie
     let (x, root) = parse_root_factor(root_expr)?;
 
@@ -190,9 +228,10 @@ fn parse_sum_constraint(
     expr: &UcpExpr,
     facts: &UcpFacts,
     values: &UcpValueFacts,
+    modulus: Option<&BigInt>,
 ) -> Option<SumConstraint> {
     //Az expressiont lineáris zero equationként próbáljuk olvasni
-    let linear = linearize_zero_equation(expr, values)?;
+    let linear = linearize_zero_equation(expr, values, modulus)?;
     if linear.terms.len() < 2 {
         return None;
     }
@@ -293,41 +332,46 @@ fn sum_from_signed_terms(
     None
 }
 
-fn meaningful_product_factors(expr: &UcpExpr) -> Vec<&UcpExpr> {
+fn meaningful_product_factors<'a>(expr: &'a UcpExpr, modulus: Option<&BigInt>) -> Vec<&'a UcpExpr> {
     let mut factors = Vec::new();
-    collect_meaningful_product_factors(expr, &mut factors);
+    collect_meaningful_product_factors(expr, &mut factors, modulus);
     factors
 }
 
-fn collect_meaningful_product_factors<'a>(expr: &'a UcpExpr, factors: &mut Vec<&'a UcpExpr>) {
+fn collect_meaningful_product_factors<'a>(
+    expr: &'a UcpExpr,
+    factors: &mut Vec<&'a UcpExpr>,
+    modulus: Option<&BigInt>,
+) {
     match expr {
         //A többszörös szorzást kilapítjuk faktorlistává
         UcpExpr::Mul(left, right) => {
-            collect_meaningful_product_factors(left, factors);
-            collect_meaningful_product_factors(right, factors);
+            collect_meaningful_product_factors(left, factors, modulus);
+            collect_meaningful_product_factors(right, factors, modulus);
         }
         //A mínusz előjel nem változtatja meg, hogy melyik faktor érdemi
-        UcpExpr::Neg(inner) => collect_meaningful_product_factors(inner, factors),
+        UcpExpr::Neg(inner) => collect_meaningful_product_factors(inner, factors, modulus),
         //Nem nulla skálázás mellett ugyanaz a faktorstruktúra marad
-        UcpExpr::Scale(inner, scalar) if scalar.is_statically_non_zero() => {
-            collect_meaningful_product_factors(inner, factors)
+        UcpExpr::Scale(inner, scalar) if scalar.is_non_zero_with_modulus(modulus) => {
+            collect_meaningful_product_factors(inner, factors, modulus)
         }
         //Nem nulla konstans szorzót elhagyhatunk a mintázat felismeréséhez
-        UcpExpr::Const(UcpScalar::NonZero | UcpScalar::Known(_)) => {}
-        //Nullával szorzott rész nem ad hasznos All-But-One információt
-        UcpExpr::Scale(_, UcpScalar::Zero) | UcpExpr::Const(UcpScalar::Zero) => {}
+        UcpExpr::Const(scalar) if scalar.is_non_zero_with_modulus(modulus) => {}
+        //Retain zero factors: discarding one would turn a tautology into a constraint.
         //Minden más valódi faktor marad
         _ => factors.push(expr),
     }
 }
 
-fn parse_plain_var(expr: &UcpExpr) -> Option<CellId> {
+fn parse_plain_var(expr: &UcpExpr, modulus: Option<&BigInt>) -> Option<CellId> {
     match expr {
         //Sima változó
         UcpExpr::Var(cell) => Some(cell.clone()),
         //Előjel és nem nulla skálázás mellett is ugyanazt a változót nézzük
-        UcpExpr::Neg(inner) => parse_plain_var(inner),
-        UcpExpr::Scale(inner, scalar) if scalar.is_statically_non_zero() => parse_plain_var(inner),
+        UcpExpr::Neg(inner) => parse_plain_var(inner, modulus),
+        UcpExpr::Scale(inner, scalar) if scalar.is_non_zero_with_modulus(modulus) => {
+            parse_plain_var(inner, modulus)
+        }
         _ => None,
     }
 }
@@ -413,9 +457,13 @@ fn constant_expr_value(expr: &UcpExpr) -> Option<BigInt> {
     }
 }
 
-fn linearize_zero_equation(expr: &UcpExpr, values: &UcpValueFacts) -> Option<LinearExpr> {
+fn linearize_zero_equation(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    modulus: Option<&BigInt>,
+) -> Option<LinearExpr> {
     //Ha az expression valójában csak egy érdemi faktort tartalmaz, azt külön lineárisítjuk
-    let factors = meaningful_product_factors(expr);
+    let factors = meaningful_product_factors(expr, modulus);
     if factors.len() == 1 {
         return linearize(factors[0], values);
     }
@@ -455,17 +503,6 @@ fn linearize(expr: &UcpExpr, values: &UcpValueFacts) -> Option<LinearExpr> {
             //Pontos lineáris alakhoz itt konkrét skála kellene
             UcpScalar::NonZero | UcpScalar::Unknown => None,
         },
-    }
-}
-
-fn bounded_value(value: BigInt) -> Option<BigInt> {
-    //Védőkorlát: a mostani value inference csak kezelhető méretű integer értékeket tárol
-    if value == BigInt::from(0)
-        || (value >= BigInt::from(i64::MIN) && value <= BigInt::from(i64::MAX))
-    {
-        Some(value)
-    } else {
-        None
     }
 }
 

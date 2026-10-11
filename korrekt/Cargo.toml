@@ -26,6 +26,9 @@ toml = "0.5"
 clap = "3.0"
 lazy_static = "1.4.0"
 
+[dev-dependencies]
+halo2_gadgets = { git = "https://github.com/Analyzable-Halo2/zcash-halo2.git", rev = "7fc5e14d53c19cc4e09f0af2ed4b87440e1bb4fb", default-features = false }
+
 [lib]
 name = "korrekt"
 path = "src/lib.rs"

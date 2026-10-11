@@ -1,14 +1,18 @@
 use super::{
-    all_but_one::infer_all_but_one_zero,
+    all_but_one::{infer_all_but_one_zero, infer_all_but_one_zero_with_modulus},
     base_conv::infer_base_conversions_with_modulus,
     bigint_mul::infer_bigint_mul_with_modulus,
     cell::CellId,
     expr::UcpExpr,
     facts::UcpFacts,
-    rules::{expression_is_unique, infer_assigned_cell_from_zero_equation},
+    rules::{
+        expression_is_unique, infer_assigned_cell_from_zero_equation,
+        infer_assigned_cell_from_zero_equation_with_modulus,
+    },
     value::{
+        infer_domains_from_expression_domain_with_modulus, infer_linear_system_values_with_modulus,
         infer_value_domains_from_zero_equation,
-        infer_value_domains_from_zero_equation_with_modulus, UcpValueFacts,
+        infer_value_domains_from_zero_equation_with_modulus, UcpValueDomain, UcpValueFacts,
     },
 };
 use num_bigint::BigInt;
@@ -115,7 +119,13 @@ pub fn analyze_expressions_with_values(
     initial_facts: UcpFacts,
     initial_value_facts: UcpValueFacts,
 ) -> UcpResult {
-    analyze_expressions_with_optional_modulus(expressions, initial_facts, initial_value_facts, None)
+    analyze_expressions_with_optional_modulus(
+        expressions,
+        &[],
+        initial_facts,
+        initial_value_facts,
+        None,
+    )
 }
 
 //UCP fixpoint futtatása a circuit tényleges mezőmodulusával
@@ -127,6 +137,24 @@ pub fn analyze_expressions_with_values_and_modulus(
 ) -> UcpResult {
     analyze_expressions_with_optional_modulus(
         expressions,
+        &[],
+        initial_facts,
+        initial_value_facts,
+        Some(field_modulus),
+    )
+}
+
+/// Propagate zero equations and finite expression memberships in the same Delta fixpoint.
+pub fn analyze_expressions_with_domains_and_modulus(
+    expressions: &[UcpExpr],
+    expression_domains: &[(UcpExpr, UcpValueDomain)],
+    initial_facts: UcpFacts,
+    initial_value_facts: UcpValueFacts,
+    field_modulus: &BigInt,
+) -> UcpResult {
+    analyze_expressions_with_optional_modulus(
+        expressions,
+        expression_domains,
         initial_facts,
         initial_value_facts,
         Some(field_modulus),
@@ -135,6 +163,7 @@ pub fn analyze_expressions_with_values_and_modulus(
 
 fn analyze_expressions_with_optional_modulus(
     expressions: &[UcpExpr],
+    expression_domains: &[(UcpExpr, UcpValueDomain)],
     initial_facts: UcpFacts,
     initial_value_facts: UcpValueFacts,
     field_modulus: Option<&BigInt>,
@@ -156,6 +185,7 @@ fn analyze_expressions_with_optional_modulus(
         changed = false;
 
         for expr in expressions {
+            //Fig. 9-10 value inference: Delta domaineket tanulunk a null-egyenletekből
             //Először érték/domain információt próbálunk tanulni a zero equationből
             let value_inferences = match field_modulus {
                 Some(field_modulus) => infer_value_domains_from_zero_equation_with_modulus(
@@ -167,10 +197,9 @@ fn analyze_expressions_with_optional_modulus(
             };
 
             for (cell, domain) in value_inferences {
-                let is_exact = domain.is_singleton();
                 changed |= value_facts.mark_domain(cell.clone(), domain);
                 //Konkrét egyértékű domainből uniqueness is következik
-                if is_exact {
+                if value_facts.known_value(&cell).is_some() {
                     changed |= facts.mark_unique(cell);
                 }
             }
@@ -181,13 +210,25 @@ fn analyze_expressions_with_optional_modulus(
             }
 
             //Assign-szerű szabály: egyetlen lineáris ismeretlen cellát unique-nak jelöl
-            if let Some(cell) = infer_assigned_cell_from_zero_equation(expr, &facts) {
+            let assigned = match field_modulus {
+                Some(modulus) => {
+                    infer_assigned_cell_from_zero_equation_with_modulus(expr, &facts, modulus)
+                }
+                None => infer_assigned_cell_from_zero_equation(expr, &facts),
+            };
+            if let Some(cell) = assigned {
                 changed |= facts.mark_unique(cell);
             }
         }
 
         //Több constraintes all-but-one-0 szabály futtatása
-        for inference in infer_all_but_one_zero(expressions, &facts, &value_facts) {
+        let all_but_one = match field_modulus {
+            Some(modulus) => {
+                infer_all_but_one_zero_with_modulus(expressions, &facts, &value_facts, modulus)
+            }
+            None => infer_all_but_one_zero(expressions, &facts, &value_facts),
+        };
+        for inference in all_but_one {
             if let Some(value) = inference.value {
                 changed |= value_facts.mark_known(inference.cell.clone(), value);
             }
@@ -195,6 +236,29 @@ fn analyze_expressions_with_optional_modulus(
         }
 
         if let Some(field_modulus) = field_modulus {
+            //Lookup projections remain available when later equations reveal other operands.
+            for (expr, domain) in expression_domains {
+                for (cell, domain) in infer_domains_from_expression_domain_with_modulus(
+                    expr,
+                    domain,
+                    &value_facts,
+                    field_modulus,
+                ) {
+                    changed |= value_facts.mark_domain(cell.clone(), domain);
+                    if value_facts.known_value(&cell).is_some() {
+                        changed |= facts.mark_unique(cell);
+                    }
+                }
+            }
+            //A rangvizsgalat melle konkret megoldast is tanulunk, ami uj Delta koroket indithat.
+            for (cell, value) in
+                infer_linear_system_values_with_modulus(expressions, &value_facts, field_modulus)
+            {
+                changed |= value_facts.mark_known(cell.clone(), value);
+                if value_facts.known_value(&cell).is_some() {
+                    changed |= facts.mark_unique(cell);
+                }
+            }
             //Base conversion szabály futtatása a circuit tényleges field modulusával
             for inference in infer_base_conversions_with_modulus(
                 expressions,
@@ -248,6 +312,102 @@ fn analyze_expressions_with_optional_modulus(
 mod tests {
     use super::*;
     use crate::circuit_analyzer::ucp::cell::CellId;
+
+    #[test]
+    fn relational_lookup_domains_join_the_equation_fixpoint() {
+        let cells: Vec<_> = (0..3).map(|row| CellId::advice(0, row)).collect();
+        let digit_domain = UcpValueDomain::finite_set((0..4).map(BigInt::from)).unwrap();
+        let memberships: Vec<_> = (0..2)
+            .map(|row| {
+                (
+                    UcpExpr::add(
+                        UcpExpr::var(cells[row].clone()),
+                        UcpExpr::scale_by(
+                            UcpExpr::var(cells[row + 1].clone()),
+                            super::super::expr::UcpScalar::known_i64(-4),
+                        ),
+                    ),
+                    digit_domain.clone(),
+                )
+            })
+            .collect();
+        let modulus = BigInt::from(97);
+        let unresolved = analyze_expressions_with_domains_and_modulus(
+            &[],
+            &memberships,
+            UcpFacts::new(),
+            UcpValueFacts::new(),
+            &modulus,
+        );
+        assert!(
+            unresolved.value_facts.domains().is_empty(),
+            "No assumed final zero"
+        );
+        let result = analyze_expressions_with_domains_and_modulus(
+            &[UcpExpr::var(cells[2].clone())],
+            &memberships,
+            UcpFacts::new(),
+            UcpValueFacts::new(),
+            &modulus,
+        );
+        assert_eq!(
+            result.value_facts.domain(&cells[0]),
+            Some(&UcpValueDomain::finite_set((0..16).map(BigInt::from)).unwrap())
+        );
+        assert_eq!(result.value_facts.domain(&cells[1]), Some(&digit_domain));
+        assert_eq!(
+            result.value_facts.known_value(&cells[2]),
+            Some(&BigInt::from(0))
+        );
+        assert!(!result.facts.is_unique(&cells[0]));
+    }
+
+    #[test]
+    fn relational_lookup_projection_preserves_holes() {
+        let x = CellId::advice(0, 0);
+        let y = CellId::advice(0, 1);
+        let holes = UcpValueDomain::finite_set([BigInt::from(0), BigInt::from(2)]).unwrap();
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(y.clone(), holes.clone());
+        let expr = UcpExpr::add(
+            UcpExpr::var(x.clone()),
+            UcpExpr::scale_by(
+                UcpExpr::var(y),
+                super::super::expr::UcpScalar::known_i64(-4),
+            ),
+        );
+        let result = analyze_expressions_with_domains_and_modulus(
+            &[],
+            &[(expr, holes)],
+            UcpFacts::new(),
+            values,
+            &BigInt::from(97),
+        );
+        assert_eq!(
+            result.value_facts.domain(&x),
+            Some(&UcpValueDomain::finite_set([0, 2, 8, 10].into_iter().map(BigInt::from)).unwrap())
+        );
+    }
+
+    #[test]
+    fn lookup_domain_intersection_can_establish_uniqueness() {
+        let x = CellId::advice(0, 0);
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(
+            x.clone(),
+            UcpValueDomain::finite_set([0, 1].into_iter().map(BigInt::from)).unwrap(),
+        );
+        let domain = UcpValueDomain::finite_set([1, 2].into_iter().map(BigInt::from)).unwrap();
+        let result = analyze_expressions_with_domains_and_modulus(
+            &[],
+            &[(UcpExpr::var(x.clone()), domain)],
+            UcpFacts::new(),
+            values,
+            &BigInt::from(97),
+        );
+        assert_eq!(result.value_facts.known_value(&x), Some(&BigInt::from(1)));
+        assert!(result.facts.is_unique(&x));
+    }
 
     //Azt ellenőrzi, hogy az engine külön tudja választani a unique és unresolved expressionöket
     #[test]
@@ -443,7 +603,51 @@ mod tests {
         assert_eq!(result.value_facts.known_value(&b2), Some(&BigInt::from(1)));
     }
 
-    //Azt ellenőrzi, hogy a BigInt-Mul/lineáris rendszer szabály az engine-ben is fut
+    //Mar unique cellak konkret megoldasa is elinditja a nemlinearis ertekkovetkeztetest.
+    #[test]
+    fn linear_system_values_unlock_nonlinear_value_inference() {
+        let u = CellId::instance(0, 0);
+        let v = CellId::instance(1, 0);
+        let x = CellId::advice(0, 0);
+        let y = CellId::advice(1, 0);
+        let out = CellId::advice(2, 0);
+        let facts = UcpFacts::from_iter([u.clone(), v.clone(), x.clone(), y.clone()]);
+        let mut values = UcpValueFacts::new();
+        values.mark_known(u.clone(), BigInt::from(10));
+        values.mark_known(v.clone(), BigInt::from(2));
+        let expressions = vec![
+            UcpExpr::add(
+                UcpExpr::add(UcpExpr::var(x.clone()), UcpExpr::var(y.clone())),
+                UcpExpr::neg(UcpExpr::var(u)),
+            ),
+            UcpExpr::add(
+                UcpExpr::add(
+                    UcpExpr::var(x.clone()),
+                    UcpExpr::neg(UcpExpr::var(y.clone())),
+                ),
+                UcpExpr::neg(UcpExpr::var(v)),
+            ),
+            UcpExpr::add(
+                UcpExpr::mul(UcpExpr::var(x.clone()), UcpExpr::var(x.clone())),
+                UcpExpr::neg(UcpExpr::var(out.clone())),
+            ),
+        ];
+        let result = analyze_expressions_with_values_and_modulus(
+            &expressions,
+            facts,
+            values,
+            &BigInt::from(101),
+        );
+        for (cell, value) in [(x, 6), (y, 4), (out, 36)] {
+            assert!(result.facts.is_unique(&cell));
+            assert_eq!(
+                result.value_facts.known_value(&cell),
+                Some(&BigInt::from(value))
+            );
+        }
+    }
+
+    //Azt ellenorzi, hogy a BigInt-Mul/linearis rendszer szabaly az engine-ben is fut
     #[test]
     fn bigint_mul_marks_full_rank_linear_system_unique() {
         let a = CellId::instance(0, 0);

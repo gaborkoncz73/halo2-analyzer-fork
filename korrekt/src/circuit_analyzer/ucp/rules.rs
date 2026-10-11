@@ -3,6 +3,7 @@ use super::{
     expr::{UcpExpr, UcpScalar},
     facts::UcpFacts,
 };
+use num_bigint::BigInt;
 
 //A cikk Fig. 7 szerinti expression-level uniqueness szabályait valósítja meg
 pub fn expression_is_unique(expr: &UcpExpr, facts: &UcpFacts) -> bool {
@@ -16,6 +17,7 @@ pub fn expression_is_unique(expr: &UcpExpr, facts: &UcpFacts) -> bool {
         //Nullával skálázás mindig unique, különben a belső expressiontől függ
         UcpExpr::Scale(inner, scalar) => match scalar {
             UcpScalar::Zero => true,
+            UcpScalar::Known(value) if value == &BigInt::from(0) => true,
             UcpScalar::NonZero | UcpScalar::Unknown | UcpScalar::Known(_) => {
                 expression_is_unique(inner, facts)
             }
@@ -35,7 +37,26 @@ pub fn expression_is_unique(expr: &UcpExpr, facts: &UcpFacts) -> bool {
 
 //Assign-szerű szabály: zero equationből egyetlen ismeretlen cellát próbál unique-nak bizonyítani
 pub fn infer_assigned_cell_from_zero_equation(expr: &UcpExpr, facts: &UcpFacts) -> Option<CellId> {
-    let analysis = analyze_assign_candidate(expr, facts);
+    infer_assigned_cell_with_optional_modulus(expr, facts, None)
+}
+
+pub fn infer_assigned_cell_from_zero_equation_with_modulus(
+    expr: &UcpExpr,
+    facts: &UcpFacts,
+    modulus: &BigInt,
+) -> Option<CellId> {
+    if modulus <= &BigInt::from(1) {
+        return None;
+    }
+    infer_assigned_cell_with_optional_modulus(expr, facts, Some(modulus))
+}
+
+fn infer_assigned_cell_with_optional_modulus(
+    expr: &UcpExpr,
+    facts: &UcpFacts,
+    modulus: Option<&BigInt>,
+) -> Option<CellId> {
+    let analysis = analyze_assign_candidate(expr, facts, modulus);
 
     if analysis.valid {
         analysis.candidate
@@ -94,7 +115,11 @@ impl AssignAnalysis {
 }
 
 //Megkeresi, hogy az expressionben pontosan egy lineáris ismeretlen cella van-e
-fn analyze_assign_candidate(expr: &UcpExpr, facts: &UcpFacts) -> AssignAnalysis {
+fn analyze_assign_candidate(
+    expr: &UcpExpr,
+    facts: &UcpFacts,
+    modulus: Option<&BigInt>,
+) -> AssignAnalysis {
     //Ha az egész expression már unique, nincs új candidate
     if expression_is_unique(expr, facts) {
         return AssignAnalysis::none();
@@ -106,19 +131,22 @@ fn analyze_assign_candidate(expr: &UcpExpr, facts: &UcpFacts) -> AssignAnalysis 
         //Konstansból nem lesz candidate
         UcpExpr::Const(_) => AssignAnalysis::none(),
         //Negálás nem változtatja meg a candidate-et
-        UcpExpr::Neg(inner) => analyze_assign_candidate(inner, facts),
+        UcpExpr::Neg(inner) => analyze_assign_candidate(inner, facts, modulus),
         //Skálázásnál csak biztosan nem nulla skála mellett lehet továbbmenni
-        UcpExpr::Scale(inner, scalar) => match scalar {
-            UcpScalar::Zero => AssignAnalysis::none(),
-            UcpScalar::NonZero | UcpScalar::Known(_) => analyze_assign_candidate(inner, facts),
-            UcpScalar::Unknown => AssignAnalysis::invalid(),
-        },
-        //Összeadásnál a két oldal candidate-jeit össze kell fésülni
-        UcpExpr::Add(left, right) => {
-            analyze_assign_candidate(left, facts).merge_add(analyze_assign_candidate(right, facts))
+        UcpExpr::Scale(inner, scalar) => {
+            if scalar.is_non_zero_with_modulus(modulus) {
+                analyze_assign_candidate(inner, facts, modulus)
+            } else if matches!(scalar, UcpScalar::Unknown) {
+                AssignAnalysis::invalid()
+            } else {
+                AssignAnalysis::none()
+            }
         }
+        //Összeadásnál a két oldal candidate-jeit össze kell fésülni
+        UcpExpr::Add(left, right) => analyze_assign_candidate(left, facts, modulus)
+            .merge_add(analyze_assign_candidate(right, facts, modulus)),
         //Szorzásnál csak speciális, biztonságos esetekből tanulunk
-        UcpExpr::Mul(left, right) => analyze_product_assign_candidate(left, right, facts),
+        UcpExpr::Mul(left, right) => analyze_product_assign_candidate(left, right, facts, modulus),
     }
 }
 
@@ -127,6 +155,7 @@ fn analyze_product_assign_candidate(
     left: &UcpExpr,
     right: &UcpExpr,
     facts: &UcpFacts,
+    modulus: Option<&BigInt>,
 ) -> AssignAnalysis {
     //Ha valamelyik oldal nulla, a szorzatból nincs új információ
     if is_zero_constant(left) || is_zero_constant(right) {
@@ -139,13 +168,13 @@ fn analyze_product_assign_candidate(
     }
 
     //Nem nulla konstanssal szorzás mellett a másik oldal candidate-je számít
-    if is_non_zero_constant(left) {
-        return analyze_assign_candidate(right, facts);
+    if is_non_zero_constant(left, modulus) {
+        return analyze_assign_candidate(right, facts, modulus);
     }
 
     //Nem nulla konstanssal szorzás mellett a másik oldal candidate-je számít
-    if is_non_zero_constant(right) {
-        return analyze_assign_candidate(left, facts);
+    if is_non_zero_constant(right, modulus) {
+        return analyze_assign_candidate(left, facts, modulus);
     }
 
     //Általános szorzatból nem következtetünk, mert nem biztonságos
@@ -154,15 +183,12 @@ fn analyze_product_assign_candidate(
 
 //Ellenőrzi, hogy az expression biztosan nulla konstans-e
 fn is_zero_constant(expr: &UcpExpr) -> bool {
-    matches!(expr, UcpExpr::Const(UcpScalar::Zero))
+    matches!(expr, UcpExpr::Const(scalar) if scalar.is_zero())
 }
 
 //Ellenőrzi, hogy az expression biztosan nem nulla konstans-e
-fn is_non_zero_constant(expr: &UcpExpr) -> bool {
-    matches!(
-        expr,
-        UcpExpr::Const(UcpScalar::NonZero | UcpScalar::Known(_))
-    )
+fn is_non_zero_constant(expr: &UcpExpr, modulus: Option<&BigInt>) -> bool {
+    matches!(expr, UcpExpr::Const(scalar) if scalar.is_non_zero_with_modulus(modulus))
 }
 
 #[cfg(test)]

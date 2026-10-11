@@ -3,7 +3,9 @@ use super::{
     halo2_proofs_libs::*,
     ucp::{
         cell::{CellId, CellKind},
-        value::{UcpValueDomain, UcpValueFacts},
+        plonkish::query_row,
+        privacy_subset::OriginalAssertionStore,
+        value::{normalize_field_value, UcpValueDomain, UcpValueFacts},
     },
 };
 use anyhow::{anyhow, Context, Result};
@@ -12,8 +14,9 @@ use num::{BigInt, Num};
 use num_bigint::Sign;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
+    io::Write,
     path::Path,
     process::Command,
 };
@@ -39,12 +42,13 @@ pub struct Analyzer<F: AnalyzableField> {
     pub cs: ConstraintSystem<F>,
     /// The regions in the circuit.
     pub regions: Vec<Region>,
+    pub usable_rows: std::ops::Range<usize>,
     // The fixed cells in the circuit, arranged as [column][row].
     pub fixed: Vec<Vec<BigInt>>,
     pub selectors: Vec<Vec<bool>>,
     pub log: Vec<String>,
     pub permutation: HashMap<String, String>,
-    pub instance_cells: HashMap<String, i64>,
+    pub instance_cells: HashMap<String, BigInt>,
     pub cell_to_cycle_head: HashMap<String, String>,
     pub counter: u32,
     pub lookup_mappings: Vec<HashMap<String, usize>>,
@@ -58,6 +62,16 @@ pub struct Analyzer<F: AnalyzableField> {
     pub selector_indices: HashSet<usize>,
     pub ucp_unique_variables: HashSet<String>,
     pub ucp_value_domains: Vec<(String, UcpValueDomain)>,
+    //Instance-local UCP solver budget; None retains the legacy environment fallback.
+    smt_timeout_ms: Option<u64>,
+    // Literal original assertions only; a bounded subset may prove domain exclusion cheaply.
+    validation_subset_assertions: Vec<String>,
+    // Opt-in recovery metadata; every body is a literal assertion also emitted to the original file.
+    original_recovery_assertions: Option<OriginalAssertionStore>,
+    // Clearing the exported facts cannot undo assertions already written to the SMT file.
+    ucp_assertions_written: bool,
+    // Changing verification options cannot release observations or legacy restrictions already written.
+    query_context_written: bool,
 }
 
 #[derive(Debug)]
@@ -68,7 +82,7 @@ pub enum NodeCategory {
     Invalid,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NodeType {
     Constant,
     Advice,
@@ -113,6 +127,213 @@ pub enum SemanticQueryResult {
     Unknown,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SemanticQueryOutput {
+    pub result: SemanticQueryResult,
+    //Csak rogzitett public adatok es bizonyitott egyertelmuseg mellett adunk konkret erteket.
+    pub value: Option<BigInt>,
+    pub value_unavailable_reason: Option<ValueRecoveryFailure>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ValueRecoveryFailure {
+    RepresentationLimit,
+    PublicContextNotConcrete,
+    UnavailableConstant,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum DomainEntailmentResult {
+    Entailed,
+    /// A satisfying assignment whose cell value lies outside the claimed domain.
+    Counterexample(BigInt),
+    Inconsistent,
+}
+
+pub(crate) struct DomainEntailmentQuery {
+    pub result: DomainEntailmentResult,
+    pub solver_checks: usize,
+    pub subset_checks: usize,
+}
+
+/// Immutable original constraints and public observations, captured before any UCP assertions.
+pub(crate) struct OriginalPrivateQueryContext {
+    smt: String,
+    expressions: BTreeMap<CellId, String>,
+    constants: BTreeMap<CellId, BigInt>,
+    prime: BigInt,
+    targeted_subsets: BTreeMap<CellId, (String, usize)>,
+}
+
+impl OriginalPrivateQueryContext {
+    pub(crate) fn check_satisfiability<F: AnalyzableField>(
+        &self,
+        timeout_ms: Option<u64>,
+    ) -> Result<Satisfiability> {
+        let path = "src/output/private_original_satisfiability.smt2";
+        let mut file = File::create(path).context("Failed to create original SAT query")?;
+        file.write_all(self.smt.as_bytes())?;
+        Ok(Analyzer::<F>::solve_and_get_model_with_timeout(
+            path.to_owned(),
+            &HashSet::new(),
+            timeout_ms,
+        )?
+        .sat)
+    }
+
+    pub(crate) fn has_targeted_subset(&self, cell: &CellId) -> bool {
+        self.targeted_subsets.contains_key(cell)
+    }
+
+    /// No subset SAT model is exposed: it need not satisfy omitted gates or lookup tuples.
+    pub(crate) fn check_unseen_subset<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        blocked_values: &BTreeSet<BigInt>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Satisfiability> {
+        let (smt, _) = self
+            .targeted_subsets
+            .get(cell)
+            .context("Missing targeted original subset")?;
+        let expression = self
+            .expressions
+            .get(cell)
+            .context("Missing subset target expression")?;
+        let path = "src/output/private_recovery_subset.smt2";
+        let mut file = File::create(path).context("Failed to create recovery subset query")?;
+        file.write_all(smt.as_bytes())?;
+        let mut printer = Printer::new(&mut file);
+        for value in blocked_values {
+            printer.write_assert_bool(
+                format!(
+                    "(not {})",
+                    Analyzer::<F>::smt_field_equality(expression, value, &self.prime)
+                ),
+                Operation::And,
+            );
+        }
+        Ok(Analyzer::<F>::solve_and_get_model_with_timeout(
+            path.to_owned(),
+            &HashSet::new(),
+            timeout_ms,
+        )?
+        .sat)
+    }
+
+    /// Blocks target values only. Other witness cells remain free in the original context.
+    pub(crate) fn query_unseen_value<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        blocked_values: &BTreeSet<BigInt>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<BigInt>> {
+        let expression = self
+            .expressions
+            .get(cell)
+            .context("Cell absent from original SMT snapshot")?;
+        let path = "src/output/private_domain_discovery.smt2";
+        let mut file = File::create(path).context("Failed to create domain discovery file")?;
+        file.write_all(self.smt.as_bytes())?;
+        let mut printer = Printer::new(&mut file);
+        for value in blocked_values {
+            printer.write_assert_bool(
+                format!(
+                    "(not {})",
+                    Analyzer::<F>::smt_field_equality(expression, value, &self.prime)
+                ),
+                Operation::And,
+            );
+        }
+        let variables = if self.constants.contains_key(cell) {
+            HashSet::new()
+        } else {
+            HashSet::from([expression.clone()])
+        };
+        let model = Analyzer::<F>::solve_and_get_model_with_timeout(
+            path.to_owned(),
+            &variables,
+            timeout_ms,
+        )?;
+        if model.sat == Satisfiability::Unsatisfiable {
+            return Ok(None);
+        }
+        let value = if let Some(value) = self.constants.get(cell) {
+            value.clone()
+        } else {
+            let value = &model
+                .result
+                .get(expression)
+                .context("Missing discovered SMT cell value")?
+                .value;
+            if BigInt::from_str_radix(&value.order, 10)? != self.prime {
+                return Err(anyhow!("Discovered SMT value belongs to a different field"));
+            }
+            BigInt::from_str_radix(&value.element, 10)
+                .context("Invalid discovered SMT field value")?
+        };
+        // This is a model sample, not an Exact fact. Only exhaustion can establish a complete domain.
+        Ok(Some(value))
+    }
+
+    /// A separate file per check prevents candidate assumptions from accumulating.
+    pub(crate) fn check_membership<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        domain: &UcpValueDomain,
+        exclude: bool,
+        timeout_ms: Option<u64>,
+    ) -> Result<Satisfiability> {
+        let expression = self
+            .expressions
+            .get(cell)
+            .context("Cell absent from original SMT snapshot")?;
+        let membership = match domain {
+            UcpValueDomain::Exact(value) => {
+                Analyzer::<F>::smt_field_equality(expression, value, &self.prime)
+            }
+            UcpValueDomain::FiniteSet(values) if values.is_empty() => "false".to_owned(),
+            UcpValueDomain::FiniteSet(values) => format!(
+                "(or {})",
+                values
+                    .iter()
+                    .map(|value| Analyzer::<F>::smt_field_equality(expression, value, &self.prime))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        };
+        let path = "src/output/private_domain_refinement.smt2";
+        let mut file = File::create(path).context("Failed to create domain refinement file")?;
+        file.write_all(self.smt.as_bytes())?;
+        Printer::new(&mut file).write_assert_bool(
+            if exclude {
+                format!("(not {})", membership)
+            } else {
+                membership
+            },
+            Operation::And,
+        );
+        Ok(Analyzer::<F>::solve_and_get_model_with_timeout(
+            path.to_owned(),
+            &HashSet::new(),
+            timeout_ms,
+        )?
+        .sat)
+    }
+}
+
+const MAX_VALIDATION_SUBSET_ASSERTIONS: usize = 256;
+
+impl From<SemanticQueryResult> for SemanticQueryOutput {
+    fn from(result: SemanticQueryResult) -> Self {
+        Self {
+            result,
+            value: None,
+            value_unavailable_reason: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum IsZeroExpression {
     ZeroSelector,
@@ -142,6 +363,19 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         analysis_type: AnalyzerType,
         analyzer_input: Option<&AnalyzerInput>,
     ) -> Result<Self, anyhow::Error> {
+        Self::new_with_original_subset_capture(circuit, k, analysis_type, analyzer_input, false)
+    }
+
+    pub(crate) fn new_with_original_subset_capture<ConcreteCircuit: Circuit<F>>(
+        circuit: &ConcreteCircuit,
+        k: u32,
+        analysis_type: AnalyzerType,
+        analyzer_input: Option<&AnalyzerInput>,
+        capture_original: bool,
+    ) -> Result<Self, anyhow::Error> {
+        if let Some(input) = analyzer_input {
+            input.verification_input.validate_public_values()?;
+        }
         let prime = Self::analyzer_field_modulus()?.to_string();
         let analyzable = Analyzable::config_and_synthesize(circuit, k)?;
 
@@ -181,6 +415,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         let mut analyzer = Analyzer {
             cs: analyzable.cs,
             regions: analyzable.regions,
+            usable_rows: analyzable.usable_rows,
             fixed: fixed,
             selectors: analyzable.selectors,
             log: Vec::new(),
@@ -199,6 +434,11 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             selector_indices,
             ucp_unique_variables: HashSet::new(),
             ucp_value_domains: Vec::new(),
+            smt_timeout_ms: None,
+            validation_subset_assertions: Vec::new(),
+            original_recovery_assertions: capture_original.then(OriginalAssertionStore::default),
+            ucp_assertions_written: false,
+            query_context_written: false,
         };
 
         fs::create_dir_all("src/output/").unwrap();
@@ -217,7 +457,9 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 let instance =
                     retrieve_user_input_for_underconstrained::<Fr>(input, &analyzer.instance_cells)
                         .context("Failed to retrieve user input!")?;
-                analyzer.instance_cells = instance.clone();
+                let specified = crate::io::analyzer_io_type::VerificationInput::new(instance, 1);
+                specified.validate_public_values()?;
+                analyzer.instance_cells = specified.instance_cells;
             } else if input.verification_method == VerificationMethod::Specific {
                 analyzer.instance_cells = analyzer_input
                     .unwrap()
@@ -228,7 +470,9 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
 
             printer.write_start(analyzer.prime.to_owned());
 
-            let _ = analyzer.decompose_polynomial(&mut printer, &analyzer_input.unwrap());
+            analyzer
+                .decompose_polynomial(&mut printer, analyzer_input.unwrap())
+                .context("Failed to encode circuit constraints for SMT analysis")?;
 
             for permutation in &analyzer.permutation {
                 let mut permutation_r = permutation.0.to_owned();
@@ -294,6 +538,37 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                         neg,
                         NodeType::Advice,
                     );
+                    if analyzer.validation_subset_assertions.len()
+                        < MAX_VALIDATION_SUBSET_ASSERTIONS
+                    {
+                        analyzer
+                            .validation_subset_assertions
+                            .push(printer.get_assert(
+                                term.clone(),
+                                "0".to_owned(),
+                                NodeType::Poly,
+                                Operation::Equal,
+                            )?);
+                    }
+                    if let Some(store) = &mut analyzer.original_recovery_assertions {
+                        if store.has_capacity() {
+                            let variables = [
+                                (!r_is_fixed).then_some(permutation_r),
+                                (!l_is_fixed).then_some(permutation_l),
+                            ]
+                            .into_iter()
+                            .flatten();
+                            store.retain(
+                                printer.get_assert(
+                                    term.clone(),
+                                    "0".to_owned(),
+                                    NodeType::Poly,
+                                    Operation::Equal,
+                                )?,
+                                variables,
+                            );
+                        }
+                    }
                     printer.write_assert(term, "0".to_owned(), NodeType::Poly, Operation::Equal);
                 }
             }
@@ -410,10 +685,32 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
     /// (if not almost certainly a bug)
     pub fn analyze_unconstrained_cells(&mut self) -> Result<AnalyzerOutput> {
         let mut count = 0;
+
+        //Index the gate polynomials by the advice column/rotation they query.
+        //The previous implementation rescanned and re-evaluated every polynomial on
+        //every region row for every assigned cell, which was prohibitively expensive
+        //for large circuits.
+        let mut queries_by_column: HashMap<Column<Any>, Vec<(&Expression<F>, Rotation)>> =
+            HashMap::new();
+        for gate in &self.cs.gates {
+            for poly in gate.polynomials() {
+                for (column, rotation) in abstract_expr::extract_columns(poly) {
+                    queries_by_column
+                        .entry(column)
+                        .or_default()
+                        .push((poly, rotation));
+                }
+            }
+        }
+
         for region in self.regions.iter() {
             let selectors = region.enabled_selectors.keys().cloned().collect();
-            let (region_begin, region_end) = region.rows.unwrap();
-            let mut used;
+            // A region that only adds copy constraints does not assign cells, so Halo2
+            // legitimately leaves its row range unset. There are no assigned cells to
+            // classify in such a region; the permutation assembly is analysed separately.
+            let Some((region_begin, region_end)) = region.rows else {
+                continue;
+            };
             for cell in region.cells.clone() {
                 #[cfg(any(
                     feature = "use_pse_halo2_proofs",
@@ -423,36 +720,55 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 ))]
                 let (reg_column, rotation) = (cell.0 .0, cell.1);
                 #[cfg(feature = "use_zcash_halo2_proofs")]
-                let (reg_column, rotation) = (cell.0, cell.1);
-                used = false;
-                match reg_column.column_type {
-                    Any::Fixed => continue,
-                    _ => {
-                        for row_num in 0..region_end - region_begin + 1 {
-                            for gate in self.cs.gates.iter() {
-                                for poly in gate.polynomials() {
-                                    let advices = abstract_expr::extract_columns(poly);
-                                    let eval = abstract_expr::eval_abstract(
-                                    poly,
-                                    &selectors,
-                                    region_begin,
-                                    region_end,
-                                    row_num as i32,
-                                    &self.fixed,
-                                    &self.cell_to_cycle_head,
-                                    &self.cycle_abs_value,
-                                )
-                                .with_context(|| format!(
-                                    "Failed to run abstract evaluation for polynomial at region from row: {} to {}.",
-                                    region_begin, region_end
-                                ))?;
-                                    if eval != AbsResult::Zero
-                                        && advices
-                                            .contains(&(reg_column, Rotation(rotation as i32)))
-                                    {
-                                        used = true;
-                                    }
-                                }
+                let (reg_column, assigned_row) = (cell.0, cell.1);
+
+                if matches!(reg_column.column_type, Any::Fixed) {
+                    continue;
+                }
+
+                //A permutation/copy constraint is itself a constraint. A cell in a
+                //non-trivial permutation cycle must therefore not be reported as wholly
+                //unconstrained even when it is not queried directly by a custom gate.
+                let column_prefix = match reg_column.column_type {
+                    Any::Advice => 'A',
+                    Any::Instance => 'I',
+                    Any::Fixed => unreachable!(),
+                };
+                let cell_name = format!("{}-{}-{}", column_prefix, reg_column.index, assigned_row);
+                let mut used = self.cell_to_cycle_head.contains_key(&cell_name);
+
+                if !used {
+                    if let Some(queries) = queries_by_column.get(&reg_column) {
+                        for (poly, query_rotation) in queries {
+                            //A query at rotation r, evaluated on local row q, addresses
+                            //region_begin + q + r. Solve this for q to evaluate only the
+                            //single row on which it can refer to the assigned cell.
+                            let local_row = i64::try_from(assigned_row).unwrap()
+                                - i64::try_from(region_begin).unwrap()
+                                - i64::from(query_rotation.0);
+                            if local_row < 0
+                                || local_row > i64::try_from(region_end - region_begin).unwrap()
+                            {
+                                continue;
+                            }
+
+                            let eval = abstract_expr::eval_abstract(
+                                poly,
+                                &selectors,
+                                region_begin,
+                                region_end,
+                                i32::try_from(local_row).unwrap(),
+                                &self.fixed,
+                                &self.cell_to_cycle_head,
+                                &self.cycle_abs_value,
+                            )
+                            .with_context(|| format!(
+                                "Failed to run abstract evaluation for polynomial at region from row: {} to {}.",
+                                region_begin, region_end
+                            ))?;
+                            if eval != AbsResult::Zero {
+                                used = true;
+                                break;
                             }
                         }
                     }
@@ -460,7 +776,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
 
                 if !used {
                     count += 1;
-                    self.log.push(format!("unconstrained cell in \"{}\" region: {:?} (rotation: {:?}) -- very likely a bug.", region.name,  reg_column, rotation));
+                    self.log.push(format!("unconstrained cell in \"{}\" region: {:?} (row: {:?}) -- very likely a bug.", region.name, reg_column, assigned_row));
                 }
             }
         }
@@ -483,13 +799,13 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         fixed: &Vec<Vec<BigInt>>,
     ) -> (
         HashMap<String, String>,
-        HashMap<String, i64>,
+        HashMap<String, BigInt>,
         HashMap<String, String>,
         HashMap<String, AbsResult>,
         HashMap<String, BigInt>,
     ) {
         let mut pairs = HashMap::<String, String>::new();
-        let mut instances = HashMap::<String, i64>::new();
+        let mut instances = HashMap::<String, BigInt>::new();
         let mut cycles = Vec::<Vec<String>>::new();
         let mut num_of_cycles = 0;
         let mut cell_to_cycle_head = HashMap::<String, String>::new();
@@ -557,7 +873,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                             }
                         }
                         if is_instance {
-                            instances.insert(left.clone(), 0);
+                            instances.insert(left.clone(), BigInt::from(0));
                         }
                         is_instance = false;
                         let (right_cell_col, right_cell_row) =
@@ -608,7 +924,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                             }
                         }
                         if is_instance {
-                            instances.insert(right.clone(), 0);
+                            instances.insert(right.clone(), BigInt::from(0));
                         }
                         pairs.insert(left.clone(), right.clone());
 
@@ -730,6 +1046,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         &mut self,
         analyzer_input: &AnalyzerInput,
     ) -> Result<AnalyzerOutput> {
+        analyzer_input.verification_input.validate_public_values()?;
         let mut analyzer_output: AnalyzerOutput = AnalyzerOutput {
             output_status: AnalyzerOutputStatus::Invalid,
         };
@@ -782,79 +1099,508 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         analyzer_input: &AnalyzerInput,
         query_cell: &CellId,
     ) -> Result<SemanticQueryResult> {
-        let Some(query_variable) = self.ucp_cell_to_smt_variable_name(query_cell) else {
-            return Ok(SemanticQueryResult::ProvenUnique);
+        Ok(self
+            .query_ucp_cell(analyzer_input, query_cell, false)?
+            .result)
+    }
+
+    pub fn query_ucp_cell_uniqueness_with_value(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+        query_cell: &CellId,
+    ) -> Result<SemanticQueryOutput> {
+        self.query_ucp_cell(analyzer_input, query_cell, true)
+    }
+
+    /// Bounds each solver process and CVC5 check without changing global environment.
+    pub fn set_smt_timeout_ms(&mut self, milliseconds: Option<u64>) -> Result<()> {
+        self.smt_timeout_ms = Self::resolve_smt_timeout_ms(milliseconds)?;
+        Ok(())
+    }
+
+    pub fn smt_timeout_ms(&self) -> Option<u64> {
+        self.smt_timeout_ms
+    }
+
+    /// Capture C before concrete public assertions; clearing an input map cannot undo earlier queries.
+    pub(crate) fn original_private_query_context_without_observations(
+        &mut self,
+        input: &AnalyzerInput,
+        cells: &[CellId],
+    ) -> Result<OriginalPrivateQueryContext> {
+        if self.query_context_written {
+            return Err(anyhow!(
+                "Unobserved SMT snapshot requires a fresh query context"
+            ));
+        }
+        let mut unobserved = input.clone();
+        unobserved.verification_method = VerificationMethod::None;
+        unobserved.verification_input.instance_cells.clear();
+        self.original_private_query_context(&unobserved, cells)
+    }
+
+    /// Caller establishes original SAT separately. Neither witness samples nor inferred facts are copied.
+    pub(crate) fn original_private_query_context(
+        &mut self,
+        input: &AnalyzerInput,
+        cells: &[CellId],
+    ) -> Result<OriginalPrivateQueryContext> {
+        if self.ucp_assertions_written
+            || !self.ucp_value_domains.is_empty()
+            || !self.ucp_unique_variables.is_empty()
+        {
+            return Err(anyhow!(
+                "Original SMT snapshot requires an unstrengthened analyzer"
+            ));
+        }
+        let (_, prime) = self.prepare_ucp_query_context(input)?;
+        let mut expressions = BTreeMap::new();
+        let mut constants = BTreeMap::new();
+        for cell in cells {
+            let expression = if let Some(variable) = self.ucp_cell_to_smt_variable_name(cell) {
+                if self.all_variables.insert(variable.clone()) {
+                    Printer::new(self.smt_file.as_mut().context("Missing SMT file")?)
+                        .write_var(variable.clone());
+                }
+                variable
+            } else {
+                let value = self
+                    .ucp_cell_constant_value(cell)
+                    .context("Cannot resolve private SMT cell")?;
+                constants.insert(cell.clone(), value.clone());
+                format!(
+                    "(as ff{} F)",
+                    Self::normalize_ucp_field_value(&value, &prime)
+                )
+            };
+            expressions.insert(cell.clone(), expression);
+        }
+        let mut targeted_subsets = BTreeMap::new();
+        if let Some(store) = &self.original_recovery_assertions {
+            let index = store.index();
+            let public_variables = input
+                .verification_input
+                .instance_cells
+                .keys()
+                .cloned()
+                .collect();
+            for (cell, expression) in &expressions {
+                if constants.contains_key(cell) {
+                    continue;
+                }
+                let selected = store.select(expression, &public_variables, &index);
+                if selected.is_empty() {
+                    continue;
+                }
+                let mut variables: BTreeSet<_> = selected
+                    .iter()
+                    .flat_map(|assertion| assertion.variables.iter().cloned())
+                    .collect();
+                variables.insert(expression.clone());
+                variables.extend(input.verification_input.instance_cells.keys().cloned());
+                let mut bytes = Vec::new();
+                let mut printer = Printer::new(&mut bytes);
+                printer.write_start(self.prime.clone());
+                for variable in variables {
+                    printer.write_var(variable);
+                }
+                for assertion in &selected {
+                    printer.write_assert_bool(assertion.body.clone(), Operation::And);
+                }
+                if input.verification_method == VerificationMethod::Specific {
+                    for (name, value) in &input.verification_input.instance_cells {
+                        printer.write_assert_bool(
+                            Self::smt_field_equality(name, value, &prime),
+                            Operation::And,
+                        );
+                    }
+                }
+                targeted_subsets.insert(cell.clone(), (String::from_utf8(bytes)?, selected.len()));
+            }
+        }
+        Ok(OriginalPrivateQueryContext {
+            smt: fs::read_to_string(&*SMT_FILE_PATH)
+                .context("Failed to capture original SMT model")?,
+            expressions,
+            constants,
+            prime,
+            targeted_subsets,
+        })
+    }
+
+    /// Checks that the current constraints and public observations admit a witness.
+    pub fn check_ucp_satisfiability(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+    ) -> Result<Satisfiability> {
+        let (variables, _) = self.prepare_ucp_query_context(analyzer_input)?;
+        Ok(Self::solve_and_get_model_with_timeout(
+            SMT_FILE_PATH.to_string(),
+            &variables,
+            self.smt_timeout_ms,
+        )?
+        .sat)
+    }
+
+    /// A SAT answer under temporary candidate equalities also proves original SAT.
+    /// UNSAT/unknown says nothing about the original context. Never retains the candidates.
+    pub(crate) fn check_ucp_satisfiability_with_hints(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+        hints: &UcpValueFacts,
+    ) -> Result<Option<Satisfiability>> {
+        if self.ucp_assertions_written
+            || !self.ucp_value_domains.is_empty()
+            || !self.ucp_unique_variables.is_empty()
+        {
+            return Err(anyhow!("SAT hints require an unstrengthened analyzer"));
+        }
+        let (_, prime) = self.prepare_ucp_query_context(analyzer_input)?;
+        let equalities: BTreeSet<_> = hints
+            .domains()
+            .iter()
+            .filter_map(|(cell, domain)| match domain {
+                UcpValueDomain::Exact(value) if cell.kind == CellKind::Advice => self
+                    .ucp_cell_to_smt_variable_name(cell)
+                    .filter(|variable| self.all_variables.contains(variable))
+                    .map(|variable| Self::smt_field_equality(&variable, value, &prime)),
+                _ => None,
+            })
+            .collect();
+        if equalities.is_empty() {
+            return Ok(None);
+        }
+        let smt_file = self.smt_file.as_mut().context("Failed to open SMT file")?;
+        let mut printer = Printer::new(smt_file);
+        printer.write_push(1);
+        for equality in equalities {
+            printer.write_assert_bool(equality, Operation::And);
+        }
+        // Only existence is needed; no candidate model becomes a recovered value.
+        let result = Self::solve_and_get_model_with_timeout(
+            SMT_FILE_PATH.to_string(),
+            &HashSet::new(),
+            self.smt_timeout_ms,
+        );
+        printer.write_pop(1);
+        result.map(|model| Some(model.sat))
+    }
+
+    /// For a fresh analyzer with no inferred assertions: checks C AND public AND x NOT IN domain.
+    /// The caller must not reuse an analyzer previously strengthened with UCP facts.
+    #[cfg(test)]
+    pub(crate) fn query_private_domain_entailment(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+        cell: &CellId,
+        domain: &UcpValueDomain,
+    ) -> Result<DomainEntailmentResult> {
+        Ok(self
+            .query_private_domain_entailment_internal(analyzer_input, cell, domain, true)?
+            .result)
+    }
+
+    /// Requires a just-established SAT result for this fresh circuit/public context.
+    /// Only the validator uses this path; it avoids repeating the same original SAT check.
+    pub(crate) fn query_private_domain_entailment_after_sat(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+        cell: &CellId,
+        domain: &UcpValueDomain,
+    ) -> Result<DomainEntailmentQuery> {
+        self.query_private_domain_entailment_internal(analyzer_input, cell, domain, false)
+    }
+
+    fn query_private_domain_entailment_internal(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+        cell: &CellId,
+        domain: &UcpValueDomain,
+        check_base: bool,
+    ) -> Result<DomainEntailmentQuery> {
+        if self.ucp_assertions_written
+            || !self.ucp_value_domains.is_empty()
+            || !self.ucp_unique_variables.is_empty()
+        {
+            return Err(anyhow!(
+                "Domain validation must not assume inferred UCP facts"
+            ));
+        }
+        let variable = self.ucp_cell_to_smt_variable_name(cell);
+        let expression = if let Some(variable) = &variable {
+            if self.all_variables.insert(variable.clone()) {
+                let smt_file = self.smt_file.as_mut().context("Failed to open SMT file")?;
+                Printer::new(smt_file).write_var(variable.clone());
+            }
+            variable.clone()
+        } else {
+            let constant = self
+                .ucp_cell_constant_value(cell)
+                .context("Cannot resolve cell to an SMT variable or a fixed constant")?;
+            let prime = BigInt::from_str_radix(&self.prime, 10)?;
+            format!(
+                "(as ff{} F)",
+                Self::normalize_ucp_field_value(&constant, &prime)
+            )
         };
-
-        if self.ucp_unique_variables.contains(&query_variable) {
-            return Ok(SemanticQueryResult::ProvenUnique);
+        let (_, prime) = self.prepare_ucp_query_context(analyzer_input)?;
+        let mut solver_checks = 0;
+        let mut subset_checks = 0;
+        if check_base {
+            solver_checks += 1;
+            let base = Self::solve_and_get_model_with_timeout(
+                SMT_FILE_PATH.to_string(),
+                &HashSet::new(),
+                self.smt_timeout_ms,
+            )?;
+            if base.sat == Satisfiability::Unsatisfiable {
+                return Ok(DomainEntailmentQuery {
+                    result: DomainEntailmentResult::Inconsistent,
+                    solver_checks,
+                    subset_checks,
+                });
+            }
         }
+        let membership = match domain {
+            UcpValueDomain::Exact(value) => Self::smt_field_equality(&expression, value, &prime),
+            UcpValueDomain::FiniteSet(values) if values.is_empty() => "false".to_string(),
+            UcpValueDomain::FiniteSet(values) => format!(
+                "(or {})",
+                values
+                    .iter()
+                    .map(|value| Self::smt_field_equality(&expression, value, &prime))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        };
+        let exclusion = format!("(not {})", membership);
+        if !check_base && !self.validation_subset_assertions.is_empty() {
+            solver_checks += 1;
+            subset_checks += 1;
+            // UNSAT of a weaker conjunction proves full exclusion; SAT is not a counterexample.
+            let subset = self.check_private_domain_subset(analyzer_input, &exclusion, &prime);
+            if Self::subset_proves_exclusion(subset)? {
+                return Ok(DomainEntailmentQuery {
+                    result: DomainEntailmentResult::Entailed,
+                    solver_checks,
+                    subset_checks,
+                });
+            }
+        }
+        let smt_file = self.smt_file.as_mut().context("Failed to open SMT file")?;
+        let mut printer = Printer::new(smt_file);
+        printer.write_push(1);
+        printer.write_assert_bool(exclusion, Operation::And);
+        solver_checks += 1;
+        let model_variables = variable.iter().cloned().collect();
+        let counterexample = Self::solve_and_get_model_with_timeout(
+            SMT_FILE_PATH.to_string(),
+            &model_variables,
+            self.smt_timeout_ms,
+        );
+        //Restore the scope even on solver errors; no tested claim becomes a premise.
+        printer.write_pop(1);
+        let counterexample = counterexample.context("Failed to validate recovered domain")?;
+        if counterexample.sat == Satisfiability::Unsatisfiable {
+            return Ok(DomainEntailmentQuery {
+                result: DomainEntailmentResult::Entailed,
+                solver_checks,
+                subset_checks,
+            });
+        }
+        let value = if let Some(variable) = variable {
+            let value = &counterexample
+                .result
+                .get(&variable)
+                .context("Missing domain counterexample value")?
+                .value
+                .element;
+            BigInt::from_str_radix(value, 10)?
+        } else {
+            self.ucp_cell_constant_value(cell)
+                .context("Missing fixed counterexample")?
+        };
+        Ok(DomainEntailmentQuery {
+            result: DomainEntailmentResult::Counterexample(
+                normalize_field_value(value.clone(), &prime).unwrap_or(value),
+            ),
+            solver_checks,
+            subset_checks,
+        })
+    }
 
+    fn subset_proves_exclusion(result: Result<Satisfiability>) -> Result<bool> {
+        match result {
+            Ok(Satisfiability::Unsatisfiable) => Ok(true),
+            Ok(Satisfiability::Satisfiable) => Ok(false),
+            Err(error)
+                if error
+                    .downcast_ref::<smt_parser::UnknownSolverResult>()
+                    .is_some() =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn check_private_domain_subset(
+        &self,
+        analyzer_input: &AnalyzerInput,
+        exclusion: &str,
+        prime: &BigInt,
+    ) -> Result<Satisfiability> {
+        let path = "src/output/private_domain_subset.smt2";
+        let mut file = File::create(path).context("Failed to create validation subset file")?;
+        let mut printer = Printer::new(&mut file);
+        printer.write_start(self.prime.clone());
+        for variable in self.all_variables.iter().collect::<BTreeSet<_>>() {
+            printer.write_var(variable.clone());
+        }
+        for assertion in &self.validation_subset_assertions {
+            printer.write_assert_bool(assertion.clone(), Operation::And);
+        }
+        if analyzer_input.verification_method == VerificationMethod::Specific {
+            for (name, value) in &analyzer_input.verification_input.instance_cells {
+                printer.write_assert_bool(
+                    Self::smt_field_equality(name, value, prime),
+                    Operation::And,
+                );
+            }
+        }
+        printer.write_assert_bool(exclusion.to_owned(), Operation::And);
+        Ok(Self::solve_and_get_model_with_timeout(
+            path.to_owned(),
+            &HashSet::new(),
+            self.smt_timeout_ms,
+        )?
+        .sat)
+    }
+
+    fn prepare_ucp_query_context(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+    ) -> Result<(HashSet<String>, BigInt)> {
+        analyzer_input.verification_input.validate_public_values()?;
         let mut vars_to_declare = Vec::new();
-        if self.all_variables.insert(query_variable.clone()) {
-            vars_to_declare.push(query_variable.clone());
-        }
-
         for (var, _) in &self.ucp_value_domains {
             if self.all_variables.insert(var.clone()) {
                 vars_to_declare.push(var.clone());
             }
         }
-
-        if matches!(
-            analyzer_input.verification_method,
-            VerificationMethod::Specific
-        ) {
+        if analyzer_input.verification_method == VerificationMethod::Specific {
             for var in analyzer_input.verification_input.instance_cells.keys() {
                 if self.all_variables.insert(var.clone()) {
                     vars_to_declare.push(var.clone());
                 }
             }
         }
-
-        let variables = self.all_variables.clone();
-        let ucp_unique_variables = self.ucp_unique_variables.clone();
-        let ucp_value_domains = self.ucp_value_domains.clone();
         let prime =
             BigInt::from_str_radix(&self.prime, 10).context("Failed to parse analyzer prime!")?;
+        let smt_file = self.smt_file.as_mut().context("Failed to open SMT file!")?;
+        let mut printer = Printer::new(smt_file);
+        for var in vars_to_declare {
+            printer.write_var(var);
+        }
+        Self::write_ucp_value_domain_assertions(&mut printer, &self.ucp_value_domains, &prime)?;
+        self.ucp_assertions_written |= !self.ucp_value_domains.is_empty();
+        if analyzer_input.verification_method == VerificationMethod::Specific {
+            self.query_context_written |=
+                !analyzer_input.verification_input.instance_cells.is_empty();
+            for (var, value) in &analyzer_input.verification_input.instance_cells {
+                printer.write_assert(
+                    var.clone(),
+                    Self::normalize_ucp_field_value(value, &prime),
+                    NodeType::Instance,
+                    Operation::Equal,
+                );
+            }
+        }
+        Ok((self.all_variables.clone(), prime))
+    }
+
+    fn query_ucp_cell(
+        &mut self,
+        analyzer_input: &AnalyzerInput,
+        query_cell: &CellId,
+        include_value: bool,
+    ) -> Result<SemanticQueryOutput> {
+        let Some(query_variable) = self.ucp_cell_to_smt_variable_name(query_cell) else {
+            let constant = self.ucp_cell_constant_value(query_cell);
+            let value = if include_value {
+                constant.clone().and_then(|value| {
+                    let prime = BigInt::from_str_radix(&self.prime, 10).ok()?;
+                    normalize_field_value(value, &prime)
+                })
+            } else {
+                None
+            };
+            return Ok(SemanticQueryOutput {
+                result: SemanticQueryResult::ProvenUnique,
+                value_unavailable_reason: if include_value && value.is_none() {
+                    Some(if constant.is_some() {
+                        ValueRecoveryFailure::RepresentationLimit
+                    } else {
+                        ValueRecoveryFailure::UnavailableConstant
+                    })
+                } else {
+                    None
+                },
+                value,
+            });
+        };
+
+        if !include_value && self.ucp_unique_variables.contains(&query_variable) {
+            return Ok(SemanticQueryResult::ProvenUnique.into());
+        }
+
+        if self.all_variables.insert(query_variable.clone()) {
+            let smt_file = self.smt_file.as_mut().context("Failed to open SMT file!")?;
+            Printer::new(smt_file).write_var(query_variable.clone());
+        }
+
+        let (variables, prime) = self.prepare_ucp_query_context(analyzer_input)?;
+        let ucp_unique_variables = self.ucp_unique_variables.clone();
+        let ucp_value_domains = self.ucp_value_domains.clone();
+        //Szabad public valtozobol egy modell csak egy mintat adna, nem globalis Exact tenyt.
+        let can_recover_value = include_value
+            && analyzer_input.lookup_method != LookupMethod::Uninterpreted
+            && variables
+                .iter()
+                .filter(|var| var.starts_with("I-"))
+                .all(|var| {
+                    (analyzer_input.verification_method == VerificationMethod::Specific
+                        && analyzer_input
+                            .verification_input
+                            .instance_cells
+                            .contains_key(var))
+                        || ucp_value_domains
+                            .iter()
+                            .any(|(name, domain)| name == var && domain.is_singleton())
+                });
 
         if let Some(smt_file) = self.smt_file.as_mut() {
             let mut printer = Printer::new(smt_file);
 
-            for var in vars_to_declare {
-                printer.write_var(var);
-            }
-
-            Self::write_ucp_value_domain_assertions(&mut printer, &ucp_value_domains, &prime)?;
-
-            if matches!(
-                analyzer_input.verification_method,
-                VerificationMethod::Specific
-            ) {
-                for var in analyzer_input.verification_input.instance_cells.iter() {
-                    printer.write_assert(
-                        var.0.clone(),
-                        (*var.1).to_string(),
-                        NodeType::Instance,
-                        Operation::Equal,
-                    );
-                }
-            }
-
-            let model = Self::solve_and_get_model(SMT_FILE_PATH.to_string(), &variables)
-                .context("Failed to solve SMT model for semantic uniqueness query!")?;
+            let model = Self::solve_and_get_model_with_timeout(
+                SMT_FILE_PATH.to_string(),
+                &variables,
+                self.smt_timeout_ms,
+            )
+            .context("Failed to solve SMT model for semantic uniqueness query!")?;
             if matches!(model.sat, Satisfiability::Unsatisfiable) {
-                return Ok(SemanticQueryResult::Overconstrained);
+                return Ok(SemanticQueryResult::Overconstrained.into());
             }
 
             let Some(query_value) = model.result.get(&query_variable) else {
-                return Ok(SemanticQueryResult::Unknown);
+                return Ok(SemanticQueryResult::Unknown.into());
             };
 
             printer.write_push(1);
 
             let mut same_assignments = Vec::new();
-            for var in &ucp_unique_variables {
+            //Konkret visszaallitasnal K modellbeli ertekeit sem feltetelezzuk: magat az erteket bizonyitjuk.
+            for var in ucp_unique_variables.iter().filter(|_| !can_recover_value) {
                 if let Some(result_from_model) = model.result.get(var) {
                     let assertion = printer
                         .get_assert(
@@ -905,14 +1651,38 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             let query_formula = printer.get_and(query_formula);
             printer.write_assert_bool(query_formula, Operation::And);
 
-            let model_with_query = Self::solve_and_get_model(SMT_FILE_PATH.to_string(), &variables)
-                .context("Failed to solve SMT semantic uniqueness query!")?;
+            let model_with_query = Self::solve_and_get_model_with_timeout(
+                SMT_FILE_PATH.to_string(),
+                &variables,
+                self.smt_timeout_ms,
+            );
             printer.write_pop(1);
+            let model_with_query =
+                model_with_query.context("Failed to solve SMT semantic uniqueness query!")?;
 
             if matches!(model_with_query.sat, Satisfiability::Unsatisfiable) {
-                Ok(SemanticQueryResult::ProvenUnique)
+                let value = if can_recover_value {
+                    let value = BigInt::from_str_radix(&query_value.value.element, 10)
+                        .context("Failed to parse recovered field value!")?;
+                    normalize_field_value(value, &prime)
+                } else {
+                    None
+                };
+                Ok(SemanticQueryOutput {
+                    result: SemanticQueryResult::ProvenUnique,
+                    value_unavailable_reason: if include_value && value.is_none() {
+                        Some(if can_recover_value {
+                            ValueRecoveryFailure::RepresentationLimit
+                        } else {
+                            ValueRecoveryFailure::PublicContextNotConcrete
+                        })
+                    } else {
+                        None
+                    },
+                    value,
+                })
             } else {
-                Ok(SemanticQueryResult::NotUnique)
+                Ok(SemanticQueryResult::NotUnique.into())
             }
         } else {
             Err(anyhow!("Failed to open SMT file!"))
@@ -980,6 +1750,19 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             BigInt::from_str_radix(hex, 16).context("Failed to parse hex field modulus")
         } else {
             BigInt::from_str_radix(raw_modulus, 10).context("Failed to parse decimal field modulus")
+        }
+    }
+
+    fn ucp_cell_constant_value(&self, cell: &CellId) -> Option<BigInt> {
+        match cell.kind {
+            CellKind::Fixed => usize::try_from(cell.row)
+                .ok()
+                .and_then(|row| self.fixed.get(cell.column)?.get(row).cloned()),
+            _ => self
+                .cell_to_cycle_head
+                .get(&cell.to_string())
+                .and_then(|head| self.cycle_bigint_value.get(head))
+                .cloned(),
         }
     }
 
@@ -1061,7 +1844,10 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 (term, NodeType::Constant, is_zero_expression)
             }
             Expression::Selector(a) => {
-                if es.contains_key(a) {
+                if es
+                    .get(a)
+                    .is_some_and(|rows| rows.contains(&(region_begin + row_num as usize)))
+                {
                     (
                         "(as ff1 F)".to_owned(),
                         NodeType::Fixed,
@@ -1077,7 +1863,12 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             }
             Expression::Fixed(fixed_query) => {
                 let col = fixed_query.column_index;
-                let row = (fixed_query.rotation.0 + row_num) as usize + region_begin;
+                let row = query_row(
+                    region_begin,
+                    row_num,
+                    fixed_query.rotation,
+                    fixed[col].len(),
+                );
 
                 if col < fixed.len() && row < fixed[col].len() {
                     let t = &fixed[col][row];
@@ -1106,7 +1897,12 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 let term = format!(
                     "A-{}-{}",
                     advice_query.column_index,
-                    advice_query.rotation.0 + row_num + region_begin as i32
+                    query_row(
+                        region_begin,
+                        row_num,
+                        advice_query.rotation,
+                        fixed.first().map_or(region_end + 1, Vec::len)
+                    )
                 );
                 let mut t = term.clone();
                 let mut t_is_fixed = false;
@@ -1130,7 +1926,12 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 let term = format!(
                     "I-{}-{}",
                     instance_query.column_index,
-                    instance_query.rotation.0 + row_num + region_begin as i32
+                    query_row(
+                        region_begin,
+                        row_num,
+                        instance_query.rotation,
+                        fixed.first().map_or(region_end + 1, Vec::len)
+                    )
                 );
                 let mut t = term.clone();
                 let mut t_is_fixed = false;
@@ -1164,10 +1965,13 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                     new_variables,
                     selector_indices,
                 );
-                if matches!(is_zero_expression, IsZeroExpression::ZeroSelector) {
+                if matches!(
+                    is_zero_expression,
+                    IsZeroExpression::ZeroSelector | IsZeroExpression::Zero
+                ) {
                     return (
                         "(as ff0 F)".to_owned(),
-                        NodeType::Fixed,
+                        NodeType::Constant,
                         IsZeroExpression::ZeroSelector,
                     );
                 }
@@ -1208,12 +2012,16 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                     selector_indices,
                 );
 
-                if matches!(left_is_zero, IsZeroExpression::ZeroSelector)
-                    && matches!(right_is_zero, IsZeroExpression::ZeroSelector)
-                {
+                if matches!(
+                    left_is_zero,
+                    IsZeroExpression::ZeroSelector | IsZeroExpression::Zero
+                ) && matches!(
+                    right_is_zero,
+                    IsZeroExpression::ZeroSelector | IsZeroExpression::Zero
+                ) {
                     return (
                         "(as ff0 F)".to_owned(),
-                        NodeType::Fixed,
+                        NodeType::Constant,
                         IsZeroExpression::ZeroSelector,
                     );
                 }
@@ -1255,12 +2063,16 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                     selector_indices,
                 );
 
-                if matches!(left_is_zero, IsZeroExpression::ZeroSelector)
-                    || matches!(right_is_zero, IsZeroExpression::ZeroSelector)
-                {
+                if matches!(
+                    left_is_zero,
+                    IsZeroExpression::ZeroSelector | IsZeroExpression::Zero
+                ) || matches!(
+                    right_is_zero,
+                    IsZeroExpression::ZeroSelector | IsZeroExpression::Zero
+                ) {
                     return (
                         "(as ff0 F)".to_owned(),
-                        NodeType::Fixed,
+                        NodeType::Constant,
                         IsZeroExpression::ZeroSelector,
                     );
                 } else if matches!(left_is_zero, IsZeroExpression::One)
@@ -1314,12 +2126,16 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                     new_variables,
                     selector_indices,
                 );
-                if matches!(left_is_zero, IsZeroExpression::ZeroSelector)
-                    || matches!(right_is_zero, IsZeroExpression::ZeroSelector)
-                {
+                if matches!(
+                    left_is_zero,
+                    IsZeroExpression::ZeroSelector | IsZeroExpression::Zero
+                ) || matches!(
+                    right_is_zero,
+                    IsZeroExpression::ZeroSelector | IsZeroExpression::Zero
+                ) {
                     return (
                         "(as ff0 F)".to_owned(),
-                        NodeType::Fixed,
+                        NodeType::Constant,
                         IsZeroExpression::ZeroSelector,
                     );
                 } else if matches!(left_is_zero, IsZeroExpression::One)
@@ -1396,7 +2212,10 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 ))
             }
             Expression::Selector(a) => {
-                if es.contains_key(a) {
+                if es
+                    .get(a)
+                    .is_some_and(|rows| rows.contains(&(region_begin + row_num as usize)))
+                {
                     Ok((
                         "(as ff1 F)".to_owned(),
                         NodeType::Fixed,
@@ -1414,7 +2233,12 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             }
             Expression::Fixed(fixed_query) => {
                 let col = fixed_query.column_index;
-                let row = (fixed_query.rotation.0 + row_num) as usize + region_begin;
+                let row = query_row(
+                    region_begin,
+                    row_num,
+                    fixed_query.rotation,
+                    fixed[col].len(),
+                );
 
                 let t = &fixed[col][row];
                 if t.sign() == Sign::NoSign {
@@ -1440,7 +2264,12 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 let term = format!(
                     "A-{}-{}",
                     advice_query.column_index,
-                    advice_query.rotation.0 + row_num + region_begin as i32
+                    query_row(
+                        region_begin,
+                        row_num,
+                        advice_query.rotation,
+                        fixed.first().map_or(region_end + 1, Vec::len)
+                    )
                 );
                 let mut t = term.clone();
                 if cell_to_cycle_head.contains_key(&term) {
@@ -1459,7 +2288,12 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 let term = format!(
                     "I-{}-{}",
                     instance_query.column_index,
-                    instance_query.rotation.0 + row_num + region_begin as i32
+                    query_row(
+                        region_begin,
+                        row_num,
+                        instance_query.rotation,
+                        fixed.first().map_or(region_end + 1, Vec::len)
+                    )
                 );
                 let mut t = term.clone();
                 if cell_to_cycle_head.contains_key(&term) {
@@ -1722,58 +2556,66 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         printer: &mut smt::Printer<File>,
         analyzer_input: &AnalyzerInput,
     ) -> Result<(), anyhow::Error> {
-        // Extract all gates
-        if !self.regions.is_empty() {
-            for region in &self.regions {
-                if self.selectors.is_empty() || !region.enabled_selectors.is_empty() {
-                    let (region_begin, region_end) = region.rows.unwrap();
-                    for row_num in 0..region_end - region_begin + 1 {
-                        let contains_t = region
-                            .enabled_selectors
-                            .values()
-                            .any(|vec| vec.contains(&(row_num + region_begin)));
-                        if !contains_t && !self.selectors.is_empty() {
-                            continue;
+        //Region annotations do not control gate activity; fixed values do.
+        let enabled_selectors = self.enabled_selectors_by_row();
+        let region_begin = 0;
+        let region_end = self.usable_rows.end + self.cs.blinding_factors();
+        for row_num in self.usable_rows.clone() {
+            for gate in self.cs.gates.iter() {
+                for poly in &gate.polys {
+                    let mut new_variables = HashSet::new();
+                    let (node_str, node_type, is_zero) = Self::decompose_expression(
+                        poly,
+                        printer,
+                        region_begin,
+                        region_end,
+                        i32::try_from(row_num).ok().unwrap(),
+                        &enabled_selectors,
+                        &self.fixed,
+                        &self.cell_to_cycle_head,
+                        &self.cycle_bigint_value,
+                        &mut new_variables,
+                        &self.selector_indices,
+                    );
+
+                    if !matches!(is_zero, IsZeroExpression::ZeroSelector)
+                        && !(matches!(is_zero, IsZeroExpression::Zero)
+                            && (matches!(node_type.category(), NodeCategory::Constant)))
+                    {
+                        let diff: HashSet<String> = new_variables
+                            .difference(&self.all_variables)
+                            .cloned()
+                            .collect();
+                        for element in diff {
+                            self.all_variables.insert(element.clone());
+                            printer.write_var(element.to_string());
                         }
-                        for gate in self.cs.gates.iter() {
-                            for poly in &gate.polys {
-                                let mut new_variables = HashSet::new();
-                                let (node_str, node_type, is_zero) = Self::decompose_expression(
-                                    poly,
-                                    printer,
-                                    region_begin,
-                                    region_end,
-                                    i32::try_from(row_num).ok().unwrap(),
-                                    &region.enabled_selectors,
-                                    &self.fixed,
-                                    &self.cell_to_cycle_head,
-                                    &self.cycle_bigint_value,
-                                    &mut new_variables,
-                                    &self.selector_indices,
-                                );
 
-                                if !matches!(is_zero, IsZeroExpression::ZeroSelector)
-                                    && !(matches!(is_zero, IsZeroExpression::Zero)
-                                        && (matches!(node_type.category(), NodeCategory::Constant)))
-                                {
-                                    let diff: HashSet<String> = new_variables
-                                        .difference(&self.all_variables)
-                                        .cloned()
-                                        .collect();
-                                    for element in diff {
-                                        self.all_variables.insert(element.clone());
-                                        printer.write_var(element.to_string());
-                                    }
-
-                                    printer.write_assert(
-                                        node_str,
+                        if self.validation_subset_assertions.len()
+                            < MAX_VALIDATION_SUBSET_ASSERTIONS
+                            && Self::validation_affine_degree(poly) <= 1
+                        {
+                            self.validation_subset_assertions.push(printer.get_assert(
+                                node_str.clone(),
+                                "0".to_owned(),
+                                node_type.clone(),
+                                Operation::Equal,
+                            )?);
+                        }
+                        if let Some(store) = &mut self.original_recovery_assertions {
+                            if store.has_capacity() {
+                                store.retain(
+                                    printer.get_assert(
+                                        node_str.clone(),
                                         "0".to_owned(),
-                                        node_type,
+                                        node_type.clone(),
                                         Operation::Equal,
-                                    );
-                                }
+                                    )?,
+                                    new_variables.into_iter(),
+                                );
                             }
                         }
+                        printer.write_assert(node_str, "0".to_owned(), node_type, Operation::Equal);
                     }
                 }
             }
@@ -1791,6 +2633,39 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         Ok(())
     }
 
+    // Selection is an efficiency heuristic only: every retained assertion is copied verbatim from C.
+    fn validation_affine_degree(expr: &Expression<F>) -> u8 {
+        match expr {
+            Expression::Constant(_) | Expression::Fixed(_) | Expression::Selector(_) => 0,
+            Expression::Advice(_) | Expression::Instance(_) => 1,
+            Expression::Negated(inner) | Expression::Scaled(inner, _) => {
+                Self::validation_affine_degree(inner)
+            }
+            Expression::Sum(left, right) => {
+                Self::validation_affine_degree(left).max(Self::validation_affine_degree(right))
+            }
+            Expression::Product(left, right) => (Self::validation_affine_degree(left)
+                + Self::validation_affine_degree(right))
+            .min(2),
+            #[cfg(any(
+                feature = "use_pse_halo2_proofs",
+                feature = "use_axiom_halo2_proofs",
+                feature = "use_scroll_halo2_proofs"
+            ))]
+            Expression::Challenge(_) => 2,
+        }
+    }
+
+    fn enabled_selectors_by_row(&self) -> HashMap<Selector, Vec<usize>> {
+        let mut enabled: HashMap<Selector, Vec<usize>> = HashMap::new();
+        for region in &self.regions {
+            for (selector, rows) in &region.enabled_selectors {
+                enabled.entry(*selector).or_default().extend(rows);
+            }
+        }
+        enabled
+    }
+
     #[cfg(any(
         feature = "use_zcash_halo2_proofs",
         feature = "use_pse_halo2_proofs",
@@ -1799,63 +2674,93 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
     ))]
     // Extracts the lookup constraints and writes assertions using an SMT printer.
     fn decompose_lookups(&mut self, printer: &mut smt::Printer<File>) -> Result<(), anyhow::Error> {
-        for region in &self.regions {
-            if self.selectors.is_empty() || !region.enabled_selectors.is_empty() {
-                let (region_begin, region_end) = region.rows.unwrap();
-                for row_num in 0..region_end - region_begin + 1 {
-                    for lookup in self.cs.lookups.iter() {
-                        let mut zero_lookup_expressions = Vec::new();
-                        let mut cons_str_vec = Vec::new();
-                        for poly in &lookup.input_expressions {
-                            let mut new_variables = HashSet::new();
-                            let (node_str, node_type, is_zero) = Self::decompose_expression(
-                                poly,
-                                printer,
-                                region_begin,
-                                region_end,
-                                i32::try_from(row_num).ok().unwrap(),
-                                &region.enabled_selectors,
-                                &self.fixed,
-                                &self.cell_to_cycle_head,
-                                &self.cycle_bigint_value,
-                                &mut new_variables,
-                                &self.selector_indices,
-                            );
-                            if !matches!(is_zero, IsZeroExpression::ZeroSelector) {
-                                let diff: HashSet<String> = new_variables
-                                    .difference(&self.all_variables)
-                                    .cloned()
-                                    .collect();
-                                for element in diff {
-                                    self.all_variables.insert(element.clone());
-                                    printer.write_var(element.to_string());
-                                }
-                                cons_str_vec.push((node_str, node_type));
-                                zero_lookup_expressions.push(true);
-                            } else {
-                                zero_lookup_expressions.push(false);
-                            }
+        let enabled_selectors = self.enabled_selectors_by_row();
+        let region_begin = 0;
+        let region_end = self.usable_rows.end + self.cs.blinding_factors();
+        let zero_memberships: Vec<bool> = self
+            .cs
+            .lookups
+            .iter()
+            .map(|lookup| {
+                let columns: Vec<_> = lookup
+                    .table_expressions
+                    .iter()
+                    .filter_map(|expr| {
+                        if let Expression::Fixed(query) = expr {
+                            Some(query.column_index)
+                        } else {
+                            None
                         }
-                        let mut col_indices = Vec::new();
-                        for col in lookup.table_expressions.clone() {
-                            if let Expression::Fixed(fixed_query) = col {
-                                col_indices.push(fixed_query.column_index);
-                            }
-                        }
-
-                        let big_cons_str = Self::extract_lookup_constraints(
-                            self,
-                            col_indices,
-                            Some(cons_str_vec),
-                            printer,
-                            Some(zero_lookup_expressions),
-                        )?;
-                        if big_cons_str.is_empty() {
-                            continue;
-                        }
-                        printer.write_assert_bool(big_cons_str, Operation::Or);
+                    })
+                    .collect();
+                columns.len() == lookup.table_expressions.len()
+                    && self.usable_rows.clone().any(|row| {
+                        columns
+                            .iter()
+                            .all(|col| self.fixed[*col][row] == BigInt::from(0))
+                    })
+            })
+            .collect();
+        for row_num in self.usable_rows.clone() {
+            for (lookup_index, lookup) in self.cs.lookups.iter().enumerate() {
+                let mut zero_lookup_expressions = Vec::new();
+                let mut cons_str_vec = Vec::new();
+                let mut all_zero = true;
+                let mut new_variables = HashSet::new();
+                for poly in &lookup.input_expressions {
+                    let (node_str, node_type, is_zero) = Self::decompose_expression(
+                        poly,
+                        printer,
+                        region_begin,
+                        region_end,
+                        i32::try_from(row_num).ok().unwrap(),
+                        &enabled_selectors,
+                        &self.fixed,
+                        &self.cell_to_cycle_head,
+                        &self.cycle_bigint_value,
+                        &mut new_variables,
+                        &self.selector_indices,
+                    );
+                    all_zero &= matches!(
+                        is_zero,
+                        IsZeroExpression::Zero | IsZeroExpression::ZeroSelector
+                    );
+                    cons_str_vec.push((node_str, node_type));
+                    zero_lookup_expressions.push(true);
+                }
+                //Zero inputs still require a matching full tuple in the table.
+                if all_zero && zero_memberships[lookup_index] {
+                    continue;
+                }
+                if all_zero {
+                    new_variables.clear();
+                }
+                for variable in new_variables
+                    .difference(&self.all_variables)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    self.all_variables.insert(variable.clone());
+                    printer.write_var(variable);
+                }
+                let mut col_indices = Vec::new();
+                for col in lookup.table_expressions.clone() {
+                    if let Expression::Fixed(fixed_query) = col {
+                        col_indices.push(fixed_query.column_index);
                     }
                 }
+
+                let big_cons_str = Self::extract_lookup_constraints(
+                    self,
+                    col_indices,
+                    Some(cons_str_vec),
+                    printer,
+                    Some(zero_lookup_expressions),
+                )?;
+                if big_cons_str.is_empty() {
+                    continue;
+                }
+                printer.write_assert_bool(big_cons_str, Operation::Or);
             }
         }
         Ok(())
@@ -1870,7 +2775,17 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         let mut big_cons_str = String::new();
         let mut big_cons = vec![];
 
-        for row in 0..self.fixed[0].len() {
+        let rows: BTreeSet<Vec<BigInt>> = self
+            .usable_rows
+            .clone()
+            .map(|row| {
+                col_indices
+                    .iter()
+                    .map(|col| self.fixed[*col][row].clone())
+                    .collect()
+            })
+            .collect();
+        for row in rows {
             let mut equalities = vec![];
             let mut eq_str = String::new();
             for col in 0..col_indices.len() {
@@ -1884,9 +2799,9 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                     None => &default_str,
                 };
 
-                let t = format!("{:?}", self.fixed[col_indices[col]][row]);
+                let t = format!("{:?}", row[col]);
                 let mut poly = cons_str.0.clone();
-                if !matches!(cons_str.1.category(), NodeCategory::Variable) {
+                if matches!(cons_str.1.category(), NodeCategory::Polynomial) {
                     poly = format!("({})", cons_str.0.clone());
                 }
                 let sa = printer
@@ -2249,6 +3164,8 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         &mut self,
         analyzer_input: &AnalyzerInput,
     ) -> Result<AnalyzerOutputStatus> {
+        // Legacy search can retain model exclusions; it is not a fresh unobserved context.
+        self.query_context_written = true;
         let ucp_unique_variables = self.ucp_unique_variables.clone();
 
         if let Some(smt_file) = self.smt_file.as_mut() {
@@ -2265,6 +3182,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             match analyzer_input.verification_method {
                 // For specific public input, directly write assertions for each variable.
                 VerificationMethod::Specific => {
+                    let prime = Self::analyzer_field_modulus()?;
                     for var in self.instance_cells.iter() {
                         // Declare the variables in the SMT formula.
                         if !self.all_variables.contains(&var.0.to_owned()) {
@@ -2274,7 +3192,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                         // Write an assertion that each veriables equals the given value.
                         printer.write_assert(
                             var.0.clone(),
-                            (*var.1).to_string(),
+                            Self::normalize_ucp_field_value(var.1, &prime),
                             NodeType::Instance,
                             Operation::Equal,
                         );
@@ -2512,6 +3430,32 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         smt_file_path: String,
         variables: &HashSet<String>,
     ) -> Result<ModelResult> {
+        Self::solve_and_get_model_with_timeout(smt_file_path, variables, None)
+    }
+
+    pub(crate) fn resolve_smt_timeout_ms(explicit: Option<u64>) -> Result<Option<u64>> {
+        let milliseconds = match explicit {
+            Some(value) => Some(value),
+            None => std::env::var_os("HALO2_ANALYZER_SMT_TIMEOUT_MS")
+                .map(|raw| {
+                    raw.to_str()
+                        .context("SMT timeout must be valid text")?
+                        .parse::<u64>()
+                        .context("SMT timeout must be a positive integer in milliseconds")
+                })
+                .transpose()?,
+        };
+        if milliseconds == Some(0) {
+            return Err(anyhow!("SMT timeout must be greater than zero"));
+        }
+        Ok(milliseconds)
+    }
+
+    fn solve_and_get_model_with_timeout(
+        smt_file_path: String,
+        variables: &HashSet<String>,
+        timeout_ms: Option<u64>,
+    ) -> Result<ModelResult> {
         let smt_file_copy_path =
             Self::generate_copy_path(smt_file_path).context("Failed to generate copy path!")?;
         let mut smt_file_copy = OpenOptions::new()
@@ -2525,8 +3469,18 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         for var in variables.iter() {
             copy_printer.write_get_value(var.clone());
         }
-        let output = Command::new("cvc5").arg(smt_file_copy_path).output();
-        let term = output.unwrap();
+        let mut command = Command::new("cvc5");
+        let timeout_ms = Self::resolve_smt_timeout_ms(timeout_ms)?;
+        //Optional per-query budget; unknown stays an error, never a successful proof.
+        if let Some(milliseconds) = timeout_ms {
+            command.arg(format!("--tlimit-per={}", milliseconds));
+        }
+        command.arg("--output=incomplete").arg(smt_file_copy_path);
+        let term = crate::smt_solver::process::run(
+            command,
+            timeout_ms.map(std::time::Duration::from_millis),
+        )
+        .context("Failed to execute cvc5")?;
         let output_string = String::from_utf8_lossy(&term.stdout);
 
         smt_parser::extract_model_response(output_string.to_string())
@@ -2656,5 +3610,118 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
             AnalyzerType::UnusedColumns => self.analyze_unused_columns(),
             AnalyzerType::UnderconstrainedCircuit => self.analyze_underconstrained(analyzer_input),
         }
+    }
+}
+
+#[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
+mod validation_subset_tests {
+    use super::*;
+
+    #[test]
+    fn subset_assertions_are_literal_original_equations_not_sat_hints() {
+        use crate::io::analyzer_io_type::VerificationInput;
+        use crate::sample_circuits::zcash::bit_decomposition::two_bit_decomp::TwoBitDecompCircuit;
+        let input = AnalyzerInput {
+            verification_method: VerificationMethod::Specific,
+            verification_input: VerificationInput::new([("I-0-0".to_owned(), 3)], 1),
+            lookup_method: LookupMethod::InlineConstraints,
+        };
+        let mut analyzer = Analyzer::<Fr>::new(
+            &TwoBitDecompCircuit::<Fr>::default(),
+            4,
+            AnalyzerType::UnderconstrainedCircuit,
+            Some(&input),
+        )
+        .unwrap();
+        let original = fs::read_to_string(&*SMT_FILE_PATH).unwrap();
+        let subset = analyzer.validation_subset_assertions.clone();
+        assert!(!subset.is_empty());
+        assert!(subset.len() <= MAX_VALIDATION_SUBSET_ASSERTIONS);
+        for assertion in &subset {
+            assert!(original.contains(&format!("(assert {assertion})")));
+        }
+        let mut hints = UcpValueFacts::new();
+        hints.mark_known(CellId::advice(0, 0), BigInt::from(0));
+        assert_eq!(
+            analyzer
+                .check_ucp_satisfiability_with_hints(&input, &hints)
+                .unwrap(),
+            Some(Satisfiability::Unsatisfiable)
+        );
+        assert_eq!(analyzer.validation_subset_assertions, subset);
+    }
+
+    #[test]
+    fn subset_unknown_and_sat_require_full_fallback() {
+        assert!(!Analyzer::<Fr>::subset_proves_exclusion(Ok(Satisfiability::Satisfiable)).unwrap());
+        assert!(
+            Analyzer::<Fr>::subset_proves_exclusion(Ok(Satisfiability::Unsatisfiable)).unwrap()
+        );
+        assert!(!Analyzer::<Fr>::subset_proves_exclusion(Err(anyhow!(
+            smt_parser::UnknownSolverResult
+        )))
+        .unwrap());
+        assert!(Analyzer::<Fr>::subset_proves_exclusion(Err(anyhow!("malformed output"))).is_err());
+    }
+
+    #[test]
+    fn recovery_subsets_capture_literal_nonlinear_equations_only_when_enabled() {
+        use crate::io::analyzer_io_type::VerificationInput;
+        use crate::sample_circuits::zcash::bit_decomposition::two_bit_decomp::TwoBitDecompCircuit;
+        let input = AnalyzerInput {
+            verification_method: VerificationMethod::Specific,
+            verification_input: VerificationInput::new([("I-0-0".to_owned(), 3)], 1),
+            lookup_method: LookupMethod::InlineConstraints,
+        };
+        let circuit = TwoBitDecompCircuit::<Fr>::default();
+        let plain = Analyzer::<Fr>::new(
+            &circuit,
+            4,
+            AnalyzerType::UnderconstrainedCircuit,
+            Some(&input),
+        )
+        .unwrap();
+        assert!(plain.original_recovery_assertions.is_none());
+        let mut captured = Analyzer::<Fr>::new_with_original_subset_capture(
+            &circuit,
+            4,
+            AnalyzerType::UnderconstrainedCircuit,
+            Some(&input),
+            true,
+        )
+        .unwrap();
+        let full = fs::read_to_string(&*SMT_FILE_PATH).unwrap();
+        let store = captured.original_recovery_assertions.as_ref().unwrap();
+        assert!(store.assertions.iter().any(|a| a.body.contains("ff.mul")));
+        for assertion in &store.assertions {
+            assert!(full.contains(&format!("(assert {})", assertion.body)));
+            assert!(assertion
+                .variables
+                .iter()
+                .all(|v| captured.all_variables.contains(v)));
+        }
+        let targets = [CellId::advice(0, 0), CellId::advice(1, 0)];
+        let original = captured
+            .original_private_query_context(&input, &targets)
+            .unwrap();
+        let store = captured.original_recovery_assertions.as_ref().unwrap();
+        for (text, count) in original.targeted_subsets.values() {
+            assert!(*count > 0);
+            assert!(
+                *count
+                    <= crate::circuit_analyzer::ucp::privacy_subset::MAX_TARGETED_SUBSET_ASSERTIONS
+            );
+            for line in text
+                .lines()
+                .filter(|line| line.starts_with("(assert (and ( = ("))
+            {
+                assert!(store
+                    .assertions
+                    .iter()
+                    .any(|a| line == format!("(assert (and {}))", a.body)));
+            }
+            assert!(!text.contains("(check-sat)"));
+        }
+        assert!(!original.targeted_subsets.is_empty());
     }
 }

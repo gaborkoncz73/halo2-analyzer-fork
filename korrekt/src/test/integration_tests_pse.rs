@@ -34,7 +34,13 @@ mod tests {
 
         assert!(analyzer.instance_cells.len().eq(&1));
         assert!(analyzer.instance_cells.contains_key("I-0-0"));
-        assert!(analyzer.instance_cells.iter().next().unwrap().1.eq(&0));
+        assert!(analyzer
+            .instance_cells
+            .iter()
+            .next()
+            .unwrap()
+            .1
+            .eq(&0.into()));
     }
 
     #[test]
@@ -154,7 +160,7 @@ mod tests {
         let k: u32 = 11;
 
         let mut specified_instance_cols = HashMap::new();
-        specified_instance_cols.insert("I-0-0".to_owned(), 3);
+        specified_instance_cols.insert("I-0-0".to_owned(), 3.into());
 
         let analyzer_input: analyzer_io_type::AnalyzerInput = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,
@@ -175,7 +181,7 @@ mod tests {
         assert!(analyzer.instance_cells.len().eq(&1));
         let mut specified_instance_cols = HashMap::new();
         for var in analyzer.instance_cells.iter() {
-            specified_instance_cols.insert(var.0.clone(), 3);
+            specified_instance_cols.insert(var.0.clone(), num_bigint::BigInt::from(3));
         }
 
         let output_status = analyzer
@@ -192,7 +198,7 @@ mod tests {
             );
         let k: u32 = 11;
         let mut specified_instance_cols = HashMap::new();
-        specified_instance_cols.insert("I-0-0".to_owned(), 3);
+        specified_instance_cols.insert("I-0-0".to_owned(), 3.into());
 
         let analyzer_input: analyzer_io_type::AnalyzerInput = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,
@@ -213,7 +219,7 @@ mod tests {
         assert!(analyzer.instance_cells.len().eq(&1));
         let mut specified_instance_cols = HashMap::new();
         for var in analyzer.instance_cells.iter() {
-            specified_instance_cols.insert(var.0.clone(), 1);
+            specified_instance_cols.insert(var.0.clone(), num_bigint::BigInt::from(1));
         }
 
         let output_status = analyzer
@@ -296,7 +302,7 @@ mod tests {
         let k: u32 = 11;
 
         let mut specified_instance_cols = HashMap::new();
-        specified_instance_cols.insert("I-0-0".to_owned(), 3);
+        specified_instance_cols.insert("I-0-0".to_owned(), 3.into());
 
         let analyzer_input: analyzer_io_type::AnalyzerInput = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,
@@ -317,7 +323,7 @@ mod tests {
         assert!(analyzer.instance_cells.len().eq(&1));
         let mut specified_instance_cols = HashMap::new();
         for var in analyzer.instance_cells.iter() {
-            specified_instance_cols.insert(var.0.clone(), 3);
+            specified_instance_cols.insert(var.0.clone(), num_bigint::BigInt::from(3));
         }
 
         let output_status = analyzer
@@ -336,7 +342,7 @@ mod tests {
         let k: u32 = 11;
 
         let mut specified_instance_cols = HashMap::new();
-        specified_instance_cols.insert("I-0-0".to_owned(), 3);
+        specified_instance_cols.insert("I-0-0".to_owned(), 3.into());
 
         let analyzer_input: analyzer_io_type::AnalyzerInput = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,
@@ -357,7 +363,7 @@ mod tests {
         assert!(analyzer.instance_cells.len().eq(&1));
         let mut specified_instance_cols = HashMap::new();
         for var in analyzer.instance_cells.iter() {
-            specified_instance_cols.insert(var.0.clone(), 1);
+            specified_instance_cols.insert(var.0.clone(), num_bigint::BigInt::from(1));
         }
 
         let output_status = analyzer
@@ -670,9 +676,9 @@ mod tests {
         let k = 11;
 
         let mut specified_instance_cols = HashMap::new();
-        specified_instance_cols.insert("I-0-2".to_owned(), 6);
-        specified_instance_cols.insert("I-0-1".to_owned(), 1);
-        specified_instance_cols.insert("I-0-0".to_owned(), 1);
+        specified_instance_cols.insert("I-0-2".to_owned(), 6.into());
+        specified_instance_cols.insert("I-0-1".to_owned(), 1.into());
+        specified_instance_cols.insert("I-0-0".to_owned(), 1.into());
         let analyzer_input: analyzer_io_type::AnalyzerInput = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,
             verification_input: VerificationInput {
@@ -704,9 +710,9 @@ mod tests {
             sample_circuits::lookup_circuits::multiple_lookups::MyCircuit::<Fr>(PhantomData);
         let k = 11;
         let mut specified_instance_cols = HashMap::new();
-        specified_instance_cols.insert("I-0-2".to_owned(), 6);
-        specified_instance_cols.insert("I-0-1".to_owned(), 1);
-        specified_instance_cols.insert("I-0-0".to_owned(), 1);
+        specified_instance_cols.insert("I-0-2".to_owned(), 6.into());
+        specified_instance_cols.insert("I-0-1".to_owned(), 1.into());
+        specified_instance_cols.insert("I-0-0".to_owned(), 1.into());
         let analyzer_input: analyzer_io_type::AnalyzerInput = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,
             verification_input: VerificationInput {
@@ -738,9 +744,9 @@ mod tests {
         let k = 11;
 
         let mut specified_instance_cols = HashMap::new();
-        specified_instance_cols.insert("I-0-2".to_owned(), 6);
-        specified_instance_cols.insert("I-0-1".to_owned(), 1);
-        specified_instance_cols.insert("I-0-0".to_owned(), 1);
+        specified_instance_cols.insert("I-0-2".to_owned(), 6.into());
+        specified_instance_cols.insert("I-0-1".to_owned(), 1.into());
+        specified_instance_cols.insert("I-0-0".to_owned(), 1.into());
         let analyzer_input: analyzer_io_type::AnalyzerInput = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,
             verification_input: VerificationInput {

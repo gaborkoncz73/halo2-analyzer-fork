@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use log::info;
+use num_bigint::BigInt;
 use std::{collections::HashMap, io};
 /// Retrieves user input for underconstrained circuit analysis.
 ///
@@ -15,11 +16,11 @@ use std::{collections::HashMap, io};
 ///
 pub fn retrieve_user_input_for_underconstrained<F: AnalyzableField>(
     input: &AnalyzerInput,
-    instance_cols_string: &HashMap<String, i64>,
-) -> Result<HashMap<String, i64>> {
+    instance_cols_string: &HashMap<String, BigInt>,
+) -> Result<HashMap<String, BigInt>> {
     match input.verification_method {
         VerificationMethod::Specific => {
-            let mut specified_instance_cols_string: HashMap<String, i64> = HashMap::new();
+            let mut specified_instance_cols_string: HashMap<String, BigInt> = HashMap::new();
 
             for var in instance_cols_string.iter() {
                 info!("Enter value for {} : ", var.0);
@@ -28,7 +29,7 @@ pub fn retrieve_user_input_for_underconstrained<F: AnalyzableField>(
                     .read_line(&mut input_var)
                     .expect("Failed to read line");
                 specified_instance_cols_string
-                    .insert(var.0.clone(), input_var.trim().parse::<i64>()?);
+                    .insert(var.0.clone(), input_var.trim().parse::<BigInt>()?);
             }
             Ok(specified_instance_cols_string)
         }

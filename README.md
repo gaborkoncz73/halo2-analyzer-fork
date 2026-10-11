@@ -455,3 +455,88 @@ This means that part of the witness is not constrained -- this is almost certain
 #### Unused Column
 
 Check that every column occurs in some polynomial.
+
+### Private Value Recovery In This Fork
+
+The UCP module can analyze explicitly selected private advice cells under concrete
+public observations. An optional, fresh SMT validation pass checks recovered exact
+values and finite candidate supersets without assuming inferred facts. See
+[Private Recovery Validation](docs/private-recovery-validation.md) for the API,
+checked property, demos, and limitations.
+
+Repeated same-target comparisons with an SMT-only reference, separate validation
+timings, and TSV exports are described in
+[Private Recovery Measurements](docs/private-recovery-measurements.md).
+
+[Optional Recovery Profile Measurements](docs/private-recovery-profile-measurements.md)
+compare baseline, finite refinement, full discovery, and targeted discovery with
+separate validation/public-observation control timings, including partial attempts
+and per-cell evidence.
+
+[Compositional Masking Demo](docs/compositional-masking-demo.md) shows how two
+public observations reveal a secret when a linear mask is reused, with
+single-publication and independent-mask controls.
+
+[External Halo2 Book Evaluation](docs/external-halo2-book-evaluation.md) analyzes
+an unchanged, pinned upstream circuit and a separately identified local control
+that exposes additional intermediate values.
+
+[Bounded Private Recovery](docs/bounded-private-recovery.md) documents explicit
+solver-check and supervised process budgets, per-cell recovery categories, and structured reasons
+for incomplete or unsupported analyses.
+
+[Adaptive Private Recovery](docs/adaptive-private-recovery.md) reserves first
+target attempts, bounds bridge/retry work, and renews the stagnation budget on
+actual progress without resetting total query counts.
+
+[Finite-Domain SMT Refinement](docs/finite-domain-refinement.md) optionally checks
+small candidate sets against an immutable original model, distinguishes partial
+supersets from complete feasible projections, and feeds refinements back into UCP.
+
+[SMT Domain Discovery](docs/smt-domain-discovery.md) optionally enumerates private
+cell values without a pre-existing UCP candidate set. Only proven exhaustion
+certifies a complete projection; partial samples never become recovered domains.
+Fair check rounds reuse UCP priority and preserve samples across continuation;
+explicit larger-timeout retries never reset the hard total allowance.
+
+[Targeted SMT Recovery](docs/targeted-smt-recovery.md) optionally proves discovery
+exhaustion from small literal original subsets. Feasible values still come from
+the full original circuit; subset SAT/unknown requires a separately counted full fallback.
+
+[Public Observation Control](docs/public-observation-control.md) independently
+checks whether a reported domain requires the concrete public values or already
+follows from the original circuit alone. It separates publication-dependent
+narrowing from stronger SMT reasoning that simply surpassed the UCP baseline.
+
+[Full-Width Private Recovery](docs/full-field-recovery.md) demonstrates 254-bit
+exact values, signed field representatives, and propagation without sampling
+private witness assignments. Public observations now accept BigInt through
+`VerificationInput::new`; domain cardinality and raw-input/value bit limits remain explicit.
+
+[Imported Range-Gadget Evaluation](docs/imported-range-gadget-evaluation.md)
+compares polynomial and lookup-based running sums imported from `halo2_gadgets`:
+an aggregate can expose both bounded private inputs at a range boundary.
+
+[Relational Delta Propagation](docs/relational-delta-propagation.md) explains
+affine Root inference, retained lookup memberships, and fixed-constant seeding:
+range domains can be recovered before asking SMT about individual private cells.
+
+[Selective SMT Domain Export](docs/selective-smt-domain-export.md) keeps all
+reported domains while avoiding redundant structural finite-set assertions in
+privacy queries; repeated measurements document the lookup regression fix.
+
+[Soundness Regression Checks](docs/soundness-hardening.md) documents modular
+assignment, zero-factor handling, selector-independent constraint coverage and
+the field/Halo2 counterexamples used to test them.
+
+[SAT Hint Acceleration](docs/sat-hint-acceleration.md) explains the scoped,
+positive-only initial satisfiability shortcut and the permutation-copy fix.
+
+[Original-Subset Domain Validation](docs/subset-domain-validation.md) proves
+exclusion using literal original constraints, with full-SMT fallback and separate
+nonvacuity checking; the Poseidon publication control now passes fresh validation.
+
+[External Poseidon Evaluation](docs/external-poseidon-evaluation.md) adds the full
+upstream hash circuit, a local publication control, and bounded incomplete outcomes.
+It also documents successful control recovery, local linear-subsystem inference,
+and the remaining original-SAT bottleneck in the SMT-only performance reference.

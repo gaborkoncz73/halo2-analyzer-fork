@@ -24,7 +24,7 @@ use std::{collections::HashMap, marker::PhantomData};
 
 fn analyzer_input_with_instance(value: i64) -> AnalyzerInput {
     let mut instance_cells = HashMap::new();
-    instance_cells.insert("I-0-0".to_string(), value);
+    instance_cells.insert("I-0-0".to_string(), value.into());
 
     AnalyzerInput {
         verification_method: VerificationMethod::Specific,

@@ -19,7 +19,7 @@ mod tests {
         let circuit = UnderDecoderCircuit::<Fr, 8>(PhantomData);
         let k: u32 = 5;
         let mut instance_cells = HashMap::new();
-        instance_cells.insert("I-0-0".to_string(), 2);
+        instance_cells.insert("I-0-0".to_string(), 2.into());
         let analyzer_input = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,
             verification_input: VerificationInput {
@@ -66,7 +66,7 @@ mod tests {
         let k: u32 = 5;
 
         let mut instance_cells = HashMap::new();
-        instance_cells.insert("I-0-0".to_string(), 2);
+        instance_cells.insert("I-0-0".to_string(), 2.into());
 
         let analyzer_input = analyzer_io_type::AnalyzerInput {
             verification_method: VerificationMethod::Specific,

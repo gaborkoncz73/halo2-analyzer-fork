@@ -8,7 +8,7 @@ members = [
 halo2curves = { git = "https://github.com/quantstamp/halo2curves.git",branch = "analyzer"}
 
 [patch."https://github.com/zcash/halo2.git"]
-zcash_halo2_proofs = { git = "https://github.com/Analyzable-Halo2/zcash-halo2.git", package = "halo2_proofs"}
+zcash_halo2_proofs = { git = "https://github.com/Analyzable-Halo2/zcash-halo2.git", rev = "7fc5e14d53c19cc4e09f0af2ed4b87440e1bb4fb", package = "halo2_proofs"}
 
 # For pse_v1 and benchmarks we need comment the first patch and uncomment the second patch
 [patch."https://github.com/privacy-scaling-explorations/halo2.git"]

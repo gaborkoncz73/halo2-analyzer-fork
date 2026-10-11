@@ -17,6 +17,18 @@ fn absolute_row(region_begin: usize, row: i32, rotation: Rotation) -> i32 {
         .expect("absolute UCP row overflowed i32")
 }
 
+//Halo2 rotations wrap around the evaluation domain, including negative rotations.
+pub(crate) fn query_row(
+    region_begin: usize,
+    row: i32,
+    rotation: Rotation,
+    num_rows: usize,
+) -> usize {
+    let base = i64::try_from(region_begin).expect("region row does not fit into i64");
+    let period = i64::try_from(num_rows).expect("evaluation domain does not fit into i64");
+    (base + i64::from(row) + i64::from(rotation.0)).rem_euclid(period) as usize
+}
+
 //Halo2 field elemből BigInt-et készít, hogy UCP konstansként tudjuk használni
 pub(crate) fn field_to_bigint<F: AnalyzableField>(value: &F) -> BigInt {
     BigInt::from_str_radix(format!("{:?}", value).strip_prefix("0x").unwrap(), 16).unwrap()
@@ -38,9 +50,13 @@ fn fixed_query_value<F: AnalyzableField>(
     row: i32,
     fixed_values: &[Vec<CellValue<F>>],
 ) -> Option<UcpExpr> {
-    let absolute_row = usize::try_from(absolute_row(region_begin, row, query.rotation)).ok()?;
+    let column = fixed_values.get(query.column_index)?;
+    if column.is_empty() {
+        return None;
+    }
+    let absolute_row = query_row(region_begin, row, query.rotation, column.len());
 
-    match fixed_values.get(query.column_index)?.get(absolute_row)? {
+    match column.get(absolute_row)? {
         CellValue::Assigned(value) => Some(field_to_ucp_constant(value)),
         CellValue::Unassigned | CellValue::Poison(_) => None,
     }

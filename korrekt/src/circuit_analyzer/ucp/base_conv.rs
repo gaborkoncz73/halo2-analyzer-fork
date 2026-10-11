@@ -7,7 +7,7 @@ use super::{
     cell::CellId,
     expr::{UcpExpr, UcpScalar},
     facts::UcpFacts,
-    value::UcpValueFacts,
+    value::{bounded_value, UcpValueFacts},
 };
 use num_bigint::BigInt;
 use std::collections::BTreeMap;
@@ -43,11 +43,14 @@ pub fn infer_base_conversions_with_modulus(
     values: &UcpValueFacts,
     modulus: &BigInt,
 ) -> Vec<BaseConvInference> {
+    if modulus <= &BigInt::from(1) {
+        return Vec::new();
+    }
     let mut inferences = BTreeMap::new();
 
     for expr in expressions {
         //Csak lineáris zero equationökön tudjuk felismerni a base-conv alakot
-        let Some(linear) = linearize_zero_equation(expr) else {
+        let Some(linear) = linearize_zero_equation(expr, modulus) else {
             continue;
         };
 
@@ -255,9 +258,9 @@ fn is_plus_or_minus_one(value: &BigInt) -> bool {
     value == &BigInt::from(1) || value == &BigInt::from(-1)
 }
 
-fn linearize_zero_equation(expr: &UcpExpr) -> Option<LinearExpr> {
+fn linearize_zero_equation(expr: &UcpExpr, modulus: &BigInt) -> Option<LinearExpr> {
     //Ha egy szorzásban csak egy érdemi faktor marad, azt külön lineárisítjuk
-    let factors = meaningful_product_factors(expr);
+    let factors = meaningful_product_factors(expr, modulus);
     if factors.len() == 1 {
         return linearize(factors[0]);
     }
@@ -266,29 +269,32 @@ fn linearize_zero_equation(expr: &UcpExpr) -> Option<LinearExpr> {
     linearize(expr)
 }
 
-fn meaningful_product_factors(expr: &UcpExpr) -> Vec<&UcpExpr> {
+fn meaningful_product_factors<'a>(expr: &'a UcpExpr, modulus: &BigInt) -> Vec<&'a UcpExpr> {
     let mut factors = Vec::new();
-    collect_meaningful_product_factors(expr, &mut factors);
+    collect_meaningful_product_factors(expr, &mut factors, modulus);
     factors
 }
 
-fn collect_meaningful_product_factors<'a>(expr: &'a UcpExpr, factors: &mut Vec<&'a UcpExpr>) {
+fn collect_meaningful_product_factors<'a>(
+    expr: &'a UcpExpr,
+    factors: &mut Vec<&'a UcpExpr>,
+    modulus: &BigInt,
+) {
     match expr {
         //A szorzásfát kilapítjuk faktorlistává
         UcpExpr::Mul(left, right) => {
-            collect_meaningful_product_factors(left, factors);
-            collect_meaningful_product_factors(right, factors);
+            collect_meaningful_product_factors(left, factors, modulus);
+            collect_meaningful_product_factors(right, factors, modulus);
         }
         //A mínusz előjel nem számít a faktorok felismerésénél
-        UcpExpr::Neg(inner) => collect_meaningful_product_factors(inner, factors),
+        UcpExpr::Neg(inner) => collect_meaningful_product_factors(inner, factors, modulus),
         //Nem nulla skálázás mellett ugyanaz marad az érdemi faktor
-        UcpExpr::Scale(inner, scalar) if scalar.is_statically_non_zero() => {
-            collect_meaningful_product_factors(inner, factors)
+        UcpExpr::Scale(inner, scalar) if scalar.is_non_zero_with_modulus(Some(modulus)) => {
+            collect_meaningful_product_factors(inner, factors, modulus)
         }
         //Nem nulla konstans szorzó nem változtatja meg a zero equation megoldáshalmazát
-        UcpExpr::Const(UcpScalar::NonZero | UcpScalar::Known(_)) => {}
-        //Nullával szorzott rész nem ad base-conv információt
-        UcpExpr::Scale(_, UcpScalar::Zero) | UcpExpr::Const(UcpScalar::Zero) => {}
+        UcpExpr::Const(scalar) if scalar.is_non_zero_with_modulus(Some(modulus)) => {}
+        //Retain zero factors so a tautology cannot become a digit constraint.
         //Minden más valódi faktor marad
         _ => factors.push(expr),
     }
@@ -344,17 +350,6 @@ fn constant_expr_value(expr: &UcpExpr) -> Option<BigInt> {
             UcpScalar::Known(scale) => bounded_value(constant_expr_value(inner)? * scale),
             UcpScalar::NonZero | UcpScalar::Unknown => None,
         },
-    }
-}
-
-fn bounded_value(value: BigInt) -> Option<BigInt> {
-    //Védőkorlát: csak kezelhető méretű integer értékekkel végzünk UCP value inference-t
-    if value == BigInt::from(0)
-        || (value >= BigInt::from(i64::MIN) && value <= BigInt::from(i64::MAX))
-    {
-        Some(value)
-    } else {
-        None
     }
 }
 
