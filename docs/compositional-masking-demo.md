@@ -66,11 +66,34 @@ validate a randomness distribution, or prove the security of a masking protocol.
 From the repository root:
 
 ```sh
-cargo test --offline -p korrekt demo_linear_masking -- --nocapture --test-threads=1
+cargo test --offline -p korrekt --lib demo_linear_masking -- --nocapture --test-threads=1
 cargo test --offline -p korrekt privacy_measurement_smoke_covers_compositional_masking -- --test-threads=1
 ```
 
-The demo prints the recovery reports and the successful independent validation.
+All tests in `demo_tests.rs` print compact summaries by default: recovered values
+or finite-domain previews, uniqueness, actual check counts, status and elapsed
+time. Timeouts, incomplete optional searches and exhausted budgets remain visible.
+Independent validation prints its status and check count, plus any refutation.
+These summaries do not replace the tests' assertions or change the analysis.
+
+For only the reused-mask case:
+
+```sh
+cargo test --offline -p korrekt --lib demo_linear_masking_reused_mask_leaks_secret_through_composition -- --nocapture --test-threads=1
+```
+
+Enable the original full recovery, validation and observation-control reports
+(including policies, limits and per-cell evidence) with `UCP_DEMO_VERBOSE=1`:
+
+```sh
+UCP_DEMO_VERBOSE=1 cargo test --offline -p korrekt --lib demo_linear_masking -- --nocapture --test-threads=1
+```
+
+Omit the variable or set it to `0` for compact output. `--nocapture` makes test
+output visible; compiler warnings are separate and are not suppressed by this
+switch. This setting only controls demo output, not the public report formatting
+APIs or the measurement exports.
+
 The measurement suite additionally compares the same cells against the SMT-only
 reference and exports recovery and validation timings separately. Its new cases
 are `mask_single_publication`, `mask_reused_composition`, and

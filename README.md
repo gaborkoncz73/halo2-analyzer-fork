@@ -475,7 +475,8 @@ and per-cell evidence.
 
 [Compositional Masking Demo](docs/compositional-masking-demo.md) shows how two
 public observations reveal a secret when a linear mask is reused, with
-single-publication and independent-mask controls.
+single-publication and independent-mask controls. Demos print compact summaries
+by default; set `UCP_DEMO_VERBOSE=1` for full reports.
 
 [External Halo2 Book Evaluation](docs/external-halo2-book-evaluation.md) analyzes
 an unchanged, pinned upstream circuit and a separately identified local control

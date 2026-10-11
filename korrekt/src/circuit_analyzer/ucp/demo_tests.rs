@@ -11,15 +11,23 @@
 //! A cél nem az, hogy flaky időbeli assertet írjunk, hanem hogy `--nocapture`
 //! mellett jól látszódjon: amikor az UCP szabályok elég erősek, a drága SMT
 //! részt teljesen vagy majdnem teljesen el tudjuk kerülni.
+//!
+//! Alapbol rovid osszefoglalot irunk; a teljes riport: `UCP_DEMO_VERBOSE=1`.
 
 use super::{
     cell::CellId,
     pipeline::{analyze_underconstrained_with_ucp, UcpAnalyzerPipelineStatus},
     privacy::{
-        analyze_private_recoverability, PrivacyAnalysisOptions, PrivacyAnalysisStatus,
-        PrivateCellUniqueness,
+        analyze_private_recoverability, PrivacyAnalysisOptions, PrivacyAnalysisReport,
+        PrivacyAnalysisStatus, PrivateCellUniqueness,
     },
-    privacy_validation::{validate_private_recovery_report, RecoveryValidationStatus},
+    privacy_discovery::PrivateDomainDiscoveryStatus,
+    privacy_domain::PrivateDomainRefinementStatus,
+    privacy_observation::PublicObservationEffectReport,
+    privacy_validation::{
+        validate_private_recovery_report, PrivateRecoveryValidationReport, RecoveryValidationStatus,
+    },
+    value::UcpValueDomain,
 };
 use crate::{
     circuit_analyzer::{analyzer::Analyzer, halo2_proofs_libs::*},
@@ -28,7 +36,167 @@ use crate::{
         VerificationMethod,
     },
 };
-use std::{array, collections::HashMap, marker::PhantomData, time::Duration, time::Instant};
+use std::{array, collections::HashMap, fmt, marker::PhantomData, time::Duration, time::Instant};
+
+fn demo_verbose() -> bool {
+    std::env::var("UCP_DEMO_VERBOSE").is_ok_and(|value| value == "1")
+}
+
+fn demo_report_text(
+    report: &impl fmt::Display,
+    compact: impl FnOnce() -> String,
+    verbose: bool,
+) -> String {
+    if verbose {
+        report.to_string()
+    } else {
+        compact()
+    }
+}
+
+fn print_demo_report(title: &str, report: &impl fmt::Display, compact: impl FnOnce() -> String) {
+    println!(
+        "{title}\n{}",
+        demo_report_text(report, compact, demo_verbose())
+    );
+}
+
+fn short_demo_domain(domain: Option<&UcpValueDomain>) -> String {
+    match domain {
+        Some(UcpValueDomain::Exact(value)) => format!("Exact({value})"),
+        Some(UcpValueDomain::FiniteSet(values)) => {
+            let preview: Vec<_> = values.iter().take(8).map(ToString::to_string).collect();
+            let suffix = if values.len() > preview.len() {
+                ", ..."
+            } else {
+                ""
+            };
+            format!(
+                "Candidates({{{}{suffix}}}; size={})",
+                preview.join(", "),
+                values.len()
+            )
+        }
+        None => "No recovered domain".into(),
+    }
+}
+
+fn short_privacy_report(report: &PrivacyAnalysisReport) -> String {
+    let summary = &report.summary;
+    let mut lines = vec![format!(
+        "Privacy: {:?}; cells: {}; exact: {}; finite domains: {}; unique: {}; non-unique: {}; unresolved: {}",
+        report.status, summary.private_cells, summary.exact_values, summary.finite_domains,
+        summary.unique_cells, summary.non_unique_cells, summary.unresolved_uniqueness,
+    )];
+    for cell in &report.cells {
+        let mut line = format!(
+            "{}: {:?}; {}",
+            cell.cell,
+            cell.uniqueness,
+            short_demo_domain(cell.domain.as_ref())
+        );
+        if let Some(limitation) = &cell.recovery_limitation {
+            line.push_str(&format!("; limitation: {limitation:?}"));
+        }
+        // Analyzed can coexist with unfinished optional searches; do not hide that evidence.
+        if let Some(evidence) = &cell.domain_refinement {
+            if evidence.status != PrivateDomainRefinementStatus::Complete {
+                line.push_str(&format!(
+                    "; refinement: {:?} ({:?})",
+                    evidence.status, evidence.limitation
+                ));
+            }
+        }
+        if let Some(evidence) = &cell.domain_discovery {
+            if evidence.status != PrivateDomainDiscoveryStatus::Complete {
+                line.push_str(&format!(
+                    "; discovery: {:?} ({:?})",
+                    evidence.status, evidence.limitation
+                ));
+            }
+        }
+        lines.push(line);
+    }
+    let mut checks = format!(
+        "Initial SAT checks: {}; SMT uniqueness queries: {}",
+        report.satisfiability_checks, report.semantic_queries
+    );
+    if report.domain_refinement_statistics.solver_checks > 0 {
+        checks.push_str(&format!(
+            "; refinement checks: {}",
+            report.domain_refinement_statistics.solver_checks
+        ));
+    }
+    if report.domain_discovery_statistics.solver_checks > 0 {
+        checks.push_str(&format!(
+            "; discovery checks: {}",
+            report.domain_discovery_statistics.solver_checks
+        ));
+    }
+    checks.push_str(&format!("; elapsed: {:.2?}", report.elapsed));
+    lines.push(checks);
+    if report.search_statistics.stop_reason.is_some()
+        || report.domain_refinement_statistics.budget_exhausted
+        || report.domain_discovery_statistics.budget_exhausted
+    {
+        lines.push(format!(
+            "Search stop: {:?}; refinement budget exhausted: {}; discovery budget exhausted: {}",
+            report.search_statistics.stop_reason,
+            report.domain_refinement_statistics.budget_exhausted,
+            report.domain_discovery_statistics.budget_exhausted
+        ));
+    }
+    lines.join("\n")
+}
+
+fn print_privacy_demo(title: &str, report: &PrivacyAnalysisReport) {
+    print_demo_report(title, report, || short_privacy_report(report));
+}
+
+fn short_validation_report(report: &PrivateRecoveryValidationReport) -> String {
+    let mut lines = vec![format!(
+        "Domain validation: {:?}; checked claims: {}; SMT checks: {}; elapsed: {:.2?}",
+        report.status, report.domain_queries, report.solver_checks, report.elapsed
+    )];
+    for cell in &report.cells {
+        if let Some(value) = &cell.counterexample {
+            lines.push(format!(
+                "{}: {:?}; counterexample: {value}",
+                cell.cell, cell.status
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn print_validation_demo(title: &str, report: &PrivateRecoveryValidationReport) {
+    print_demo_report(title, report, || short_validation_report(report));
+}
+
+fn short_observation_report(report: &PublicObservationEffectReport) -> String {
+    let mut lines = vec![format!(
+        "Observation control: {:?}; SMT checks: {}; elapsed: {:.2?}",
+        report.status, report.solver_checks, report.elapsed
+    )];
+    for cell in &report.cells {
+        let mut line = format!(
+            "{}: {:?}; observed domain verified: {}",
+            cell.cell, cell.effect, cell.observed_domain_verified
+        );
+        if let Some(value) = &cell.observed_counterexample {
+            line.push_str(&format!("; counterexample under observations: {value}"));
+        }
+        if let Some(limitation) = &cell.limitation {
+            line.push_str(&format!("; limitation: {limitation:?}"));
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn print_observation_demo(title: &str, report: &PublicObservationEffectReport) {
+    print_demo_report(title, report, || short_observation_report(report));
+}
 
 //N darab privát bit advice oszlop és egy selector, ami az egyetlen aktív sort kapcsolja.
 #[derive(Clone, Debug)]
@@ -646,17 +814,17 @@ fn demo_private_amount_bits_ucp_beats_analyzer_only() {
     let pipeline_duration = pipeline_start.elapsed();
 
     println!(
-        "demo_private_amount_bits analyzer_only={:?} analyzer_time={:?} pipeline_status={:?} pipeline_time={:?} speedup={:.2}x used_smt={} semantic_queries={} unresolved_targets={:?} learned_domains={:?}",
-        analyzer_status,
-        analyzer_duration,
-        pipeline_output.status,
-        pipeline_duration,
-        speedup(analyzer_duration, pipeline_duration),
-        pipeline_output.used_smt,
-        pipeline_output.semantic_queries,
-        pipeline_output.target_check.unresolved_targets,
-        pipeline_output.ucp_result.value_facts.domains(),
+        "Public amount={amount}; {N} private bits: {:?}; SMT uniqueness queries: {}; elapsed: {:.2?}\nSMT-only: {:?}; elapsed: {:.2?}; single-run speedup: {:.2}x (not a benchmark)",
+        pipeline_output.status, pipeline_output.semantic_queries, pipeline_duration,
+        analyzer_status, analyzer_duration, speedup(analyzer_duration, pipeline_duration)
     );
+    if demo_verbose() {
+        println!(
+            "Unresolved targets: {:?}; learned domains: {:?}",
+            pipeline_output.target_check.unresolved_targets,
+            pipeline_output.ucp_result.value_facts.domains()
+        );
+    }
 
     assert_eq!(
         analyzer_status,
@@ -697,16 +865,20 @@ fn demo_secret_remains_private_while_commitment_output_is_constrained() {
     let pipeline_duration = pipeline_start.elapsed();
 
     println!(
-        "demo_secret_commitment pipeline_status={:?} pipeline_time={:?} used_smt={} semantic_queries={} commitment_unique={} secret_unique={} nonce_unique={} known_values={:?}",
+        "Public sum=100: {:?}; elapsed: {:.2?}; SMT uniqueness queries: {}\nProven unique: output={}; secret={}; nonce={}",
         pipeline_output.status,
         pipeline_duration,
-        pipeline_output.used_smt,
         pipeline_output.semantic_queries,
         pipeline_output.ucp_result.facts.is_unique(&commitment),
         pipeline_output.ucp_result.facts.is_unique(&secret),
         pipeline_output.ucp_result.facts.is_unique(&nonce),
-        pipeline_output.ucp_result.value_facts.known_values(),
     );
+    if demo_verbose() {
+        println!(
+            "Known values: {:?}",
+            pipeline_output.ucp_result.value_facts.known_values()
+        );
+    }
 
     assert_eq!(
         pipeline_output.status,
@@ -760,18 +932,18 @@ fn demo_one_smt_query_then_ucp_closes_many_outputs() {
     let pipeline_duration = pipeline_start.elapsed();
 
     println!(
-        "demo_one_smt_then_ucp analyzer_only={:?} analyzer_time={:?} pipeline_status={:?} pipeline_time={:?} speedup={:.2}x used_smt={} semantic_queries={} smt_learned={:?} unresolved_targets={:?} recovered_values={:?}",
-        analyzer_status,
-        analyzer_duration,
-        pipeline_output.status,
-        pipeline_duration,
-        speedup(analyzer_duration, pipeline_duration),
-        pipeline_output.used_smt,
-        pipeline_output.semantic_queries,
-        pipeline_output.smt_learned_cells,
-        pipeline_output.target_check.unresolved_targets,
-        pipeline_output.ucp_result.value_facts.known_values(),
+        "SMT anchor, then {N} UCP outputs: {:?}; SMT uniqueness queries: {}; elapsed: {:.2?}\nSMT-only: {:?}; elapsed: {:.2?}; single-run speedup: {:.2}x (not a benchmark)",
+        pipeline_output.status, pipeline_output.semantic_queries, pipeline_duration,
+        analyzer_status, analyzer_duration, speedup(analyzer_duration, pipeline_duration)
     );
+    if demo_verbose() {
+        println!(
+            "SMT-learned cells: {:?}; unresolved targets: {:?}; recovered values: {:?}",
+            pipeline_output.smt_learned_cells,
+            pipeline_output.target_check.unresolved_targets,
+            pipeline_output.ucp_result.value_facts.known_values()
+        );
+    }
 
     assert_eq!(
         analyzer_status,
@@ -814,7 +986,7 @@ fn demo_privacy_report_separates_recovered_bits_from_ambiguous_secrets() {
         PrivacyAnalysisOptions::default(),
     )
     .unwrap();
-    println!("Public amount exposes all private bits:\n{exposed}");
+    print_privacy_demo("Public amount=173 exposes all private bits:", &exposed);
     assert_eq!(exposed.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(exposed.summary.exact_values, N);
     assert_eq!(exposed.summary.refined_domains, N);
@@ -835,7 +1007,7 @@ fn demo_privacy_report_separates_recovered_bits_from_ambiguous_secrets() {
         &exposed,
     )
     .unwrap();
-    println!("Checking recovered bits against original constraints:\n{validated}");
+    print_validation_demo("Independent check of the recovered bits:", &validated);
     assert_eq!(validated.status, RecoveryValidationStatus::VerifiedDomains);
     assert_eq!(validated.domain_queries, N);
 
@@ -849,7 +1021,10 @@ fn demo_privacy_report_separates_recovered_bits_from_ambiguous_secrets() {
         PrivacyAnalysisOptions::default(),
     )
     .unwrap();
-    println!("Public sum does not determine its private operands:\n{ambiguous}");
+    print_privacy_demo(
+        "Public sum=100 does not determine its private operands:",
+        &ambiguous,
+    );
     assert_eq!(ambiguous.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(ambiguous.summary.exact_values, 0);
     assert_eq!(ambiguous.summary.non_unique_cells, 2);
@@ -885,7 +1060,7 @@ fn demo_independent_validation_detects_a_wrong_recovered_bit() {
     ));
     let validation =
         validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &report).unwrap();
-    println!("A false recovered bit is refuted:\n{validation}");
+    print_validation_demo("A false recovered bit is refuted:", &validation);
     assert_eq!(validation.status, RecoveryValidationStatus::Refuted);
     assert_eq!(
         validation.cells[0].counterexample,
@@ -921,7 +1096,10 @@ fn demo_linear_masking_individual_publications_are_ambiguous() {
             PrivacyAnalysisOptions::default(),
         )
         .unwrap();
-        println!("One publication ({mode:?}) cannot determine the secret:\n{report}");
+        print_privacy_demo(
+            &format!("One publication ({mode:?}): secret remains ambiguous:"),
+            &report,
+        );
         assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
         assert_eq!(report.summary.exact_values, 0);
         assert_eq!(report.summary.non_unique_cells, 2);
@@ -949,7 +1127,7 @@ fn demo_linear_masking_reused_mask_leaks_secret_through_composition() {
         PrivacyAnalysisOptions::default(),
     )
     .unwrap();
-    println!("Reused mask: a=100, b=142 imply s=b-a=42, r=2a-b=58:\n{report}");
+    print_privacy_demo("\nReused mask: a=100, b=142; a=s+r, b=2s+r -> s=b-a, r=2a-b", &report);
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(report.summary.exact_values, 2);
     assert_eq!(report.summary.unique_cells, 2);
@@ -967,7 +1145,10 @@ fn demo_linear_masking_reused_mask_leaks_secret_through_composition() {
     }
     let validation =
         validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &report).unwrap();
-    println!("Independent check of the recovered secret and mask:\n{validation}");
+    print_validation_demo(
+        "Independent check of the recovered secret and mask:",
+        &validation,
+    );
     assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
     assert_eq!(validation.domain_queries, 2);
     assert!(validation
@@ -1014,7 +1195,10 @@ fn demo_linear_masking_independent_masks_keep_secret_ambiguous() {
         PrivacyAnalysisOptions::default(),
     )
     .unwrap();
-    println!("Independent masks: the same public observations do not determine s:\n{report}");
+    print_privacy_demo(
+        "Independent masks: a=100, b=142; secret remains ambiguous:",
+        &report,
+    );
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(report.summary.exact_values, 0);
     assert_eq!(report.summary.non_unique_cells, 3);
@@ -1065,12 +1249,12 @@ fn demo_finite_domain_refinement_restarts_ucp_without_guessing_the_secret() {
         options,
     )
     .unwrap();
-    println!("Before finite-domain SMT refinement:\n{coarse}");
-    println!("Original SMT excludes fourteen candidates; UCP then learns d=0:\n{refined}");
-    println!(
-        "Elapsed: coarse={:?}, refined={:?}. This measures additional recovery, not a speedup.",
-        coarse.elapsed, refined.elapsed
+    print_privacy_demo("Before finite-domain SMT refinement:", &coarse);
+    print_privacy_demo(
+        "After SMT excludes fourteen candidates; UCP learns d=0:",
+        &refined,
     );
+    println!("Additional recovery, not a speedup comparison.");
     assert_eq!(coarse.cells[1].domain, None);
     assert_eq!(
         refined.cells[0].domain,
@@ -1088,7 +1272,7 @@ fn demo_finite_domain_refinement_restarts_ucp_without_guessing_the_secret() {
     assert_eq!(refined.domain_refinement_statistics.solver_checks, 17);
     let validation =
         validate_private_recovery_report::<Fr, _>(&circuit, 5, &input, &refined).unwrap();
-    println!("Fresh independent coverage validation:\n{validation}");
+    print_validation_demo("Fresh independent coverage validation:", &validation);
     assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
 }
 
@@ -1128,12 +1312,12 @@ fn demo_smt_discovers_a_private_domain_without_ucp_candidates() {
         options,
     )
     .unwrap();
-    println!("Without discovery, neither private target has a Delta domain:\n{coarse}");
-    println!("Original-model enumeration: two SAT values and a final UNSAT, followed by UCP:\n{discovered}");
-    println!(
-        "Elapsed: coarse={:?}, discovery={:?}. This is extra recovery, not a speedup claim.",
-        coarse.elapsed, discovered.elapsed
+    print_privacy_demo("Without discovery: no recovered domains:", &coarse);
+    print_privacy_demo(
+        "Discovery: two SAT values, final UNSAT, then UCP:",
+        &discovered,
     );
+    println!("Additional recovery, not a speedup comparison.");
     assert!(coarse.cells.iter().all(|cell| cell.domain.is_none()));
     assert_eq!(
         discovered.cells[0].domain,
@@ -1147,7 +1331,7 @@ fn demo_smt_discovers_a_private_domain_without_ucp_candidates() {
     assert_eq!(discovered.semantic_queries, 0);
     let validation =
         validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &discovered).unwrap();
-    println!("Fresh independent coverage validation:\n{validation}");
+    print_validation_demo("Fresh independent coverage validation:", &validation);
     assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
 }
 
@@ -1187,9 +1371,8 @@ fn demo_fair_domain_discovery_recovers_later_targets_with_a_small_budget() {
         },
     )
     .unwrap();
-    println!("Public p=21; a is free; b*b-2*p*b+p*p=0; c=b+2.");
-    println!("UCP priority plus fair rounds: four discovery checks recover b and c:\n{report}");
-    println!("The free cell remains unresolved. This demonstrates budget allocation, not cryptographic privacy or a general speedup.");
+    print_privacy_demo("Public p=21; a is free; b*b-2*p*b+p*p=0; c=b+2:", &report);
+    println!("Budget-limited recovery is not a privacy certificate.");
     assert!(report.cells[0].domain.is_none());
     assert_eq!(
         report.cells[1].domain,
@@ -1206,7 +1389,7 @@ fn demo_fair_domain_discovery_recovers_later_targets_with_a_small_budget() {
     assert_eq!(report.semantic_queries, 0);
     let validation =
         validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &report).unwrap();
-    println!("Fresh independent coverage validation:\n{validation}");
+    print_validation_demo("Fresh independent coverage validation:", &validation);
     assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
 }
 
@@ -1258,17 +1441,13 @@ fn demo_targeted_subset_exclusion_recovers_private_values_beside_unrelated_gates
         },
     )
     .unwrap();
-    println!("Public amount=21; s*s-2*amount*s+amount*amount=0; next=s+2; 16 independent v*v-(amount+i)^2=0 gates.");
-    println!(
-        "Full-model discovery: {:?}; elapsed: {:?}",
-        full.domain_discovery_statistics, full.elapsed
+    println!("Public amount=21; s*s-2*amount*s+amount*amount=0; next=s+2; 16 unrelated gates.");
+    print_privacy_demo("Full-model discovery:", &full);
+    print_privacy_demo(
+        "Targeted exclusion: original SAT sample, local UNSAT proof, then UCP:",
+        &targeted,
     );
-    println!(
-        "Targeted exclusion: {:?}; elapsed: {:?}",
-        targeted.domain_discovery_statistics, targeted.elapsed
-    );
-    println!("The first sample still satisfies the full original model. The terminal UNSAT uses only two original gates; UCP then learns next=23.\n{targeted}");
-    println!("Times include mandatory full-original SAT and preprocessing. This single debug comparison is not a general speedup estimate.");
+    println!("Times include initial SAT and preprocessing; this is not a benchmark.");
     for report in [&full, &targeted] {
         assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
         assert_eq!(
@@ -1289,7 +1468,7 @@ fn demo_targeted_subset_exclusion_recovers_private_values_beside_unrelated_gates
     assert_eq!(targeted.domain_discovery_statistics.subset_unsat_proofs, 1);
     let validation =
         validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &targeted).unwrap();
-    println!("Fresh original-context coverage validation:\n{validation}");
+    print_validation_demo("Fresh original-context coverage validation:", &validation);
     assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
 }
 
@@ -1312,14 +1491,11 @@ fn demo_public_observation_control_separates_smt_progress_from_publication_effec
         PublicObservationEffectOptions::default(),
     )
     .unwrap();
-    println!("Intrinsic: s*s-2*s+1=0, next=s+2. An unrelated public observation is not needed.");
-    println!(
-        "UCP baseline for s: {:?}; recovered: {:?}; refined from UCP baseline: {}",
-        intrinsic.cells[0].baseline_domain,
-        intrinsic.cells[0].domain,
-        intrinsic.cells[0].domain_refined_from_baseline
+    print_privacy_demo("Intrinsic: s*s-2*s+1=0; next=s+2:", &intrinsic);
+    print_observation_demo(
+        "Exact domains already follow without public observations:",
+        &intrinsic_effect,
     );
-    println!("Original-SMT control correctly attributes both exact values to C alone:\n{intrinsic_effect}");
     assert!(intrinsic.cells[0].domain_refined_from_baseline);
     assert_eq!(
         intrinsic_effect.status,
@@ -1354,11 +1530,12 @@ fn demo_public_observation_control_separates_smt_progress_from_publication_effec
         PublicObservationEffectOptions::default(),
     )
     .unwrap();
-    println!("Publication: first=s+r=100; second=2*s+r=142. Together they expose s=42, r=58.");
-    println!(
-        "Without those concrete observations, original satisfying alternatives exist:\n{effect}"
+    print_privacy_demo("Publication: first=s+r=100; second=2*s+r=142:", &recovery);
+    print_observation_demo(
+        "Without observations, alternatives exist outside the recovered domains:",
+        &effect,
     );
-    println!("Recovery time: {:?}; separate control time: {:?}. This control checks domain dependence, not entropy or protocol ZK.", recovery.elapsed, effect.elapsed);
+    println!("This checks domain dependence, not entropy or protocol zero-knowledge.");
     assert_eq!(recovery.summary.exact_values, 2);
     assert_eq!(effect.status, PublicObservationEffectStatus::Analyzed);
     assert!(effect.cells.iter().all(|cell| cell.effect
@@ -1366,4 +1543,173 @@ fn demo_public_observation_control_separates_smt_progress_from_publication_effec
         && cell.observed_domain_verified
         && cell.unobserved_counterexample.is_some()));
     assert_eq!(effect.solver_checks, 5); // One original SAT plus two full-model exclusions per cell.
+}
+
+mod output_tests {
+    use super::super::{
+        privacy::{PrivacyAnalysisSummary, PrivateCellReport, RecoveryLimitation},
+        privacy_discovery::PrivateDomainDiscovery,
+        privacy_observation::{
+            PrivateDomainObservationEffect, PrivateObservationEffect,
+            PublicObservationEffectOptions, PublicObservationEffectStatus,
+        },
+        privacy_validation::{DomainValidationStatus, PrivateDomainValidation},
+    };
+    use super::*;
+
+    fn report() -> PrivacyAnalysisReport {
+        PrivacyAnalysisReport {
+            status: PrivacyAnalysisStatus::Analyzed,
+            cells: [42, 58]
+                .into_iter()
+                .enumerate()
+                .map(|(column, value)| PrivateCellReport {
+                    cell: CellId::advice(column, 0),
+                    query_attempts: 0,
+                    uniqueness: PrivateCellUniqueness::Unique,
+                    domain: Some(UcpValueDomain::exact(value.into())),
+                    baseline_domain: None,
+                    domain_refined_from_baseline: true,
+                    recovery_limitation: None,
+                    domain_refinement: None,
+                    domain_discovery: None,
+                })
+                .collect(),
+            summary: PrivacyAnalysisSummary {
+                private_cells: 2,
+                exact_values: 2,
+                unique_cells: 2,
+                refined_domains: 2,
+                ..Default::default()
+            },
+            public_values: vec![(CellId::instance(0, 0), 100.into())],
+            semantic_queries: 0,
+            search_statistics: Default::default(),
+            domain_refinement_statistics: Default::default(),
+            domain_discovery_statistics: Default::default(),
+            satisfiability_checks: 1,
+            elapsed: Duration::from_millis(6),
+            options: PrivacyAnalysisOptions::default(),
+            ucp_result: None,
+        }
+    }
+
+    #[test]
+    fn compact_output_preserves_values_counts_and_timing_without_configuration() {
+        let report = report();
+        let text = demo_report_text(&report, || short_privacy_report(&report), false);
+        assert!(text.contains("Privacy: Analyzed; cells: 2; exact: 2"));
+        assert!(text.contains("A-0-0: Unique; Exact(42)"));
+        assert!(text.contains("A-1-0: Unique; Exact(58)"));
+        assert!(text.contains("Initial SAT checks: 1; SMT uniqueness queries: 0"));
+        assert!(text.contains("elapsed: 6.00ms"));
+        assert!(!text.contains("Search policy:"));
+        assert!(!text.contains("Search limits:"));
+        assert!(!text.contains("refinement checks:"));
+        assert!(!text.contains("discovery checks:"));
+        assert_eq!(text.lines().count(), 4);
+    }
+
+    #[test]
+    fn verbose_output_uses_the_unchanged_full_report() {
+        let report = report();
+        let text = demo_report_text(
+            &report,
+            || panic!("Compact formatting should not run"),
+            true,
+        );
+        assert_eq!(text, report.to_string());
+        assert!(text.contains("Search policy:"));
+        assert!(text.contains("Domain discovery:"));
+    }
+
+    #[test]
+    fn compact_output_preserves_unknown_status_and_timeout() {
+        let mut report = report();
+        report.status = PrivacyAnalysisStatus::SolverUnknown;
+        report.cells[0].uniqueness = PrivateCellUniqueness::Unknown;
+        report.cells[0].domain = None;
+        report.cells[0].recovery_limitation = Some(RecoveryLimitation::SolverTimeout);
+        report.summary.exact_values = 1;
+        report.summary.unique_cells = 1;
+        report.summary.unresolved_uniqueness = 1;
+        let text = short_privacy_report(&report);
+        assert!(text.contains("Privacy: SolverUnknown"));
+        assert!(text.contains("unresolved: 1"));
+        assert!(text.contains("A-0-0: Unknown; No recovered domain; limitation: SolverTimeout"));
+    }
+
+    #[test]
+    fn compact_output_does_not_hide_partial_search_after_recovery() {
+        let mut report = report();
+        report.cells[0].domain_discovery = Some(PrivateDomainDiscovery {
+            limitation: Some(RecoveryLimitation::QueryLimit),
+            ..Default::default()
+        });
+        report.domain_discovery_statistics.budget_exhausted = true;
+        let text = short_privacy_report(&report);
+        assert!(text.contains("Privacy: Analyzed"));
+        assert!(text.contains("Exact(42); discovery: Partial (Some(QueryLimit))"));
+        assert!(text.contains("discovery budget exhausted: true"));
+    }
+
+    #[test]
+    fn compact_finite_domains_have_a_bounded_preview() {
+        let domain = UcpValueDomain::finite_set((0..16).map(num_bigint::BigInt::from)).unwrap();
+        assert_eq!(
+            short_demo_domain(Some(&domain)),
+            "Candidates({0, 1, 2, 3, 4, 5, 6, 7, ...}; size=16)"
+        );
+        assert_eq!(
+            short_demo_domain(Some(&UcpValueDomain::exact(42.into()))),
+            "Exact(42)"
+        );
+        assert_eq!(short_demo_domain(None), "No recovered domain");
+    }
+
+    #[test]
+    fn compact_validation_keeps_refutations_and_actual_check_counts() {
+        let report = PrivateRecoveryValidationReport {
+            status: RecoveryValidationStatus::Refuted,
+            cells: vec![PrivateDomainValidation {
+                cell: CellId::advice(0, 0),
+                status: DomainValidationStatus::Refuted,
+                counterexample: Some(42.into()),
+            }],
+            domain_queries: 1,
+            solver_checks: 2,
+            subset_checks: 1,
+            elapsed: Duration::from_millis(16),
+        };
+        let text = short_validation_report(&report);
+        assert!(text.contains("Domain validation: Refuted; checked claims: 1; SMT checks: 2"));
+        assert!(text.contains("A-0-0: Refuted; counterexample: 42"));
+    }
+
+    #[test]
+    fn compact_observation_control_keeps_incomplete_coverage_evidence() {
+        let report = PublicObservationEffectReport {
+            status: PublicObservationEffectStatus::QueryLimitReached,
+            cells: vec![PrivateObservationEffect {
+                cell: CellId::advice(0, 0),
+                domain: Some(UcpValueDomain::exact(42.into())),
+                effect: PrivateDomainObservationEffect::Unresolved,
+                observed_domain_verified: true,
+                unobserved_counterexample: None,
+                observed_counterexample: None,
+                limitation: Some(RecoveryLimitation::QueryLimit),
+            }],
+            public_values: vec![],
+            solver_checks: 2,
+            satisfiability_checks: 1,
+            observed_domain_checks: 1,
+            unobserved_domain_checks: 0,
+            elapsed: Duration::from_millis(10),
+            options: PublicObservationEffectOptions::default(),
+        };
+        let text = short_observation_report(&report);
+        assert!(text.contains("Observation control: QueryLimitReached; SMT checks: 2"));
+        assert!(text
+            .contains("A-0-0: Unresolved; observed domain verified: true; limitation: QueryLimit"));
+    }
 }
