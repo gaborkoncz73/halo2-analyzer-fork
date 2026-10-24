@@ -1,0 +1,222 @@
+# Joint Cell And Operation Scheduling
+
+## Workflow
+
+`recover_private_inputs` in `privacy.rs` selects a cell and an operation together,
+instead of exhausting refinement, then discovery, then uniqueness queries.
+`privacy_search.rs` contains the cross-operation heuristic, internal strategy
+selection, and shared feasible samples. There are only two top-level operations:
+`Refine` and `Discover`. Existing public options still apply: candidate enumeration
+and domain discovery remain disabled by default, but bounded exact-only recovery
+is available through the internal fast-probe strategy.
+
+After the mandatory satisfiability check and initial UCP fixpoint:
+
+1. Shortlist eligible operations: refine an existing covering domain or discover
+   a domain for a cell without one. Select an eligible internal strategy for each
+   proposed action, respecting its own allowance and previous attempts.
+2. Consider selected targets and useful non-target advice cells. Non-target
+   domain work must fit the shared bridge allowance and leave reserved checks
+   for fresh targets. It must have predicted propagation benefit for a target.
+3. Select one cell/operation pair, using established uniqueness, target priority,
+   simulated propagation gain per estimated check, reusable samples, and stable
+   tie-breaks. Execute only that operation, within its remaining allowance.
+4. Share feasible samples, but merge only established uniqueness and covering
+   domains into K/Delta. Run UCP again only if K/Delta actually changed.
+5. Repeat until no permitted action remains. Report limits and partial evidence;
+   failure to recover a value is not evidence of confidentiality.
+
+There is no `RecoveryAction::Unique` and no separate final uniqueness phase.
+`RecoveryStrategy::FastProbe` is an internal strategy of refinement or discovery.
+It can resolve a singleton projection in two solver invocations without testing
+every member of a large candidate superset. Candidate refinement may execute a
+batch; ordinary discovery executes one check per step. An exact-only discovery
+probe may execute two checks. An action is not necessarily one SMT invocation.
+
+The existing low-level `Analyzer::query_ucp_cell_uniqueness_with_value` method
+remains shared solver infrastructure, also used by the legacy underconstrainedness
+pipeline. It is not a third operation in the privacy scheduler.
+
+## Algorithm Names In Code
+
+The original `analyze_prepared` driver was renamed, not replaced by another
+implementation. Paper procedure names use PascalCase; the corresponding Rust
+names use idiomatic snake_case. Public callers still use
+`analyze_private_recoverability`, which validates options, prepares the circuit,
+sets the solver timeout, and enters `recover_private_inputs`. The driver itself
+invokes `check_sat` before initializing recovery knowledge or search. It records
+the actual initial-check count on both diagnostic and recovery reports, including
+any SAT-hint fallback. No public API rename is required.
+
+| Paper Procedure | Rust Function Or Method | File |
+| --- | --- | --- |
+| `RecoverPrivateInputs` | `recover_private_inputs` | [privacy.rs](../korrekt/src/circuit_analyzer/ucp/privacy.rs) |
+| `OriginalContext` | `original_context` | privacy.rs |
+| `CheckSAT` | `check_sat` | privacy.rs |
+| `DiagnosticReport` | `diagnostic_report` | privacy.rs |
+| `InitializeKnowledge` | `initialize_knowledge` | privacy.rs |
+| `InitializeSearch` | `RecoverySearchState::initialize_search` | privacy.rs |
+| `PropagateToFixpoint` | `propagate_to_fixpoint` | privacy.rs |
+| `ObserveProgress` | `RecoverySearchState::observe_progress` | privacy.rs |
+| `EstablishedExactFacts` | `established_exact_facts` | privacy.rs |
+| `ShortlistActions` | `shortlist_actions` | privacy.rs |
+| `ChooseAction` | `choose_action` | [privacy_search.rs](../korrekt/src/circuit_analyzer/ucp/privacy_search.rs) |
+| `RefineDomain` | `RecoveryOperations::refine_domain` | privacy.rs |
+| `DiscoverDomain` | `RecoveryOperations::discover_domain` | privacy.rs |
+| `RememberFeasibleSamples` | `RecoveryEvidence::remember_feasible_samples` | privacy_search.rs |
+| `MergeEstablishedResults` | `merge_established_results` | privacy.rs |
+| `FactsChanged` | `facts_changed` | privacy.rs |
+| `RecoveryReport` | `recovery_report` | privacy.rs |
+
+The paper still abstracts over argument lists and bookkeeping. The driver dispatches
+only to `RecoveryOperations::refine_domain` or `discover_domain`. Each method owns
+both strategies: domain search delegates to the corresponding lower-level state
+method, while fast probing delegates to the private `RecoveryOperations::fast_probe`
+helper. There is no shared fast-probe continuation after the driver's match.
+
+Each operation returns a `RecoveryStepResult`, corresponding to r in the paper:
+cell identity, feasible samples, established domain/uniqueness claims, and any
+limitation/retry information. Operations borrow K/Delta read-only. The driver
+first remembers the samples, then calls `merge_established_results` to update
+K/Delta and non-uniqueness, limitation, and retry bookkeeping in one place.
+Solver costs are charged during execution, not again at merge time.
+`facts_changed` consumes change flags returned by the merge, avoiding full state
+copies merely to compare old/new facts.
+The original SMT encoding already exists at initial SAT time; the separate
+immutable query snapshot is materialized only when domain searches need it.
+The SAT-check and semantic-query callbacks are injectable for deterministic tests;
+the production entry point supplies the real `check_sat` function, not a previously
+computed SAT result.
+Shared feasible samples W (`evidence`) and exact SMT facts E (`exact_search_facts`)
+are initialized empty before the loop. The propagation flag starts true, so the
+first iteration propagates the initial knowledge, observes progress, and populates
+E before scheduling any search. Later iterations use the same block only after
+K/Delta changes.
+
+The naming/extraction refactor passed the 402-test serial package suite and the
+all-targets build check. All 60 paired measurement runs retained their invocation
+counts, final domains, uniqueness labels, and statuses: 462 solver calls in both
+versions. This refactor does not introduce a new search policy.
+
+The subsequent operation-encapsulation refactor passed 403 tests (four opt-in
+tests ignored), including a regression exercising both operations' fast-probe
+strategies with actual solver results and injected timeouts. K/Delta remain
+unchanged until the common merge, and probe costs are charged once. The same
+60 paired runs again retained all results and the 462-call total. Formatting,
+all-targets build, and whitespace checks also passed.
+
+## Selection Heuristic
+
+Within-operation shortlists retain finite-domain exclusion simulations and fair
+discovery rounds. The joint chooser prioritizes a known-unique target needing its
+value, then target work over optional bridge work. It compares conditional UCP
+uniqueness gain per estimated solver invocation, prefers completing existing
+sample sets, then lower cost and a stable cell/operation order. It skips joint
+simulation when only one action is available.
+
+Estimated costs are two checks for fast uniqueness, one coverage check plus
+uncached candidates for refinement, and one discovery check if feasible samples
+already exist (otherwise two). The discovery estimate is a heuristic for useful
+progress, not a prediction that every projection has only one value. Conditional
+simulations never become evidence. Shortlists and benefit filters can miss
+useful work; the ordering is neither globally optimal nor complete.
+
+### Internal Strategy
+
+`integrate_fast_probe` combines an eligible probe proposal with the domain-action
+shortlist; it never adds a third operation. Probe eligibility still uses the
+bounded attempt/retry planner in `privacy.rs`.
+
+For refinement, a cached pair of distinct feasible values rules out uniqueness,
+so no fast probe is proposed. Otherwise, if candidate refinement is available,
+compare its estimated cost (coverage plus uncached candidates) with two probe
+checks. At a cost of at most two, keep candidate refinement; above two, choose
+the probe. If candidate enumeration is disabled, ineligible, or already attempted,
+an independently permitted probe can still perform exact-only recovery.
+
+For discovery, keep the existing enumerator whenever it is available in the
+current search pool. A singleton is recognized by its ordinary terminal UNSAT
+check. Do not insert a probe to bypass another cell's discovery fairness turn.
+If enumeration is unavailable, a bounded fast probe supplies exact-only recovery
+without enabling full multi-value enumeration.
+
+A successful probe merges an exact value and resumes UCP. A non-unique probe
+shares its feasible samples and does not repeat the same decisive result.
+Unknown/timeout results export no exact value; candidate refinement or discovery
+may still run under their separate allowances. Probe retries require the existing
+progress/larger-timeout conditions and hard caps. Integration never resets them.
+
+## Shared Evidence And Correctness Boundary
+
+The per-run cache associates each cell with normalized field values observed in
+full-context satisfying models. Fast uniqueness contributes its first and
+counterexample values when public observations are concrete; candidate refinement
+contributes SAT values, and discovery contributes full-model samples. Literal
+subset SAT results and speculative scheduling simulations never populate it.
+
+Refinement skips cached feasible candidates. Discovery starts by blocking its
+imported samples, rather than paying to find them again. Reuse is bounded by the
+retained-value limit and is counted separately from discovery-produced models.
+Two distinct samples establish non-uniqueness, but are not a covering domain.
+One sample is not an exact recovered value. Only an appropriate UNSAT exclusion
+proof establishes coverage or uniqueness; unknown/timeout results do not.
+
+For a cell with a recorded domain, the invariant is
+`W(v) subseteq Feasible_Gamma(v) subseteq Delta(v)`: samples are an inner
+approximation, whereas Delta is a covering outer approximation. An absent domain
+does not imply confidentiality. Exact facts E are established singleton claims,
+not merely singleton sample sets in W.
+
+The immutable original SMT snapshot and concrete public observations remain the
+reference. Full searches may reuse already established exact values as redundant
+equalities, as before. Coverage checks, literal subset proofs, and independent
+report validation retain their original, unstrengthened premises. No private
+witness assignment is used as an analysis premise. These invariants preserve the
+existing soundness conditions; regression tests are not a formal correctness proof.
+
+## Limits And Accounting
+
+- `max_semantic_queries`: internal fast-probe cell attempts, including retries
+  and bridges; one attempt normally needs two solver invocations. The historical
+  public option name and report counters remain compatible.
+- `domain_refinement.max_solver_checks`: actual refinement invocations, including
+  coverage. A skipped cached candidate consumes no check.
+- `domain_discovery.max_solver_checks`: actual discovery invocations, including
+  subset probes, full fallbacks, and retries.
+- `search.max_bridge_queries`: semantic bridge attempts plus actual non-target
+  domain checks. This mixed historical allowance is not a global SMT-call cap.
+  `bridge_domain_checks` is a subset of the domain totals, not an additional cost.
+
+All totals remain monotone. Propagation progress does not reset them. Semantic
+and discovery retry rules remain distinct. Refinement still makes at most one
+bounded attempt per cell; it is not a fully resumable candidate enumerator.
+The original final-report status conventions are retained: `Analyzed` alone does
+not certify that every domain search is complete. Inspect per-cell evidence.
+
+## Invocation Measurement
+
+The opt-in test `privacy_search_invocation_measurements` counts actual successful
+solver process starts using test-only instrumentation in `smt_solver/process.rs`.
+It includes initial SAT and recovery searches, but excludes independent validation,
+which runs after the counter is sampled. No inferred formula such as
+`2 * semantic_queries` is used for this comparison.
+
+```sh
+PRIVACY_SEARCH_MEASUREMENT_OUTPUT=/tmp/privacy-search-after.tsv \
+cargo test --offline -p korrekt --lib privacy_search_invocation_measurements \
+  -- --ignored --test-threads=1
+```
+
+The before/after comparison uses baseline commit
+`a1c49765493b1fda99b9b57c6810bcc2035fbe1e`, with the same measurement harness and
+counter applied to both versions. Each of five synthetic circuits is run with
+semantic-only, refinement-enabled, discovery-enabled, and combined options.
+There is one warmup and three recorded repetitions for each case/profile.
+Each invocation has the same 2000 ms limit; semantic retry escalation is disabled.
+Semantic/refinement/discovery allowances are 8/32/16 when enabled, respectively.
+Fresh validation must accept each produced covering claim.
+
+The original v2 comparison remains recorded as historical evidence. The integrated
+v3 scheduler is measured separately with the same harness; historical raw files
+must not silently be relabeled as the new version. Results are recorded in
+[the comparison summary](unified-private-recovery-measurements.md).

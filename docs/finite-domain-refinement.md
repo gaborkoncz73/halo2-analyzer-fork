@@ -36,8 +36,10 @@ disabled by default (`max_solver_checks = 0`); existing callers using default
 options incur no extra domain checks. Full struct literals need the new field
 or `..Default::default()`.
 
-Only explicitly selected private cells with an existing `FiniteSet` of at most
-`max_candidates_per_cell` distinct field values are examined. An enabled size
+Selected private cells, and optionally useful non-target advice cells, with an
+existing `FiniteSet` of at most `max_candidates_per_cell` distinct field values
+are examined. Non-target work shares the bridge allowance and cannot spend the
+reserved first-target checks. An enabled size
 limit must be between 2 and 256, the existing UCP representation cap. No interval
 variant is introduced. Unbounded cells are not enumerated across the field.
 Exact values do not need this additional search.
@@ -54,6 +56,14 @@ limits, initial SAT checks, and optional fresh validation remain separate.
 Each domain check uses the initial per-process timeout, not the uniqueness retry
 floor. Total report time includes refinement; no global wall-clock deadline for
 synthesis, UCP, or the entire analysis is promised.
+
+The [joint scheduler](unified-private-recovery.md) can choose refinement's internal
+fast uniqueness strategy if fewer than two feasible values are known and its
+estimated cost is lower than candidate enumeration. It is not a separate third
+operation. Feasible values from that attempt are shared: candidate refinement
+does not recheck them. Coverage is still checked against the original context,
+independently of cached samples. Probe attempts retain their separate semantic
+allowance and retry history; they do not spend candidate-refinement checks.
 
 ## Cell Selection
 
@@ -98,6 +108,11 @@ candidate superset. Original satisfiability must already have been established.
 4. Merge the retained superset into Delta. Run UCP to a fixed point again only
    if the merge changes Delta; otherwise continue searching with the existing
    fixpoint and updated refinement evidence.
+
+Step 2 skips a candidate already witnessed by a full-context SAT model in the
+same analysis run. Such values count as feasible, but skipped checks consume no
+solver allowance. Unknown, untested, and merely hypothesized values are not
+cached as feasible. This can reduce the N+1 bound without changing coverage.
 
 An immutable original snapshot is captured before ordinary semantic queries can
 write inferred facts. Each domain check writes a separate SMT file from that

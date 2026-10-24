@@ -6,6 +6,12 @@ The privacy driver separates first attempts on selected private targets from
 optional intermediate-cell queries and retries. This changes search coverage,
 not the original constraints or what counts as a proof.
 
+The current driver uses a [joint cell/operation scheduler](unified-private-recovery.md).
+Refinement and discovery compete for the next step. A fast uniqueness/value probe
+is an internal strategy of those operations, not a third scheduled operation.
+The existing separate hard budgets and default-disabled domain enumeration
+remain in effect; exact-only recovery stays available without enumeration.
+
 ```rust
 use korrekt::circuit_analyzer::ucp::privacy::{PrivacyAnalysisOptions, PrivacySearchOptions};
 
@@ -35,6 +41,12 @@ every unresolved target that has never been attempted. Bridges also have their
 own total allowance. The stagnation limit stops optional bridge/retry work, never
 a target's first attempt. A smaller hard total limit or an unknown initial SAT
 check can still prevent coverage; missing coverage is reported explicitly.
+
+With domain searches enabled, the bridge allowance is shared by semantic bridge
+attempts and actual non-target domain checks. These are different units: a
+semantic attempt normally invokes the solver twice. This option is not a global
+solver-invocation limit. Domain bridges also consume their operation's hard
+check allowance, while reserving first target opportunities in that allowance.
 
 After the first target pass, an inconclusive target can be retried after actual
 K/Delta progress or with a strictly larger solver budget. Per-target retry,
@@ -70,6 +82,8 @@ Reports now include:
 - `semantic_queries`: target attempts plus bridge attempts.
 - `search_statistics.target_queries`, `bridge_queries`, and `retry_queries`.
   Retries are already included in target queries, not added a second time.
+- `search_statistics.bridge_domain_checks`: non-target domain checks, already
+  included in the refinement/discovery totals, not an additional cost.
 - `progress_rounds`, `queries_without_progress`, and a typed `stop_reason`.
 - `search_statistics.propagation_runs`: recovery fixpoint runs, including the
   first run under public observations but excluding structural baseline analysis,

@@ -568,6 +568,111 @@ fn refinement_priority_recovers_a_dependent_cell_before_spending_the_budget_on_a
 }
 
 #[test]
+fn finite_target_uses_an_internal_probe_with_or_without_candidate_search() {
+    let circuit = FiniteProjectionCircuit::<false>::new(11);
+    for checks in [0, 32] {
+        let mut options = options(checks);
+        options.max_semantic_queries = 1;
+        options.search.max_bridge_queries = 0;
+        let report = analyze_private_recoverability::<Fr, _, _>(
+            &circuit,
+            K,
+            &observations(-11),
+            [CellId::advice(0, 0)],
+            options,
+        )
+        .unwrap();
+        assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+        assert_eq!(report.cells[0].domain, Some(candidates(&[11])));
+        assert_eq!(report.semantic_queries, 1);
+        assert_eq!(report.domain_refinement_statistics.solver_checks, 0);
+        assert_eq!(report.domain_discovery_statistics.solver_checks, 0);
+        assert_eq!(report.cells[0].query_attempts, 1);
+        assert_eq!(
+            validate_private_recovery_report::<Fr, _>(&circuit, K, &observations(-11), &report)
+                .unwrap()
+                .status,
+            RecoveryValidationStatus::VerifiedDomains
+        );
+    }
+}
+
+#[test]
+fn shared_semantic_samples_save_two_refinement_solver_invocations() {
+    let circuit = FiniteProjectionCircuit::<false>::new(3);
+    let mut options = options(17);
+    options.max_semantic_queries = 1;
+    options.search.max_bridge_queries = 0;
+    let report = analyze_private_recoverability::<Fr, _, _>(
+        &circuit,
+        K,
+        &observations(21),
+        [CellId::advice(0, 0)],
+        options,
+    )
+    .unwrap();
+    assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+    assert_eq!(report.cells[0].domain, Some(candidates(&[3, 7])));
+    assert_eq!(report.semantic_queries, 1);
+    assert_eq!(report.domain_refinement_statistics.solver_checks, 15);
+    assert_eq!(
+        report.cells[0]
+            .domain_refinement
+            .as_ref()
+            .unwrap()
+            .feasible_candidates,
+        2
+    );
+    assert_eq!(
+        validate_private_recovery_report::<Fr, _>(&circuit, K, &observations(21), &report)
+            .unwrap()
+            .status,
+        RecoveryValidationStatus::VerifiedDomains
+    );
+}
+
+#[test]
+fn domain_refinement_can_use_a_non_target_bridge_without_exceeding_its_allowance() {
+    let circuit = RefinementPriorityCircuit;
+    let input = AnalyzerInput {
+        verification_method: VerificationMethod::None,
+        verification_input: VerificationInput {
+            instance_cells: HashMap::new(),
+            iterations: 1,
+        },
+        lookup_method: LookupMethod::InlineConstraints,
+    };
+    for allowance in [3, 4] {
+        let mut options = options(4);
+        options.search.max_bridge_queries = allowance;
+        let report = analyze_private_recoverability::<Fr, _, _>(
+            &circuit,
+            K,
+            &input,
+            [CellId::advice(2, 0)],
+            options,
+        )
+        .unwrap();
+        assert_eq!(report.semantic_queries, 0);
+        assert!(report.search_statistics.bridge_domain_checks <= allowance);
+        if allowance == 4 {
+            assert_eq!(report.cells[0].domain, Some(candidates(&[0])));
+            assert_eq!(report.search_statistics.bridge_domain_checks, 4);
+            assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+            assert_eq!(
+                validate_private_recovery_report::<Fr, _>(&circuit, K, &input, &report)
+                    .unwrap()
+                    .status,
+                RecoveryValidationStatus::VerifiedDomains
+            );
+        } else {
+            assert!(report.cells[0].domain.is_none());
+            assert_eq!(report.domain_refinement_statistics.solver_checks, 0);
+        }
+    }
+}
+
+#[test]
 fn inconsistent_original_context_never_reports_a_finite_projection() {
     let report = analyze_private_recoverability::<Fr, _, _>(
         &FiniteProjectionCircuit::<false>::new(3),

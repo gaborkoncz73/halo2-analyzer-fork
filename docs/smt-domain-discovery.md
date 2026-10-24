@@ -41,11 +41,19 @@ Pass these options to `analyze_private_recoverability`. Discovery is disabled by
 default (`max_solver_checks = 0`), so existing default analyses do not pay for
 enumeration. Full option literals require the scheduling fields or `..Default::default()`.
 
-Only explicitly selected private cells without any current Delta domain are
-enumerated. Existing finite sets use the separate, optional
+Selected private cells without any current Delta domain are enumerated; useful
+non-target advice cells can also be considered within the shared bridge allowance.
+Existing finite sets use the separate, optional
 [finite-domain refiner](finite-domain-refinement.md); exact values need no search.
 Both options can be enabled together. A completely discovered set is not
 redundantly checked by the refiner, preserving its budget for other cells.
+
+Discovery already recognizes a singleton when its exhaustion check is UNSAT;
+there is no separate top-level uniqueness operation. Its internal exact-only
+probe strategy remains available when enumeration is unavailable, using the
+historical semantic allowance and retry rules rather than the enumeration budget.
+Enabled, eligible enumeration retains its fair scheduling and is not preceded
+by an additional uniqueness probe.
 
 An enabled retained-value limit must be between 1 and 256. The hard total check
 budget is separate from ordinary semantic queries, finite-domain refinement,
@@ -77,8 +85,10 @@ up to three checks before yielding. Larger quanta may complete a small projectio
 earlier, but can leave later targets unattempted under a small total allowance.
 The hard total never resets or grows, whatever the quantum.
 
-A SAT sample is stored only in that cell's discovery evidence, and all its
-previous values are blocked on the next check. Other cells have separate blocking
+A SAT sample is stored as feasible evidence for that cell, and all its
+previous values are blocked on the next check. Full-context samples from a fast
+uniqueness attempt can seed discovery without repeating their SAT checks.
+Other cells have separate blocking
 sets. A cell stops being eligible once UCP or another proof supplies its domain;
 any partial discovery evidence remains partial in the report.
 
@@ -102,9 +112,11 @@ let discovery = PrivacyDomainDiscoveryOptions {
 };
 ```
 
-The policy identifier is `original-fair-subset-exclusion-resumable-v3`. This scheduling
-applies to domain discovery. Existing uniqueness scheduling and finite-candidate
-refinement retain their own policies and separate budgets.
+The policy identifier is `original-fair-subset-exclusion-resumable-v3`. This
+within-discovery scheduling operates inside the [joint cell/operation
+scheduler](unified-private-recovery.md). The latter chooses between operation
+shortlists; the within-discovery fairness rule does not require discovery to run
+before every other operation. Each operation retains its separate budget.
 
 Optional `use_targeted_subsets: true` can use literal original subsets to prove
 exhaustion. Samples still come exclusively from the full original model. Every
@@ -118,7 +130,8 @@ Let `C` denote the original circuit, `P` concrete public observations, and `S`
 the target values seen so far. Original satisfiability is established first.
 Unknown or inconsistent initial contexts produce no recovered domains.
 
-1. Start with an empty S and check `C AND P AND x NOT IN S`.
+1. Start with S empty, or seeded only with feasible full-context samples from
+   the same analysis run, and check `C AND P AND x NOT IN S`.
 2. SAT provides a feasible target value v. Normalize it in the actual field and
    add v to S. Do not fix the other witness cells.
 3. Repeat, excluding every previously observed target value.
@@ -140,8 +153,10 @@ projection. Targeted subset checks and independent validation remain free of
 these extra equalities. This optimization does not add solver invocations or
 reset any search allowance; a runtime improvement is not guaranteed.
 
-With targeted subsets disabled, completing a projection with N values requires N SAT responses and one terminal
-UNSAT response. The last probe is allowed even at the retained-value cap: a
+With targeted subsets disabled and no imported samples, completing a projection
+with N values requires N SAT responses and one terminal UNSAT response. Reused
+samples avoid their corresponding SAT invocations, not the exhaustion proof.
+The last probe is allowed even at the retained-value cap: a
 two-value projection can complete in three checks with `max_values_per_cell = 2`.
 If that probe is SAT instead, it establishes an additional value beyond the cap;
 the extra sample is counted but not retained. No domain is exported.
@@ -153,12 +168,16 @@ the extra sample is counted but not retained. No domain is exported.
 - `Complete`: exhaustion proved by original-context UNSAT or a literal-subset UNSAT.
 - `Partial`: feasible samples only, not a covering domain.
 - `observed_values`, actual `solver_checks`, `models_found`, and `retry_checks`.
+- `reused_values`: distinct retained values imported from other operations;
+  these are not additional solver invocations or discovery-produced models.
 - `full_solver_checks`, `subset_solver_checks`, and subset outcome counts partition
   and explain the actual invocation cost when the optional subset path is enabled.
 - `witnessed_non_unique` and a typed limitation such as `QueryLimit`,
   `DomainSizeLimit`, `SolverTimeout`, or `SolverUnknown`.
 
-`None` means no discovery attempt. Aggregate counts are in
+`None` means no discovery evidence. Evidence seeded by another operation can have
+zero discovery checks; inspect `solver_checks` to determine whether discovery
+actually ran. Disabled discovery records no imported evidence. Aggregate counts are in
 `report.domain_discovery_statistics`; uniqueness query counts remain separate.
 `attempted_cells` counts distinct cells. `resumed_checks` counts checks after a
 cell's first invocation; `retry_checks` is a subset of that count, not an extra

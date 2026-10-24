@@ -6,7 +6,7 @@
 
 use super::{
     cell::CellId,
-    privacy::{check_privacy_satisfiability, prepare_privacy_analysis, PrivacyAnalysisReport},
+    privacy::{check_sat, prepare_privacy_analysis, PrivacyAnalysisReport},
 };
 use crate::{
     circuit_analyzer::{
@@ -98,7 +98,7 @@ where
         .analyzer
         .set_smt_timeout_ms(report.options.solver_timeout_ms)?;
     // Candidate-restricted SAT proves existence only; scopes are popped before checking any claim.
-    let (satisfiable, mut solver_checks) = check_privacy_satisfiability(&mut context);
+    let (satisfiable, mut solver_checks) = check_sat(&mut context);
     let satisfiable = satisfiable?;
     if satisfiable == Satisfiability::Unsatisfiable {
         return Ok(PrivateRecoveryValidationReport {

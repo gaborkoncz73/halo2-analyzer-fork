@@ -13,6 +13,7 @@ pub mod privacy;
 pub mod privacy_discovery;
 pub mod privacy_domain;
 pub mod privacy_observation;
+pub(crate) mod privacy_search;
 pub(crate) mod privacy_subset;
 pub mod privacy_validation;
 pub mod rules;
@@ -35,6 +36,9 @@ mod privacy_profile_measurement_tests;
 
 #[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
 mod privacy_domain_tests;
+
+#[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
+mod privacy_search_measurement_tests;
 
 #[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
 mod privacy_discovery_tests;

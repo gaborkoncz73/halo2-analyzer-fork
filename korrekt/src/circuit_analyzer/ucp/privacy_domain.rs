@@ -99,6 +99,7 @@ impl DomainRefinementState {
     }
 
     /// One attempt per selected cell; later propagation can make additional cells eligible.
+    #[cfg(test)]
     pub fn refine_next(
         &mut self,
         private_cells: &[CellId],
@@ -106,6 +107,24 @@ impl DomainRefinementState {
         result: &UcpResult,
         mut check: impl FnMut(&CellId, &UcpValueDomain, bool) -> Result<Satisfiability>,
     ) -> Result<Option<(CellId, UcpValueDomain, bool)>> {
+        let Some(cell) = self.choose_cell(private_cells, problem, result)? else {
+            return Ok(None);
+        };
+        self.refine_domain(
+            &cell,
+            result,
+            &problem.field_modulus,
+            &BTreeSet::new(),
+            |cell, domain, exclude| check(cell, domain, exclude),
+        )
+    }
+
+    pub(crate) fn choose_cell(
+        &mut self,
+        private_cells: &[CellId],
+        problem: &UcpProblem,
+        result: &UcpResult,
+    ) -> Result<Option<CellId>> {
         if self.options.max_solver_checks == 0 {
             return Ok(None);
         }
@@ -122,11 +141,7 @@ impl DomainRefinementState {
             if candidates.len() > self.options.max_candidates_per_cell {
                 continue;
             }
-            eligible.push(RefinementCandidate {
-                cell,
-                domain,
-                candidates,
-            });
+            eligible.push(RefinementCandidate { cell, candidates });
         }
         if eligible.is_empty() {
             return Ok(None);
@@ -161,15 +176,34 @@ impl DomainRefinementState {
                 .unwrap()
                 .0
         };
-        let RefinementCandidate {
-            cell,
+        Ok(Some(eligible[selected].cell.clone()))
+    }
+
+    pub(crate) fn refine_domain(
+        &mut self,
+        cell: &CellId,
+        result: &UcpResult,
+        modulus: &BigInt,
+        feasible: &BTreeSet<BigInt>,
+        mut check: impl FnMut(&CellId, &UcpValueDomain, bool) -> Result<Satisfiability>,
+    ) -> Result<Option<(CellId, UcpValueDomain, bool)>> {
+        if self.cells.contains_key(cell)
+            || self.statistics.solver_checks >= self.options.max_solver_checks
+        {
+            return Ok(None);
+        }
+        let Some(domain @ UcpValueDomain::FiniteSet(_)) = result.value_facts.domain(cell) else {
+            return Ok(None);
+        };
+        let candidates = canonical_candidates(domain, modulus)?;
+        let remaining = self.options.max_solver_checks - self.statistics.solver_checks;
+        let (refined, evidence) = refine_domain_with_samples(
             domain,
             candidates,
-        } = eligible.swap_remove(selected);
-        let (refined, evidence) =
-            refine_domain(domain, candidates, remaining, |domain, exclude| {
-                check(cell, domain, exclude)
-            })?;
+            remaining,
+            feasible,
+            |domain, exclude| check(cell, domain, exclude),
+        )?;
         self.statistics.solver_checks += evidence.solver_checks;
         self.statistics.attempted_cells += 1;
         self.statistics.complete_domains +=
@@ -186,7 +220,6 @@ impl DomainRefinementState {
 
 struct RefinementCandidate<'a> {
     cell: &'a CellId,
-    domain: &'a UcpValueDomain,
     candidates: BTreeMap<BigInt, BigInt>,
 }
 
@@ -294,6 +327,23 @@ fn score_refinement<'a>(
     score
 }
 
+pub(crate) fn refinement_has_target_gain(
+    cell: &CellId,
+    targets: &[CellId],
+    problem: &UcpProblem,
+    result: &UcpResult,
+) -> Result<bool> {
+    let Some(domain @ UcpValueDomain::FiniteSet(_)) = result.value_facts.domain(cell) else {
+        return Ok(false);
+    };
+    let candidate = RefinementCandidate {
+        cell,
+        candidates: canonical_candidates(domain, &problem.field_modulus)?,
+    };
+    let score = score_refinement(&candidate, targets, problem, result, usize::MAX);
+    Ok(score.exact_targets > 0 || score.refined_targets > 0 || score.unique_targets > 0)
+}
+
 // Keep original representatives for Delta intersections, deduplicating modulo the actual field.
 fn canonical_candidates(
     domain: &UcpValueDomain,
@@ -319,10 +369,27 @@ fn canonical_candidates(
     Ok(candidates)
 }
 
+#[cfg(test)]
 fn refine_domain(
     domain: &UcpValueDomain,
     candidates: BTreeMap<BigInt, BigInt>,
     max_checks: usize,
+    mut check: impl FnMut(&UcpValueDomain, bool) -> Result<Satisfiability>,
+) -> Result<(UcpValueDomain, PrivateDomainRefinement)> {
+    refine_domain_with_samples(
+        domain,
+        candidates,
+        max_checks,
+        &BTreeSet::new(),
+        |domain, exclude| check(domain, exclude),
+    )
+}
+
+fn refine_domain_with_samples(
+    domain: &UcpValueDomain,
+    candidates: BTreeMap<BigInt, BigInt>,
+    max_checks: usize,
+    known_feasible: &BTreeSet<BigInt>,
     mut check: impl FnMut(&UcpValueDomain, bool) -> Result<Satisfiability>,
 ) -> Result<(UcpValueDomain, PrivateDomainRefinement)> {
     let mut evidence = PrivateDomainRefinement {
@@ -347,8 +414,14 @@ fn refine_domain(
     }
     evidence.status = PrivateDomainRefinementStatus::Partial;
     let mut excluded = BTreeSet::new();
-    let mut feasible = BTreeSet::new();
+    let mut feasible: BTreeSet<_> = known_feasible
+        .intersection(&candidates.keys().cloned().collect())
+        .cloned()
+        .collect();
     for value in candidates.keys() {
+        if feasible.contains(value) {
+            continue;
+        }
         if evidence.solver_checks >= max_checks {
             evidence.limitation = Some(RecoveryLimitation::QueryLimit);
             break;
@@ -591,6 +664,29 @@ mod tests {
         assert_eq!(evidence.unresolved_candidates, 2);
         assert_eq!(evidence.solver_checks, 3);
         assert_eq!(evidence.limitation, Some(RecoveryLimitation::QueryLimit));
+    }
+
+    #[test]
+    fn already_feasible_samples_are_not_queried_again_or_charged_again() {
+        let initial = domain(&[0, 1, 2]);
+        let known = BTreeSet::from([0.into(), 2.into()]);
+        let mut checks = Vec::new();
+        let (refined, evidence) = refine_domain_with_samples(
+            &initial,
+            canonical_candidates(&initial, &101.into()).unwrap(),
+            2,
+            &known,
+            |candidate, exclude| {
+                checks.push((candidate.clone(), exclude));
+                Ok(Satisfiability::Unsatisfiable)
+            },
+        )
+        .unwrap();
+        assert_eq!(checks, [(initial, true), (domain(&[1]), false)]);
+        assert_eq!(refined, domain(&[0, 2]));
+        assert_eq!(evidence.solver_checks, 2);
+        assert_eq!(evidence.feasible_candidates, 2);
+        assert_eq!(evidence.status, PrivateDomainRefinementStatus::Complete);
     }
 
     #[test]

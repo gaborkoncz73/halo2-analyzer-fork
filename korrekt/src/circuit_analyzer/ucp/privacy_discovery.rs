@@ -110,6 +110,8 @@ pub struct PrivateDomainDiscovery {
     pub subset_unsat_proofs: usize,
     /// Includes a possible overflow probe beyond the retained-sample limit.
     pub models_found: usize,
+    /// Feasible values imported from other full-model search operations, not extra solver calls.
+    pub reused_values: usize,
     /// Included in solver_checks, not an additional count.
     pub retry_checks: usize,
     /// Not a Delta domain unless status is Complete. No joint witness claim across cells.
@@ -129,6 +131,7 @@ impl Default for PrivateDomainDiscovery {
             subset_unknown_checks: 0,
             subset_unsat_proofs: 0,
             models_found: 0,
+            reused_values: 0,
             retry_checks: 0,
             observed_values: BTreeSet::new(),
             witnessed_non_unique: false,
@@ -146,6 +149,7 @@ pub struct PrivacyDomainDiscoveryStatistics {
     pub subset_unknown_checks: usize,
     pub subset_unsat_proofs: usize,
     pub models_found: usize,
+    pub reused_values: usize,
     pub attempted_cells: usize,
     pub complete_domains: usize,
     /// Checks after a cell's first check, including any retries.
@@ -197,6 +201,7 @@ impl DomainDiscoveryState {
 
     /// One actual check per step, including subset probes and deferred full fallbacks.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn discover_next_with_subsets(
         &mut self,
         private_cells: &[CellId],
@@ -211,8 +216,66 @@ impl DomainDiscoveryState {
             DiscoveryProbe,
         ) -> Result<DiscoveryResponse>,
     ) -> Result<Option<(CellId, Option<UcpValueDomain>, bool)>> {
-        if self.options.max_solver_checks == 0 {
+        let Some(cell) = self.choose_cell(
+            private_cells,
+            expressions,
+            result,
+            modulus,
+            initial_timeout_ms,
+        ) else {
             return Ok(None);
+        };
+        self.discover_domain(
+            &cell,
+            modulus,
+            initial_timeout_ms,
+            |cell, blocked, timeout, probe| query(cell, blocked, timeout, probe),
+        )
+    }
+
+    pub(crate) fn remember_samples(&mut self, cell: &CellId, samples: &BTreeSet<BigInt>) {
+        if samples.is_empty() || self.options.max_solver_checks == 0 {
+            return;
+        }
+        let evidence = self.cells.entry(cell.clone()).or_default();
+        let before = evidence.observed_values.len();
+        evidence.witnessed_non_unique |= evidence.observed_values.union(samples).count() >= 2;
+        for sample in samples {
+            if evidence.observed_values.contains(sample) {
+                continue;
+            }
+            if evidence.observed_values.len() == self.options.max_values_per_cell {
+                evidence.limitation = Some(RecoveryLimitation::DomainSizeLimit);
+                break;
+            }
+            evidence.observed_values.insert(sample.clone());
+        }
+        let added = evidence.observed_values.len() - before;
+        evidence.reused_values += added;
+        self.statistics.reused_values += added;
+    }
+
+    pub(crate) fn can_discover(
+        &self,
+        cell: &CellId,
+        result: &UcpResult,
+        initial_timeout_ms: Option<u64>,
+    ) -> bool {
+        self.statistics.solver_checks < self.options.max_solver_checks
+            && result.value_facts.domain(cell).is_none()
+            && self.next_timeout(cell, initial_timeout_ms).is_some()
+    }
+
+    pub(crate) fn choose_cell(
+        &mut self,
+        private_cells: &[CellId],
+        expressions: &[UcpExpr],
+        result: &UcpResult,
+        modulus: &BigInt,
+        initial_timeout_ms: Option<u64>,
+    ) -> Option<CellId> {
+        if self.options.max_solver_checks == 0 {
+            return None;
         }
         let eligible: Vec<_> = private_cells
             .iter()
@@ -223,7 +286,7 @@ impl DomainDiscoveryState {
             .cloned()
             .collect();
         if eligible.is_empty() {
-            return Ok(None);
+            return None;
         }
         if self.statistics.solver_checks >= self.options.max_solver_checks {
             self.statistics.budget_exhausted = true;
@@ -234,7 +297,7 @@ impl DomainDiscoveryState {
                         .get_or_insert(RecoveryLimitation::QueryLimit);
                 }
             }
-            return Ok(None);
+            return None;
         }
         // Fairness gates priority: high-impact cells cannot consume later cells' entire allowance.
         let round = |cell: &CellId| {
@@ -270,7 +333,28 @@ impl DomainDiscoveryState {
                 )
             })
             .expect("Eligible discovery cells include a selectable target");
-        let timeout = self.next_timeout(&cell, initial_timeout_ms).unwrap();
+        Some(cell)
+    }
+
+    pub(crate) fn discover_domain(
+        &mut self,
+        cell: &CellId,
+        modulus: &BigInt,
+        initial_timeout_ms: Option<u64>,
+        mut query: impl FnMut(
+            &CellId,
+            &BTreeSet<BigInt>,
+            Option<u64>,
+            DiscoveryProbe,
+        ) -> Result<DiscoveryResponse>,
+    ) -> Result<Option<(CellId, Option<UcpValueDomain>, bool)>> {
+        if self.statistics.solver_checks >= self.options.max_solver_checks {
+            return Ok(None);
+        }
+        let Some(timeout) = self.next_timeout(cell, initial_timeout_ms) else {
+            return Ok(None);
+        };
+        let cell = cell.clone();
         let evidence = self.cells.entry(cell.clone()).or_default();
         let resumed = evidence.solver_checks > 0;
         let retry = matches!(
@@ -329,7 +413,7 @@ impl DomainDiscoveryState {
         if evidence.status == PrivateDomainDiscoveryStatus::Complete {
             return None;
         }
-        let previous = self.timeouts[cell];
+        let previous = self.timeouts.get(cell).copied().unwrap_or(initial);
         match &evidence.limitation {
             None => Some(previous),
             Some(RecoveryLimitation::SolverTimeout | RecoveryLimitation::SolverUnknown { .. })
@@ -469,6 +553,89 @@ mod tests {
             .copied()
             .map(BigInt::from)
             .find(|value| !blocked.contains(value))
+    }
+
+    #[test]
+    fn imported_samples_respect_the_retained_value_cap_and_disabled_search() {
+        let cell = CellId::advice(0, 0);
+        let mut state = DomainDiscoveryState::new(PrivacyDomainDiscoveryOptions {
+            max_values_per_cell: 2,
+            ..options(4)
+        });
+        state.remember_samples(&cell, &BTreeSet::from([7.into()]));
+        state.remember_samples(&cell, &BTreeSet::from([1.into(), 3.into()]));
+        let evidence = &state.cells[&cell];
+        assert_eq!(evidence.observed_values.len(), 2);
+        assert!(evidence.observed_values.contains(&7.into()));
+        assert!(evidence.witnessed_non_unique);
+        assert_eq!(
+            evidence.limitation,
+            Some(RecoveryLimitation::DomainSizeLimit)
+        );
+        assert_eq!(state.statistics.solver_checks, 0);
+        assert_eq!(state.statistics.reused_values, 2);
+
+        let mut disabled = DomainDiscoveryState::new(Default::default());
+        disabled.remember_samples(&cell, &BTreeSet::from([3.into(), 7.into()]));
+        assert!(disabled.cells.is_empty());
+        assert_eq!(disabled.statistics.reused_values, 0);
+    }
+
+    #[test]
+    fn samples_from_another_operation_need_only_an_exhaustion_check() {
+        let cell = CellId::advice(0, 0);
+        let mut state = DomainDiscoveryState::new(options(1));
+        let samples = BTreeSet::from([3.into(), 7.into()]);
+        state.remember_samples(&cell, &samples);
+        state.remember_samples(&cell, &samples);
+        let baseline = result(UcpValueFacts::new());
+        let found = state
+            .discover_next(
+                &[cell.clone()],
+                &[],
+                &baseline,
+                &101.into(),
+                Some(100),
+                |queried, blocked, _| {
+                    assert_eq!(queried, &cell);
+                    assert_eq!(blocked, &samples);
+                    Ok(None)
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.1, UcpValueDomain::finite_set(samples));
+        assert!(found.2);
+        assert_eq!(state.statistics.solver_checks, 1);
+        assert_eq!(state.statistics.models_found, 0);
+        assert_eq!(state.statistics.reused_values, 2);
+        assert!(baseline.value_facts.domain(&cell).is_none());
+    }
+
+    #[test]
+    fn imported_single_sample_and_unknown_never_become_an_exact_value() {
+        let cell = CellId::advice(0, 0);
+        let mut state = DomainDiscoveryState::new(options(1));
+        state.remember_samples(&cell, &BTreeSet::from([3.into()]));
+        let found = state
+            .discover_next(
+                &[cell.clone()],
+                &[],
+                &result(UcpValueFacts::new()),
+                &101.into(),
+                Some(100),
+                |_, _, _| Err(timeout()),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(found.1.is_none());
+        assert!(!found.2);
+        assert_eq!(
+            state.cells[&cell].status,
+            PrivateDomainDiscoveryStatus::Partial
+        );
+        assert_eq!(state.statistics.solver_checks, 1);
+        assert_eq!(state.statistics.reused_values, 1);
     }
 
     fn result(values: UcpValueFacts) -> UcpResult {

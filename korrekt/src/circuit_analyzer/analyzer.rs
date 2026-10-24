@@ -133,6 +133,8 @@ pub struct SemanticQueryOutput {
     //Csak rogzitett public adatok es bizonyitott egyertelmuseg mellett adunk konkret erteket.
     pub value: Option<BigInt>,
     pub value_unavailable_reason: Option<ValueRecoveryFailure>,
+    /// Feasible target projections from concrete-public, full-model SAT checks only.
+    pub samples: Vec<BigInt>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -431,6 +433,7 @@ impl From<SemanticQueryResult> for SemanticQueryOutput {
             result,
             value: None,
             value_unavailable_reason: None,
+            samples: Vec::new(),
         }
     }
 }
@@ -1649,6 +1652,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                     None
                 },
                 value,
+                samples: Vec::new(),
             });
         };
 
@@ -1782,9 +1786,27 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                         None
                     },
                     value,
+                    samples: Vec::new(),
                 })
             } else {
-                Ok(SemanticQueryResult::NotUnique.into())
+                let mut answer: SemanticQueryOutput = SemanticQueryResult::NotUnique.into();
+                if can_recover_value {
+                    for model in [&model, &model_with_query] {
+                        if let Some(sample) = model.result.get(&query_variable) {
+                            if BigInt::from_str_radix(&sample.value.order, 10)? != prime {
+                                return Err(anyhow!(
+                                    "Semantic sample belongs to a different field"
+                                ));
+                            }
+                            let value = BigInt::from_str_radix(&sample.value.element, 10)
+                                .context("Invalid semantic model sample")?;
+                            if let Some(value) = normalize_field_value(value, &prime) {
+                                answer.samples.push(value);
+                            }
+                        }
+                    }
+                }
+                Ok(answer)
             }
         } else {
             Err(anyhow!("Failed to open SMT file!"))

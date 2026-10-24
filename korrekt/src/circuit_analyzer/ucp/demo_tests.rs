@@ -742,6 +742,84 @@ fn assert_linear_masking_witness_satisfied<const MODE: u8>(
         .assert_satisfied();
 }
 
+// Algebraic core of the paper's merchant example; monetary range bounds are omitted.
+#[derive(Clone, Debug)]
+struct PackagePriceCircuit {
+    x: u64,
+    y: u64,
+    z: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PackagePriceConfig {
+    unit_prices: [Column<Advice>; 3],
+    first_package: Selector,
+    second_package: Selector,
+}
+
+impl Circuit<Fr> for PackagePriceCircuit {
+    type Config = PackagePriceConfig;
+    type FloorPlanner = SimpleFloorPlanner;
+
+    fn without_witnesses(&self) -> Self {
+        Self { x: 0, y: 0, z: 0 }
+    }
+
+    fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+        let unit_prices = array::from_fn(|_| meta.advice_column());
+        let public_prices = meta.instance_column();
+        let first_package = meta.selector();
+        let second_package = meta.selector();
+
+        meta.create_gate("first package: A = 2x + y + z", |meta| {
+            let q = meta.query_selector(first_package);
+            let [x, y, z] = unit_prices.map(|column| meta.query_advice(column, Rotation::cur()));
+            let a = meta.query_instance(public_prices, Rotation::cur());
+            vec![q * (Expression::Constant(Fr::from(2)) * x + y + z - a)]
+        });
+        meta.create_gate("second package: B = 3x + 2y + 2z", |meta| {
+            let q = meta.query_selector(second_package);
+            let [x, y, z] = unit_prices.map(|column| meta.query_advice(column, Rotation::prev()));
+            let b = meta.query_instance(public_prices, Rotation::cur());
+            vec![
+                q * (Expression::Constant(Fr::from(3)) * x
+                    + Expression::Constant(Fr::from(2)) * y
+                    + Expression::Constant(Fr::from(2)) * z
+                    - b),
+            ]
+        });
+        PackagePriceConfig {
+            unit_prices,
+            first_package,
+            second_package,
+        }
+    }
+
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fr>,
+    ) -> Result<(), Error> {
+        layouter.assign_region(
+            || "private unit prices and public package prices",
+            |mut region| {
+                config.first_package.enable(&mut region, 0)?;
+                config.second_package.enable(&mut region, 1)?;
+                for (column, price) in config.unit_prices.into_iter().zip([self.x, self.y, self.z])
+                {
+                    region.assign_advice(
+                        || "private unit price",
+                        column,
+                        0,
+                        || Value::known(Fr::from(price)),
+                    )?;
+                }
+                Ok(())
+            },
+        )
+    }
+}
+
 fn analyzer_input_without_public_inputs() -> AnalyzerInput {
     AnalyzerInput {
         verification_method: VerificationMethod::None,
@@ -1070,6 +1148,137 @@ fn demo_independent_validation_detects_a_wrong_recovered_bit() {
     assert!(validation.cells[1..].iter().all(|cell| {
         cell.status == super::privacy_validation::DomainValidationStatus::Entailed
     }));
+}
+
+#[test]
+fn demo_package_prices_recover_one_private_unit_price() {
+    let circuit = PackagePriceCircuit {
+        x: 100,
+        y: 30,
+        z: 70,
+    };
+    let alternate = PackagePriceCircuit {
+        x: 100,
+        y: 40,
+        z: 60,
+    };
+    let instances = || vec![vec![Fr::from(300), Fr::from(500)]];
+    for witness in [&circuit, &alternate] {
+        zcash_halo2_proofs::dev::MockProver::run(4, witness, instances())
+            .unwrap()
+            .assert_satisfied();
+    }
+    let wrong = PackagePriceCircuit {
+        x: 101,
+        ..circuit.clone()
+    };
+    assert!(
+        zcash_halo2_proofs::dev::MockProver::run(4, &wrong, instances())
+            .unwrap()
+            .verify()
+            .is_err()
+    );
+    for prices in [[301, 500], [300, 501]] {
+        assert!(zcash_halo2_proofs::dev::MockProver::run(
+            4,
+            &circuit,
+            vec![prices.into_iter().map(Fr::from).collect()],
+        )
+        .unwrap()
+        .verify()
+        .is_err());
+    }
+
+    let input = AnalyzerInput {
+        verification_method: VerificationMethod::Specific,
+        verification_input: VerificationInput::new(
+            [("I-0-0".into(), 300), ("I-0-1".into(), 500)],
+            1,
+        ),
+        lookup_method: LookupMethod::InlineConstraints,
+    };
+    let targets = [
+        CellId::advice(0, 0),
+        CellId::advice(1, 0),
+        CellId::advice(2, 0),
+    ];
+    let report = analyze_private_recoverability::<Fr, _, _>(
+        &circuit,
+        4,
+        &input,
+        targets.clone(),
+        PrivacyAnalysisOptions::default(),
+    )
+    .unwrap();
+    print_privacy_demo(
+        "Package prices: A=2x+y+z=300, B=3x+2y+2z=500; x=2A-B=100:",
+        &report,
+    );
+    assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+    assert_eq!(report.summary.exact_values, 1);
+    assert_eq!(report.summary.unique_cells, 1);
+    assert_eq!(report.summary.non_unique_cells, 2);
+    assert_eq!(report.cells[0].cell, targets[0]);
+    assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::Unique);
+    assert_eq!(
+        report.cells[0].domain,
+        Some(UcpValueDomain::exact(100.into()))
+    );
+    assert!(report
+        .cells
+        .iter()
+        .all(|cell| cell.baseline_domain.is_none()));
+    for (cell, target) in report.cells[1..].iter().zip(&targets[1..]) {
+        assert_eq!(&cell.cell, target);
+        assert_eq!(cell.uniqueness, PrivateCellUniqueness::NonUnique);
+        assert!(cell.domain.is_none());
+    }
+
+    // Current local rules do not isolate x in this rank-deficient linear system.
+    let propagated = analyze_private_recoverability::<Fr, _, _>(
+        &alternate,
+        4,
+        &input,
+        [targets[0].clone()],
+        PrivacyAnalysisOptions {
+            max_semantic_queries: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(propagated.status, PrivacyAnalysisStatus::QueryLimitReached);
+    assert_eq!(propagated.semantic_queries, 0);
+    assert_eq!(propagated.summary.exact_values, 0);
+    assert_eq!(
+        propagated.cells[0].uniqueness,
+        PrivateCellUniqueness::Unknown
+    );
+    assert!(propagated.cells[0].domain.is_none());
+
+    let recovered_again = analyze_private_recoverability::<Fr, _, _>(
+        &alternate,
+        4,
+        &input,
+        [targets[0].clone()],
+        PrivacyAnalysisOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(recovered_again.status, PrivacyAnalysisStatus::Analyzed);
+    assert_eq!(recovered_again.cells[0].domain, report.cells[0].domain);
+    assert_eq!(
+        recovered_again.cells[0].uniqueness,
+        PrivateCellUniqueness::Unique
+    );
+    assert!(recovered_again.semantic_queries > 0);
+
+    let validation =
+        validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &report).unwrap();
+    print_validation_demo(
+        "Independent check of the recovered unit price:",
+        &validation,
+    );
+    assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
+    assert_eq!(validation.domain_queries, 1);
 }
 
 //Mindket publikacio kulon-kulon tobb ervenyes titkot enged: nincs Exact teny.
