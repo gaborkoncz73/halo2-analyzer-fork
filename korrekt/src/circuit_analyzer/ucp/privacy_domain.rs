@@ -1,20 +1,26 @@
 #![cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 
-//! Bounded refinement of existing finite supersets against original constraints only.
+//! Bounded refinement of existing finite supersets, scheduled by cost and simulated domain gain.
 //! Coverage and candidate feasibility are different claims; partial results remain supersets.
 
 use super::{
     cell::CellId,
-    privacy::{limitation_from_solver_error, RecoveryLimitation},
-    value::{normalize_field_value, UcpValueDomain, UcpValueFacts, MAX_FINITE_DOMAIN_SIZE},
+    engine::UcpResult,
+    extractor::UcpProblem,
+    privacy::{domain_refined, limitation_from_solver_error, RecoveryLimitation},
+    value::{normalize_field_value, UcpValueDomain, MAX_FINITE_DOMAIN_SIZE},
 };
 use crate::smt_solver::smt_parser::Satisfiability;
 use anyhow::{ensure, Context, Result};
 use num_bigint::BigInt;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const PRIVACY_DOMAIN_REFINEMENT_POLICY: &str =
-    "original-coverage-and-candidate-feasibility-v1";
+    "coverage-candidate-feasibility-cost-domain-gain-v2";
+
+const MAX_REFINEMENT_SCORED_CELLS: usize = 32;
+const MAX_REFINEMENT_SIMULATIONS_PER_CELL: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrivacyDomainRefinementOptions {
@@ -96,47 +102,196 @@ impl DomainRefinementState {
     pub fn refine_next(
         &mut self,
         private_cells: &[CellId],
-        values: &UcpValueFacts,
-        modulus: &BigInt,
+        problem: &UcpProblem,
+        result: &UcpResult,
         mut check: impl FnMut(&CellId, &UcpValueDomain, bool) -> Result<Satisfiability>,
     ) -> Result<Option<(CellId, UcpValueDomain, bool)>> {
         if self.options.max_solver_checks == 0 {
             return Ok(None);
         }
+        let mut eligible = Vec::new();
         for cell in private_cells {
             if self.cells.contains_key(cell) {
                 continue;
             }
-            let Some(domain @ UcpValueDomain::FiniteSet(_)) = values.domain(cell) else {
+            let Some(domain @ UcpValueDomain::FiniteSet(_)) = result.value_facts.domain(cell)
+            else {
                 continue;
             };
-            let candidates = canonical_candidates(domain, modulus)?;
+            let candidates = canonical_candidates(domain, &problem.field_modulus)?;
             if candidates.len() > self.options.max_candidates_per_cell {
                 continue;
             }
-            let remaining = self.options.max_solver_checks - self.statistics.solver_checks;
-            if remaining == 0 {
-                self.statistics.budget_exhausted = true;
-                return Ok(None);
-            }
-            let (refined, evidence) =
-                refine_domain(domain, candidates, remaining, |domain, exclude| {
-                    check(cell, domain, exclude)
-                })?;
-            self.statistics.solver_checks += evidence.solver_checks;
-            self.statistics.attempted_cells += 1;
-            self.statistics.complete_domains +=
-                usize::from(evidence.status == PrivateDomainRefinementStatus::Complete);
-            self.statistics.removed_candidates += evidence.excluded_candidates;
-            self.statistics.budget_exhausted |=
-                evidence.limitation == Some(RecoveryLimitation::QueryLimit);
-            // Two SAT candidate checks certify non-uniqueness even if the remaining search is partial.
-            let non_unique = evidence.feasible_candidates >= 2;
-            self.cells.insert(cell.clone(), evidence);
-            return Ok(Some((cell.clone(), refined, non_unique)));
+            eligible.push(RefinementCandidate {
+                cell,
+                domain,
+                candidates,
+            });
         }
-        Ok(None)
+        if eligible.is_empty() {
+            return Ok(None);
+        }
+        let remaining = self.options.max_solver_checks - self.statistics.solver_checks;
+        if remaining == 0 {
+            self.statistics.budget_exhausted = true;
+            return Ok(None);
+        }
+        // Cheap shortlisting bounds UCP simulation work; all unselected cells remain eligible.
+        eligible.sort_by_key(|candidate| {
+            (
+                candidate.candidates.len() + 1 > remaining,
+                candidate.candidates.len(),
+                candidate.cell,
+            )
+        });
+        let selected = if remaining == 1 || eligible.len() == 1 {
+            0
+        } else {
+            eligible
+                .iter()
+                .take(MAX_REFINEMENT_SCORED_CELLS)
+                .enumerate()
+                .map(|(index, candidate)| {
+                    (
+                        index,
+                        score_refinement(candidate, private_cells, problem, result, remaining),
+                    )
+                })
+                .max_by(|(_, left), (_, right)| left.compare(right))
+                .unwrap()
+                .0
+        };
+        let RefinementCandidate {
+            cell,
+            domain,
+            candidates,
+        } = eligible.swap_remove(selected);
+        let (refined, evidence) =
+            refine_domain(domain, candidates, remaining, |domain, exclude| {
+                check(cell, domain, exclude)
+            })?;
+        self.statistics.solver_checks += evidence.solver_checks;
+        self.statistics.attempted_cells += 1;
+        self.statistics.complete_domains +=
+            usize::from(evidence.status == PrivateDomainRefinementStatus::Complete);
+        self.statistics.removed_candidates += evidence.excluded_candidates;
+        self.statistics.budget_exhausted |=
+            evidence.limitation == Some(RecoveryLimitation::QueryLimit);
+        // Two SAT candidate checks certify non-uniqueness even if the remaining search is partial.
+        let non_unique = evidence.feasible_candidates >= 2;
+        self.cells.insert(cell.clone(), evidence);
+        Ok(Some((cell.clone(), refined, non_unique)))
     }
+}
+
+struct RefinementCandidate<'a> {
+    cell: &'a CellId,
+    domain: &'a UcpValueDomain,
+    candidates: BTreeMap<BigInt, BigInt>,
+}
+
+struct RefinementScore<'a> {
+    cell: &'a CellId,
+    fits_budget: bool,
+    checks: usize,
+    simulations: usize,
+    exact_targets: usize,
+    refined_targets: usize,
+    unique_targets: usize,
+    refined_cells: usize,
+    unique_cells: usize,
+}
+
+impl RefinementScore<'_> {
+    fn compare(&self, other: &Self) -> Ordering {
+        let rate = |left: usize, right: usize| {
+            ((left as u128) * (other.simulations * other.checks) as u128)
+                .cmp(&((right as u128) * (self.simulations * self.checks) as u128))
+        };
+        self.fits_budget
+            .cmp(&other.fits_budget)
+            .then_with(|| rate(self.exact_targets, other.exact_targets))
+            .then_with(|| rate(self.refined_targets, other.refined_targets))
+            .then_with(|| rate(self.unique_targets, other.unique_targets))
+            .then_with(|| rate(self.refined_cells, other.refined_cells))
+            .then_with(|| rate(self.unique_cells, other.unique_cells))
+            .then_with(|| other.checks.cmp(&self.checks))
+            .then_with(|| other.cell.cmp(self.cell))
+    }
+}
+
+fn score_refinement<'a>(
+    candidate: &RefinementCandidate<'a>,
+    targets: &[CellId],
+    problem: &UcpProblem,
+    result: &UcpResult,
+    remaining: usize,
+) -> RefinementScore<'a> {
+    let count = candidate.candidates.len();
+    let simulations = count.min(MAX_REFINEMENT_SIMULATIONS_PER_CELL);
+    let mut score = RefinementScore {
+        cell: candidate.cell,
+        fits_budget: count + 1 <= remaining,
+        checks: count + 1,
+        simulations,
+        exact_targets: 0,
+        refined_targets: 0,
+        unique_targets: 0,
+        refined_cells: 0,
+        unique_cells: 0,
+    };
+    for trial in 0..simulations {
+        let removed = if simulations == 1 {
+            0
+        } else {
+            trial * (count - 1) / (simulations - 1)
+        };
+        let hypothetical = UcpValueDomain::finite_set(
+            candidate
+                .candidates
+                .values()
+                .enumerate()
+                // Field-equivalent singleton candidates need only canonicalization.
+                .filter(|(index, _)| count == 1 || *index != removed)
+                .map(|(_, value)| value.clone()),
+        )
+        .expect("A simulated refinement retains at least one candidate");
+        let mut values = result.value_facts.clone();
+        values.mark_domain(candidate.cell.clone(), hypothetical);
+        // Hypothetical exclusions are used only for ranking, never as recovered facts.
+        let simulated = problem.analyze_with_values(result.facts.clone(), values);
+        for target in targets {
+            score.exact_targets += usize::from(
+                result.value_facts.known_value(target).is_none()
+                    && simulated.value_facts.known_value(target).is_some(),
+            );
+            score.refined_targets += usize::from(domain_refined(
+                result.value_facts.domain(target),
+                simulated.value_facts.domain(target),
+                &problem.field_modulus,
+            ));
+            score.unique_targets +=
+                usize::from(!result.facts.is_unique(target) && simulated.facts.is_unique(target));
+        }
+        score.refined_cells += simulated
+            .value_facts
+            .domains()
+            .iter()
+            .filter(|(cell, domain)| {
+                domain_refined(
+                    result.value_facts.domain(cell),
+                    Some(domain),
+                    &problem.field_modulus,
+                )
+            })
+            .count();
+        score.unique_cells += simulated
+            .facts
+            .unique_cells()
+            .difference(result.facts.unique_cells())
+            .count();
+    }
+    score
 }
 
 // Keep original representatives for Delta intersections, deduplicating modulo the actual field.
@@ -238,6 +393,7 @@ fn refine_domain(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{expr::UcpExpr, facts::UcpFacts, value::UcpValueFacts};
     use super::*;
     use crate::smt_solver::smt_parser::{SolverUnknownDetails, UnknownSolverResult};
 
@@ -249,6 +405,168 @@ mod tests {
         anyhow::anyhow!(UnknownSolverResult).context(SolverUnknownDetails {
             reason: Some("TIMEOUT".into()),
         })
+    }
+
+    fn problem(targets: &[CellId], expressions: Vec<UcpExpr>) -> UcpProblem {
+        UcpProblem {
+            expressions,
+            expression_domains: Vec::new(),
+            initial_facts: UcpFacts::new(),
+            target_cells: targets.to_vec(),
+            output_cells: targets.to_vec(),
+            witness_cells: targets.to_vec(),
+            initial_value_facts: UcpValueFacts::new(),
+            field_modulus: 101.into(),
+        }
+    }
+
+    fn refine_one(
+        targets: &[CellId],
+        problem: &UcpProblem,
+        result: &UcpResult,
+        checks: usize,
+    ) -> (CellId, DomainRefinementState) {
+        let before = result.clone();
+        let mut state = DomainRefinementState::new(PrivacyDomainRefinementOptions {
+            max_solver_checks: checks,
+            max_candidates_per_cell: 16,
+        });
+        let mut actual_checks = 0;
+        let (cell, refined, non_unique) = state
+            .refine_next(targets, problem, result, |_, _, exclude| {
+                actual_checks += 1;
+                Ok(if exclude {
+                    Satisfiability::Unsatisfiable
+                } else {
+                    Satisfiability::Satisfiable
+                })
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual_checks, state.statistics.solver_checks);
+        assert_eq!(*result, before);
+        assert_eq!(
+            canonical_candidates(&refined, &problem.field_modulus).unwrap(),
+            canonical_candidates(
+                result.value_facts.domain(&cell).unwrap(),
+                &problem.field_modulus
+            )
+            .unwrap()
+        );
+        assert_eq!(non_unique, actual_checks >= 3);
+        (cell, state)
+    }
+
+    #[test]
+    fn refinement_priority_prefers_a_cheaper_later_cell_and_preserves_the_hard_cap() {
+        let targets = [CellId::advice(0, 0), CellId::advice(1, 0)];
+        let problem = problem(&targets, Vec::new());
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(targets[0].clone(), domain(&[0, 1, 2, 3]));
+        values.mark_domain(targets[1].clone(), domain(&[0, 1]));
+        let result = problem.analyze_with_values(UcpFacts::new(), values);
+        let (selected, mut state) = refine_one(&targets, &problem, &result, 3);
+        assert_eq!(selected, targets[1]);
+        assert_eq!(state.statistics.solver_checks, 3);
+        assert_eq!(state.statistics.attempted_cells, 1);
+        assert!(state
+            .refine_next(&targets, &problem, &result, |_, _, _| unreachable!())
+            .unwrap()
+            .is_none());
+        assert!(state.statistics.budget_exhausted);
+    }
+
+    #[test]
+    fn refinement_priority_simulates_non_singleton_exclusions_without_exporting_them() {
+        let targets = [
+            CellId::advice(0, 0),
+            CellId::advice(1, 0),
+            CellId::advice(2, 0),
+        ];
+        let problem = problem(
+            &targets,
+            vec![UcpExpr::mul(
+                UcpExpr::var(targets[2].clone()),
+                UcpExpr::add(
+                    UcpExpr::var(targets[1].clone()),
+                    UcpExpr::known_constant_i64(-5),
+                ),
+            )],
+        );
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(targets[0].clone(), domain(&[3, 4, 7]));
+        values.mark_domain(targets[1].clone(), domain(&[3, 5, 7]));
+        let result = problem.analyze_with_values(UcpFacts::new(), values);
+        assert!(result.value_facts.domain(&targets[2]).is_none());
+        // Excluding 5 leaves a non-singleton domain but would make the dependent product zero.
+        let (selected, _) = refine_one(&targets, &problem, &result, 4);
+        assert_eq!(selected, targets[1]);
+        assert!(!result.facts.is_unique(&targets[1]));
+        assert!(result.value_facts.domain(&targets[2]).is_none());
+    }
+
+    #[test]
+    fn refinement_priority_prefers_a_complete_affordable_check_over_partial_high_gain() {
+        let targets = [
+            CellId::advice(0, 0),
+            CellId::advice(1, 0),
+            CellId::advice(2, 0),
+        ];
+        let problem = problem(
+            &targets,
+            vec![UcpExpr::mul(
+                UcpExpr::var(targets[2].clone()),
+                UcpExpr::add(
+                    UcpExpr::var(targets[0].clone()),
+                    UcpExpr::known_constant_i64(-5),
+                ),
+            )],
+        );
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(targets[0].clone(), domain(&[3, 5, 7]));
+        values.mark_domain(targets[1].clone(), domain(&[0, 1]));
+        let result = problem.analyze_with_values(UcpFacts::new(), values);
+        assert_eq!(refine_one(&targets, &problem, &result, 3).0, targets[1]);
+    }
+
+    #[test]
+    fn refinement_priority_keeps_lookup_projections_in_its_simulations() {
+        let targets = [
+            CellId::advice(0, 0),
+            CellId::advice(1, 0),
+            CellId::advice(2, 0),
+        ];
+        let mut problem = problem(&targets, Vec::new());
+        problem.expression_domains.push((
+            UcpExpr::add(
+                UcpExpr::var(targets[2].clone()),
+                UcpExpr::neg(UcpExpr::var(targets[1].clone())),
+            ),
+            domain(&[0]),
+        ));
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(targets[0].clone(), domain(&[3, 4, 7]));
+        values.mark_domain(targets[1].clone(), domain(&[3, 5, 7]));
+        let result = problem.analyze_with_values(UcpFacts::new(), values);
+        assert_eq!(
+            result.value_facts.domain(&targets[2]),
+            Some(&domain(&[3, 5, 7]))
+        );
+        assert_eq!(refine_one(&targets, &problem, &result, 4).0, targets[1]);
+    }
+
+    #[test]
+    fn refinement_priority_uses_field_cardinality_and_stable_cell_ties() {
+        let targets = [CellId::advice(0, 0), CellId::advice(1, 0)];
+        let problem = problem(&targets, Vec::new());
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(targets[0].clone(), domain(&[0, 1]));
+        values.mark_domain(targets[1].clone(), domain(&[0, 1, 102]));
+        let result = problem.analyze_with_values(UcpFacts::new(), values);
+        let reversed = [targets[1].clone(), targets[0].clone()];
+        assert_eq!(refine_one(&reversed, &problem, &result, 3).0, targets[0]);
+        // With only a coverage check left, no speculative gain justifies changing the cheap ordering.
+        assert_eq!(refine_one(&reversed, &problem, &result, 1).0, targets[0]);
     }
 
     #[test]
@@ -375,22 +693,38 @@ mod tests {
             max_solver_checks: 2,
             max_candidates_per_cell: 2,
         });
+        let problem = problem(&cells, Vec::new());
         assert!(state
-            .refine_next(&cells, &values, &101.into(), |_, _, _| unreachable!())
+            .refine_next(
+                &cells,
+                &problem,
+                &problem.analyze_with_values(UcpFacts::new(), values.clone()),
+                |_, _, _| unreachable!()
+            )
             .unwrap()
             .is_none());
         values.mark_domain(cells[0].clone(), domain(&[0, 1]));
         let mut calls = 0;
         assert!(state
-            .refine_next(&cells, &values, &101.into(), |_, _, _| {
-                calls += 1;
-                Ok(Satisfiability::Unsatisfiable)
-            })
+            .refine_next(
+                &cells,
+                &problem,
+                &problem.analyze_with_values(UcpFacts::new(), values.clone()),
+                |_, _, _| {
+                    calls += 1;
+                    Ok(Satisfiability::Unsatisfiable)
+                }
+            )
             .unwrap()
             .is_some());
         values.mark_domain(cells[1].clone(), domain(&[0, 1]));
         assert!(state
-            .refine_next(&cells, &values, &101.into(), |_, _, _| unreachable!())
+            .refine_next(
+                &cells,
+                &problem,
+                &problem.analyze_with_values(UcpFacts::new(), values.clone()),
+                |_, _, _| unreachable!()
+            )
             .unwrap()
             .is_none());
         assert_eq!(calls, 2);

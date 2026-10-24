@@ -246,6 +246,7 @@ fn finite_projection_recovers_two_values_then_ucp_recovers_a_different_cell() {
     assert_eq!(report.domain_refinement_statistics.solver_checks, 17);
     assert_eq!(report.domain_refinement_statistics.removed_candidates, 14);
     assert_eq!(report.domain_refinement_statistics.complete_domains, 1);
+    assert_eq!(report.search_statistics.propagation_runs, 2);
     // The refinement and its UCP consequences arrive in the same next fixed-point round.
     assert!(report.search_statistics.progress_rounds >= 1);
     assert_eq!(
@@ -331,6 +332,7 @@ fn a_newly_small_domain_is_refined_in_the_next_ucp_round_under_the_same_total_ca
         assert_eq!(report.cells[1].domain, Some(candidates(&[3, 4, 7, 8])));
         assert_eq!(report.domain_refinement_statistics.solver_checks, checks);
         assert_eq!(report.domain_refinement_statistics.attempted_cells, 2);
+        assert_eq!(report.search_statistics.propagation_runs, 2);
         assert_eq!(
             report.cells[1].domain_refinement.as_ref().unwrap().status,
             if complete {
@@ -363,6 +365,7 @@ fn finite_refinement_can_recover_an_exact_private_input_then_propagate_it() {
     assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::Unique);
     assert_eq!(report.cells[1].domain, Some(candidates(&[0])));
     assert_eq!(report.summary.exact_values, 2);
+    assert_eq!(report.search_statistics.propagation_runs, 2);
     assert_eq!(
         report.cells[0].domain_refinement.as_ref().unwrap().status,
         PrivateDomainRefinementStatus::Complete
@@ -449,11 +452,119 @@ fn a_forged_covering_domain_is_rejected_without_circular_candidate_assumptions()
     let mut state = DomainRefinementState::new(options(3).domain_refinement);
     let result = state.refine_next(
         &[secret],
-        &values,
-        &context.problem.field_modulus,
+        &context.problem,
+        &context
+            .problem
+            .analyze_with_values(context.problem.initial_facts.clone(), values),
         |cell, domain, exclude| original.check_membership::<Fr>(cell, domain, exclude, Some(2_000)),
     );
     assert!(result.unwrap_err().to_string().contains("does not cover"));
+}
+
+#[derive(Clone)]
+struct RefinementPriorityCircuit;
+
+impl Circuit<Fr> for RefinementPriorityCircuit {
+    type Config = ([Column<Advice>; 3], Selector);
+    type FloorPlanner = SimpleFloorPlanner;
+
+    fn without_witnesses(&self) -> Self {
+        Self
+    }
+
+    fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+        let columns = std::array::from_fn(|_| meta.advice_column());
+        let selector = meta.selector();
+        meta.create_gate("refinement priority", |meta| {
+            let idle = meta.query_advice(columns[0], Rotation::cur());
+            let secret = meta.query_advice(columns[1], Rotation::cur());
+            let derived = meta.query_advice(columns[2], Rotation::cur());
+            let q = meta.query_selector(selector);
+            let constant = |value| Expression::Constant(Fr::from(value));
+            let roots = |value: Expression<Fr>, roots: &[u64]| {
+                roots.iter().fold(constant(1), |product, root| {
+                    product * (value.clone() - constant(*root))
+                })
+            };
+            vec![
+                q.clone() * roots(idle, &[0, 1, 2]),
+                q.clone() * roots(secret.clone(), &[3, 5, 7]),
+                q.clone()
+                    * (secret.clone() * secret.clone() - constant(10) * secret.clone()
+                        + constant(21)),
+                q * derived * (secret - constant(5)),
+            ]
+        });
+        (columns, selector)
+    }
+
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fr>,
+    ) -> Result<(), Error> {
+        layouter.assign_region(
+            || "refinement candidates",
+            |mut region| {
+                config.1.enable(&mut region, 0)?;
+                for (column, value) in config.0.iter().zip([0, 3, 0]) {
+                    region.assign_advice(
+                        || "private value",
+                        *column,
+                        0,
+                        || Value::known(Fr::from(value)),
+                    )?;
+                }
+                Ok(())
+            },
+        )
+    }
+}
+
+#[test]
+fn refinement_priority_recovers_a_dependent_cell_before_spending_the_budget_on_an_idle_cell() {
+    let circuit = RefinementPriorityCircuit;
+    MockProver::run(K, &circuit, vec![])
+        .unwrap()
+        .assert_satisfied();
+    let input = AnalyzerInput {
+        verification_method: VerificationMethod::None,
+        verification_input: VerificationInput {
+            instance_cells: HashMap::new(),
+            iterations: 1,
+        },
+        lookup_method: LookupMethod::InlineConstraints,
+    };
+    let targets = [
+        CellId::advice(0, 0),
+        CellId::advice(1, 0),
+        CellId::advice(2, 0),
+    ];
+    let report =
+        analyze_private_recoverability::<Fr, _, _>(&circuit, K, &input, targets, options(4))
+            .unwrap();
+    assert_eq!(report.status, PrivacyAnalysisStatus::QueryLimitReached);
+    assert_eq!(report.domain_refinement_statistics.solver_checks, 4);
+    assert_eq!(report.domain_refinement_statistics.attempted_cells, 1);
+    assert_eq!(report.semantic_queries, 0);
+    assert_eq!(report.search_statistics.propagation_runs, 2);
+    assert_eq!(report.cells[0].domain, Some(candidates(&[0, 1, 2])));
+    assert!(report.cells[0].domain_refinement.is_none());
+    assert_eq!(
+        report.cells[1].baseline_domain,
+        Some(candidates(&[3, 5, 7]))
+    );
+    assert_eq!(report.cells[1].domain, Some(candidates(&[3, 7])));
+    assert!(report.cells[1].domain_refinement.is_some());
+    assert_eq!(report.cells[2].baseline_domain, None);
+    assert_eq!(report.cells[2].domain, Some(candidates(&[0])));
+    assert!(report.cells[2].domain_refinement.is_none());
+    assert_eq!(
+        validate_private_recovery_report::<Fr, _>(&circuit, K, &input, &report)
+            .unwrap()
+            .status,
+        RecoveryValidationStatus::VerifiedDomains
+    );
 }
 
 #[test]

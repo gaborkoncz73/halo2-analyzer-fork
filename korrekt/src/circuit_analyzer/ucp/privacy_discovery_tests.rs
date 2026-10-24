@@ -700,6 +700,47 @@ fn analyze<const CASE: u8>(
 }
 
 #[test]
+fn discovery_samples_resume_without_propagation_until_a_covering_domain_is_established() {
+    let circuit = UnboundedProjectionCircuit::<TWO_ROOTS>::new(Fr::from(3), Fr::from(0));
+    for checks in [1, 2, 3] {
+        let mut options = options(checks, 2);
+        options.domain_discovery.max_checks_per_round = 1;
+        let report = analyze_private_recoverability::<Fr, _, _>(
+            &circuit,
+            K,
+            &discovery_demo_input(),
+            [CellId::advice(0, 0)],
+            options,
+        )
+        .unwrap();
+        assert_eq!(report.domain_discovery_statistics.solver_checks, checks);
+        assert_eq!(report.semantic_queries, 0);
+        assert_eq!(
+            report.search_statistics.propagation_runs,
+            if checks == 3 { 2 } else { 1 }
+        );
+        if checks == 3 {
+            assert_eq!(report.cells[0].domain, Some(domain(&[3, 7])));
+            assert_eq!(
+                report
+                    .ucp_result
+                    .as_ref()
+                    .unwrap()
+                    .value_facts
+                    .known_value(&CellId::advice(1, 0)),
+                Some(&BigInt::from(0))
+            );
+        } else {
+            assert!(report.cells[0].domain.is_none());
+            assert_eq!(
+                report.cells[0].domain_discovery.as_ref().unwrap().status,
+                PrivateDomainDiscoveryStatus::Partial
+            );
+        }
+    }
+}
+
+#[test]
 fn discovers_a_complete_two_value_projection_without_an_initial_domain_then_restarts_ucp() {
     let circuit = UnboundedProjectionCircuit::<TWO_ROOTS>::new(Fr::from(3), Fr::from(0));
     check_witness(&circuit, Fr::from(21));
@@ -808,6 +849,7 @@ fn one_sat_sample_is_not_recovered_but_a_singleton_exhaustion_recovers_and_propa
     check_witness(&circuit, Fr::from(21));
     let partial = analyze(&circuit, &discovery_demo_input(), 1, 1);
     assert_eq!(partial.cells[0].domain, None);
+    assert_eq!(partial.search_statistics.propagation_runs, 1);
     assert_eq!(
         partial.cells[0]
             .domain_discovery
@@ -818,6 +860,7 @@ fn one_sat_sample_is_not_recovered_but_a_singleton_exhaustion_recovers_and_propa
     );
     let report = analyze(&circuit, &discovery_demo_input(), 2, 1);
     assert_eq!(report.summary.exact_values, 2);
+    assert_eq!(report.search_statistics.propagation_runs, 2);
     assert_eq!(report.cells[0].domain, Some(domain(&[1])));
     assert_eq!(report.cells[1].domain, Some(domain(&[3])));
     assert_eq!(report.domain_discovery_statistics.solver_checks, 2);
@@ -884,6 +927,7 @@ fn broad_projections_hit_the_value_cap_without_claiming_a_small_covering_set() {
     }
     assert_eq!(report.domain_discovery_statistics.solver_checks, 6);
     assert_eq!(report.domain_discovery_statistics.complete_domains, 0);
+    assert_eq!(report.search_statistics.propagation_runs, 1);
 }
 
 #[test]
@@ -954,6 +998,39 @@ fn full_width_discovered_values_are_not_limited_to_machine_integers() {
         report.cells[0].domain_discovery.as_ref().unwrap().status,
         PrivateDomainDiscoveryStatus::Complete
     );
+    assert_eq!(
+        validate_private_recovery_report::<Fr, _>(&circuit, K, &input, &report)
+            .unwrap()
+            .status,
+        RecoveryValidationStatus::VerifiedDomains
+    );
+}
+
+#[test]
+fn discovery_refreshes_exact_search_facts_after_runtime_recovery_and_ucp_feedback() {
+    let circuit =
+        UnboundedProjectionCircuit::<FREE_FIRST_RECOVERABLE_CHAIN>::new(Fr::from(37), Fr::from(21));
+    let input = discovery_demo_input();
+    let mut options = options(5, 16);
+    options.domain_discovery.max_checks_per_round = 1;
+    let report = analyze_private_recoverability::<Fr, _, _>(
+        &circuit,
+        K,
+        &input,
+        [CellId::advice(0, 0), CellId::advice(1, 0)],
+        options,
+    )
+    .unwrap();
+    assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+    assert_eq!(report.domain_discovery_statistics.solver_checks, 5);
+    assert_eq!(report.semantic_queries, 0);
+    assert!(report.cells[0].domain.is_none());
+    assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::NonUnique);
+    assert_eq!(report.cells[1].domain, Some(domain(&[21])));
+    let query = std::fs::read_to_string("src/output/private_domain_discovery.smt2").unwrap();
+    assert!(query.contains("( = A-1-0 (as ff21 F))"));
+    // This cell is not a target: its value is obtained by propagation after recovering A-1-0.
+    assert!(query.contains("( = A-2-0 (as ff23 F))"));
     assert_eq!(
         validate_private_recovery_report::<Fr, _>(&circuit, K, &input, &report)
             .unwrap()

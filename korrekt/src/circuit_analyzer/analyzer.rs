@@ -159,13 +159,68 @@ pub(crate) struct DomainEntailmentQuery {
 /// Immutable original constraints and public observations, captured before any UCP assertions.
 pub(crate) struct OriginalPrivateQueryContext {
     smt: String,
+    variables: HashSet<String>,
     expressions: BTreeMap<CellId, String>,
     constants: BTreeMap<CellId, BigInt>,
     prime: BigInt,
     targeted_subsets: BTreeMap<CellId, (String, usize)>,
 }
 
+/// Only entailed Exact facts from the recovery state, never candidate domains or model samples.
+#[derive(Default)]
+pub(crate) struct PrivateSearchExactFacts {
+    values: BTreeMap<String, BigInt>,
+}
+
 impl OriginalPrivateQueryContext {
+    /// The caller supplies sound Delta facts established under this snapshot's observations.
+    pub(crate) fn search_exact_facts<F: AnalyzableField>(
+        &self,
+        analyzer: &Analyzer<F>,
+        values: &UcpValueFacts,
+    ) -> Result<PrivateSearchExactFacts> {
+        let mut exact = PrivateSearchExactFacts::default();
+        for (cell, domain) in values.domains() {
+            let UcpValueDomain::Exact(value) = domain else {
+                continue;
+            };
+            if cell.kind != CellKind::Advice {
+                continue;
+            }
+            let Some(variable) = analyzer.ucp_cell_to_smt_variable_name(cell) else {
+                continue;
+            };
+            if !self.variables.contains(&variable) {
+                continue;
+            }
+            let value = normalize_field_value(value.clone(), &self.prime)
+                .context("Exact search fact exceeds field representation limits")?;
+            if let Some(previous) = exact.values.insert(variable, value.clone()) {
+                if previous != value {
+                    return Err(anyhow!("Conflicting exact facts for copied SMT cells"));
+                }
+            }
+        }
+        Ok(exact)
+    }
+
+    fn write_search_exact_facts<F: AnalyzableField, W: Write>(
+        &self,
+        printer: &mut Printer<'_, W>,
+        target: &str,
+        exact: &PrivateSearchExactFacts,
+    ) {
+        for (variable, value) in &exact.values {
+            // Canonical names also exclude copy aliases of the queried cell.
+            if variable != target {
+                printer.write_assert_bool(
+                    Analyzer::<F>::smt_field_equality(variable, value, &self.prime),
+                    Operation::And,
+                );
+            }
+        }
+    }
+
     pub(crate) fn check_satisfiability<F: AnalyzableField>(
         &self,
         timeout_ms: Option<u64>,
@@ -228,6 +283,22 @@ impl OriginalPrivateQueryContext {
         blocked_values: &BTreeSet<BigInt>,
         timeout_ms: Option<u64>,
     ) -> Result<Option<BigInt>> {
+        self.query_unseen_value_with_exact_facts::<F>(
+            cell,
+            blocked_values,
+            timeout_ms,
+            &PrivateSearchExactFacts::default(),
+        )
+    }
+
+    /// Search acceleration only: exact facts must already follow from the original C AND P.
+    pub(crate) fn query_unseen_value_with_exact_facts<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        blocked_values: &BTreeSet<BigInt>,
+        timeout_ms: Option<u64>,
+        exact: &PrivateSearchExactFacts,
+    ) -> Result<Option<BigInt>> {
         let expression = self
             .expressions
             .get(cell)
@@ -236,6 +307,7 @@ impl OriginalPrivateQueryContext {
         let mut file = File::create(path).context("Failed to create domain discovery file")?;
         file.write_all(self.smt.as_bytes())?;
         let mut printer = Printer::new(&mut file);
+        self.write_search_exact_facts::<F, _>(&mut printer, expression, exact);
         for value in blocked_values {
             printer.write_assert_bool(
                 format!(
@@ -284,6 +356,33 @@ impl OriginalPrivateQueryContext {
         exclude: bool,
         timeout_ms: Option<u64>,
     ) -> Result<Satisfiability> {
+        self.check_membership_with_exact_facts::<F>(
+            cell,
+            domain,
+            exclude,
+            timeout_ms,
+            &PrivateSearchExactFacts::default(),
+        )
+    }
+
+    pub(crate) fn check_candidate_with_exact_facts<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        candidate: &UcpValueDomain,
+        timeout_ms: Option<u64>,
+        exact: &PrivateSearchExactFacts,
+    ) -> Result<Satisfiability> {
+        self.check_membership_with_exact_facts::<F>(cell, candidate, false, timeout_ms, exact)
+    }
+
+    fn check_membership_with_exact_facts<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        domain: &UcpValueDomain,
+        exclude: bool,
+        timeout_ms: Option<u64>,
+        exact: &PrivateSearchExactFacts,
+    ) -> Result<Satisfiability> {
         let expression = self
             .expressions
             .get(cell)
@@ -305,7 +404,9 @@ impl OriginalPrivateQueryContext {
         let path = "src/output/private_domain_refinement.smt2";
         let mut file = File::create(path).context("Failed to create domain refinement file")?;
         file.write_all(self.smt.as_bytes())?;
-        Printer::new(&mut file).write_assert_bool(
+        let mut printer = Printer::new(&mut file);
+        self.write_search_exact_facts::<F, _>(&mut printer, expression, exact);
+        printer.write_assert_bool(
             if exclude {
                 format!("(not {})", membership)
             } else {
@@ -1221,6 +1322,7 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
         Ok(OriginalPrivateQueryContext {
             smt: fs::read_to_string(&*SMT_FILE_PATH)
                 .context("Failed to capture original SMT model")?,
+            variables: self.all_variables.clone(),
             expressions,
             constants,
             prime,
@@ -3616,6 +3718,120 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
 #[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
 mod validation_subset_tests {
     use super::*;
+
+    #[test]
+    fn search_exact_facts_filter_domains_and_preserve_original_queries() {
+        use crate::io::analyzer_io_type::VerificationInput;
+        use crate::sample_circuits::zcash::bit_decomposition::two_bit_decomp::TwoBitDecompCircuit;
+        let input = AnalyzerInput {
+            verification_method: VerificationMethod::Specific,
+            verification_input: VerificationInput::new([("I-0-0".to_owned(), 3)], 1),
+            lookup_method: LookupMethod::InlineConstraints,
+        };
+        let mut analyzer = Analyzer::<Fr>::new_with_original_subset_capture(
+            &TwoBitDecompCircuit::<Fr>::default(),
+            4,
+            AnalyzerType::UnderconstrainedCircuit,
+            Some(&input),
+            true,
+        )
+        .unwrap();
+        let first = CellId::advice(0, 0);
+        let second = CellId::advice(1, 0);
+        let packed = CellId::advice(2, 0);
+        let public = CellId::instance(0, 0);
+        let original = analyzer
+            .original_private_query_context(
+                &input,
+                &[
+                    first.clone(),
+                    second.clone(),
+                    packed.clone(),
+                    public.clone(),
+                ],
+            )
+            .unwrap();
+        let snapshot = original.smt.clone();
+        let subsets = original.targeted_subsets.clone();
+        let main_file = fs::read_to_string(&*SMT_FILE_PATH).unwrap();
+        let mut values = UcpValueFacts::new();
+        values.mark_known(first.clone(), &original.prime + 1);
+        values.mark_domain(
+            second.clone(),
+            UcpValueDomain::finite_set([0.into(), 1.into()]).unwrap(),
+        );
+        values.mark_known(packed.clone(), 3.into());
+        values.mark_known(public.clone(), 3.into());
+        values.mark_known(CellId::fixed(0, 0), 1.into());
+        values.mark_known(CellId::advice(99, 0), 123.into());
+        let exact = original.search_exact_facts(&analyzer, &values).unwrap();
+        let first_name = &original.expressions[&first];
+        let packed_name = &original.expressions[&packed];
+        assert_eq!(exact.values.len(), 2);
+        assert_eq!(exact.values[first_name], BigInt::from(1));
+        assert_eq!(exact.values[packed_name], BigInt::from(3));
+        assert!(!exact.values.contains_key(&original.expressions[&second]));
+
+        // Querying an instance alias must also exclude the packed advice cell's exact fact.
+        assert_eq!(original.expressions[&public], *packed_name);
+        let mut bytes = Vec::new();
+        original.write_search_exact_facts::<Fr, _>(
+            &mut Printer::new(&mut bytes),
+            &original.expressions[&public],
+            &exact,
+        );
+        let appended = String::from_utf8(bytes).unwrap();
+        assert!(appended.contains(&Analyzer::<Fr>::smt_field_equality(
+            first_name,
+            &1.into(),
+            &original.prime
+        )));
+        assert!(!appended.contains(&Analyzer::<Fr>::smt_field_equality(
+            packed_name,
+            &3.into(),
+            &original.prime
+        )));
+
+        assert_eq!(
+            original
+                .query_unseen_value_with_exact_facts::<Fr>(
+                    &second,
+                    &BTreeSet::new(),
+                    Some(2_000),
+                    &exact
+                )
+                .unwrap(),
+            Some(1.into())
+        );
+        let accelerated = fs::read_to_string("src/output/private_domain_discovery.smt2").unwrap();
+        let first_equality =
+            Analyzer::<Fr>::smt_field_equality(first_name, &1.into(), &original.prime);
+        assert!(accelerated[snapshot.len()..].contains(&first_equality));
+        assert!(!accelerated[snapshot.len()..].contains("(or "));
+        original
+            .query_unseen_value::<Fr>(&second, &BTreeSet::new(), Some(2_000))
+            .unwrap();
+        let clean = fs::read_to_string("src/output/private_domain_discovery.smt2").unwrap();
+        assert!(!clean[snapshot.len()..].contains(&first_equality));
+
+        let candidate = UcpValueDomain::exact(1.into());
+        assert_eq!(
+            original
+                .check_candidate_with_exact_facts::<Fr>(&second, &candidate, Some(2_000), &exact)
+                .unwrap(),
+            Satisfiability::Satisfiable
+        );
+        let accelerated = fs::read_to_string("src/output/private_domain_refinement.smt2").unwrap();
+        assert!(accelerated[snapshot.len()..].contains(&first_equality));
+        original
+            .check_membership::<Fr>(&second, &candidate, true, Some(2_000))
+            .unwrap();
+        let clean = fs::read_to_string("src/output/private_domain_refinement.smt2").unwrap();
+        assert!(!clean[snapshot.len()..].contains(&first_equality));
+        assert_eq!(original.smt, snapshot);
+        assert_eq!(original.targeted_subsets, subsets);
+        assert_eq!(fs::read_to_string(&*SMT_FILE_PATH).unwrap(), main_file);
+    }
 
     #[test]
     fn subset_assertions_are_literal_original_equations_not_sat_hints() {

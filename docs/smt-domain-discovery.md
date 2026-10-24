@@ -128,9 +128,17 @@ Unknown or inconsistent initial contexts produce no recovered domains.
 
 The SMT snapshot is captured before inferred UCP assertions can be written.
 Every invocation recreates a separate query file from that immutable snapshot.
-Neither an inferred domain nor another recovered cell is assumed. Blocking is
-by target field value, not by whole witness assignment, so irrelevant free
-witnesses cannot prevent proving a singleton projection.
+Full-model searches additionally reuse established `Exact` advice-cell facts
+from the current Delta as redundant equalities. They must already follow from
+the original `C AND P`; finite domains, sampled values, and uniqueness facts
+without values are not exported. The queried cell and its copy aliases are
+excluded. The exact-fact cache is refreshed after propagation, so values learned
+through SMT-to-UCP feedback are available to subsequent searches without changing
+the original snapshot. Blocking is by target field value, not by whole witness
+assignment, so irrelevant free witnesses cannot prevent proving a singleton
+projection. Targeted subset checks and independent validation remain free of
+these extra equalities. This optimization does not add solver invocations or
+reset any search allowance; a runtime improvement is not guaranteed.
 
 With targeted subsets disabled, completing a projection with N values requires N SAT responses and one terminal
 UNSAT response. The last probe is allowed even at the retained-value cap: a

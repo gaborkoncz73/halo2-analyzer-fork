@@ -58,12 +58,22 @@ Progress is an added unique cell, a newly constrained domain, or a strict
 field-aware domain refinement. Repeated facts and field-equivalent values do not
 count. Progress resets only `queries_without_progress`, never the total counters.
 
+The driver retains the current propagation fixpoint across SMT steps. It reruns
+propagation only when merging a result adds a uniqueness fact or changes a Delta
+domain. Unchanged finite-domain checks, partial discovery samples, non-uniqueness
+evidence, and inconclusive queries still update search bookkeeping, but do not
+trigger redundant propagation. A new or narrowed domain, including an exact value,
+is propagated before the next search step.
+
 Reports now include:
 
 - `semantic_queries`: target attempts plus bridge attempts.
 - `search_statistics.target_queries`, `bridge_queries`, and `retry_queries`.
   Retries are already included in target queries, not added a second time.
 - `progress_rounds`, `queries_without_progress`, and a typed `stop_reason`.
+- `search_statistics.propagation_runs`: recovery fixpoint runs, including the
+  first run under public observations but excluding structural baseline analysis,
+  initial SAT hints, and query-scheduling simulations.
 - `unqueried_targets`: cells without an exact value or any uniqueness,
   finite-domain refinement, or domain-discovery attempt.
 - Per-cell `query_attempts`.

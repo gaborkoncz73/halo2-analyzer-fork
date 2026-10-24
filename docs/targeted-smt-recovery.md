@@ -58,6 +58,11 @@ The subset never assumes inferred UCP facts, candidate equalities for other
 cells, or actual advice assignments. Cached subset text is captured before any
 UCP strengthening; each check creates a fresh query file. Blocking sets and
 pending-full phases remain independent per cell across fair scheduling rounds.
+Full-model sampling and fallback may reuse established exact values of other
+advice cells as redundant equalities. These facts already follow from `C AND P`;
+they never enter the literal subset, and neither model samples nor finite
+candidate domains are used as extra premises. Independent validation continues
+to use the unstrengthened original model.
 
 Subset SAT is deliberately weaker evidence. For example, original gates may
 permit roots 3 and 7 while an inline lookup permits only 3. Omitting that lookup
@@ -93,7 +98,8 @@ subset therefore needs full fallback, not a stronger conclusion.
 
 Every subset probe and every fallback is a separate solver invocation and consumes
 the same hard `max_solver_checks` allowance. The scheduler still performs one
-invocation per step and runs UCP again between steps. The hard total never resets.
+invocation per step and reruns UCP only after K or Delta changes. The hard total
+never resets.
 Subset unknown schedules fallback at the existing timeout, not an automatic retry
 escalation. An unknown full check can use the explicitly configured larger timeout.
 

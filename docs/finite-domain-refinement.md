@@ -55,6 +55,38 @@ Each domain check uses the initial per-process timeout, not the uniqueness retry
 floor. Total report time includes refinement; no global wall-clock deadline for
 synthesis, UCP, or the entire analysis is promised.
 
+## Cell Selection
+
+`RefineNext` ranks eligible cells instead of always taking the first CellId.
+The policy is `coverage-candidate-feasibility-cost-domain-gain-v2` and is also
+recorded in measurement metadata. Existing eligibility, one-attempt-per-cell
+bookkeeping, and the hard total solver-check cap are unchanged.
+
+A cell with N distinct field candidates has a full-attempt cost estimate of
+N+1 invocations, including coverage. Cells whose full attempt fits the remaining
+allowance take priority. A cheap shortlist keeps at most 32 cells, ordered by
+budget fit, candidate count, then CellId. Unselected cells remain eligible later.
+
+For each shortlisted cell, up to four evenly spaced candidates are hypothetically
+excluded, one per simulation. Each simulation runs the complete UCP problem,
+including lookup projections, on cloned K/Delta state. This can expose useful
+non-singleton refinements: excluding 5 from {3,5,7}, for example, can force d=0
+in d*(s-5)=0 without recovering s. Field-equivalent singleton domains are
+simulated by canonicalizing the remaining value instead of excluding it.
+
+Scores compare, lexicographically, the mean simulated gain per estimated solver
+invocation: newly exact targets, refined target domains, new unique targets,
+refined cell domains, then new unique cells. Ties prefer fewer checks and the
+smaller CellId. Rates use exact integer cross-products, not floating-point
+weights. With one eligible cell or only one remaining check, simulations are
+skipped and the cheap ordering decides.
+
+These are bounded conditional-gain estimates, not feasibility probabilities or
+SMT-runtime predictions. Simulated exclusions and their consequences never enter
+the actual recovery state. They consume no solver checks; only the chosen cell's
+original-model queries can justify exclusions. Simulation work is not an
+end-to-end CPU deadline, and neither optimal ordering nor a speedup is guaranteed.
+
 ## Original-Model Reasoning
 
 Let `C` denote original constraints, `P` public observations, and `D` a proposed
@@ -63,14 +95,21 @@ candidate superset. Original satisfiability must already have been established.
 1. Check `C AND P AND x NOT IN D`. Only UNSAT establishes coverage.
 2. For each candidate v, check `C AND P AND x = v` independently.
 3. UNSAT excludes v. SAT certifies v as feasible. Unknown or untested values stay.
-4. Put the retained superset into Delta and run UCP to a fixed point again.
+4. Merge the retained superset into Delta. Run UCP to a fixed point again only
+   if the merge changes Delta; otherwise continue searching with the existing
+   fixpoint and updated refinement evidence.
 
 An immutable original snapshot is captured before ordinary semantic queries can
 write inferred facts. Each domain check writes a separate SMT file from that
-snapshot, plus just its current test assertion. Neither `D` nor another recovered
-cell is assumed as a premise. Candidate assumptions do not accumulate between
-checks, and later strengthening of the ordinary analyzer cannot strengthen this
-snapshot. Full gates, copy equalities, and correlated lookup tuples are retained.
+snapshot. Coverage checks add only the domain-exclusion assertion. Candidate
+feasibility checks also reuse current, established `Exact` advice-cell facts as
+redundant equalities; finite domains, model samples, and uniqueness without a
+value are not exported. The queried cell and its copy aliases are excluded from
+these extra equalities. The proposed covering domain is never assumed.
+Candidate assumptions do not accumulate between checks, and later strengthening
+of the ordinary analyzer cannot strengthen the snapshot. Full gates, copy
+equalities, and correlated lookup tuples are retained. Independent report
+validation still uses only the original constraints and observations.
 
 The analyzer also remembers whether UCP assertions have ever been written.
 Clearing its export vectors cannot make an already strengthened SMT file usable
