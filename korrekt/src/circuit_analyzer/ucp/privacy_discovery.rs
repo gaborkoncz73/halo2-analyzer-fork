@@ -1,7 +1,7 @@
 #![cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 
-//! Discover small complete cell projections without a pre-existing Delta domain.
-//! SAT samples always come from the original context. A literal subset may prove exhaustion.
+//! Kis teljes értékhalmazt keres olyan cellához, amelyhez még nincs Delta-domain.
+//! SAT-mintát csak az eredeti kontextusból vesz át; az értékek kimerítését eredeti részhalmazból is igazolhatja.
 
 use super::{
     cell::CellId,
@@ -42,18 +42,18 @@ pub(crate) fn full_discovery_response(answer: Result<Option<BigInt>>) -> Result<
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrivacyDomainDiscoveryOptions {
-    /// Separate hard total on solver invocations. Zero disables discovery.
+    /// A solverhívásokat külön, összesített kerettel korlátozza; nulla esetén letiltja a felderítést.
     pub max_solver_checks: usize,
-    /// At most this many samples are retained; a final exhaustion probe is still allowed.
+    /// Legfeljebb ennyi mintát tárol, de az utolsó kizárási próbát még engedélyezi.
     pub max_values_per_cell: usize,
-    /// Check quantum per cell before every other eligible cell gets the same allowance.
+    /// Cellánként ennyi ellenőrzést enged egy körben, mielőtt a többi alkalmas cella is sorra kerül.
     pub max_checks_per_round: usize,
-    /// Retries of inconclusive checks only, not continuation after a SAT sample.
+    /// Csak a bizonytalan vizsgálat ismétlését számolja újrapróbálkozásnak, a SAT utáni folytatást nem.
     pub max_retries_per_cell: usize,
-    /// Inconclusive checks can resume only with a strictly larger per-process budget.
-    /// None disables budget escalation; the uniqueness retry floor is not inherited.
+    /// Bizonytalan ellenőrzést csak szigorúan nagyobb folyamatonkénti időkerettel ismétel.
+    /// None esetén nem emeli a keretet; az egyértelműségi próbák újrapróbálási keretét nem örökli.
     pub retry_solver_timeout_ms: Option<u64>,
-    /// Opt-in literal original subsets for exclusion only; SAT samples remain full-model.
+    /// Az eredeti kényszerek részhalmazát opcionálisan csak kizárásra használja; mintát a teljes modellből vesz.
     pub use_targeted_subsets: bool,
 }
 
@@ -92,9 +92,9 @@ impl PrivacyDomainDiscoveryOptions {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrivateDomainDiscoveryStatus {
-    /// All possible target values were enumerated; the final blocked-value query was UNSAT.
+    /// Minden lehetséges célértéket felsorolt, és a már látott értékeket kizáró utolsó kérdésre UNSAT választ kapott.
     Complete,
-    /// Observed values are feasible samples only, never a complete candidate superset.
+    /// A megfigyelt értékeket csak megvalósítható mintaként tárolja, nem lefedő domainként.
     Partial,
 }
 
@@ -102,19 +102,19 @@ pub enum PrivateDomainDiscoveryStatus {
 pub struct PrivateDomainDiscovery {
     pub status: PrivateDomainDiscoveryStatus,
     pub solver_checks: usize,
-    /// These partition solver_checks. A subset SAT never contributes a model sample.
+    /// Ezekre bontja a solver_checks számlálót; részhalmazra kapott SAT-ból nem vesz át mintát.
     pub full_solver_checks: usize,
     pub subset_solver_checks: usize,
     pub subset_fallbacks: usize,
     pub subset_unknown_checks: usize,
     pub subset_unsat_proofs: usize,
-    /// Includes a possible overflow probe beyond the retained-sample limit.
+    /// A mintatárolási korláton túli lehetséges kizárási próbát is számolja.
     pub models_found: usize,
-    /// Feasible values imported from other full-model search operations, not extra solver calls.
+    /// A más teljes modellű műveletekből átvett megvalósítható értékeket tárolja, új solverhívás nélkül.
     pub reused_values: usize,
-    /// Included in solver_checks, not an additional count.
+    /// A solver_checks részeként számolja, nem külön hozzáadandó mennyiségként.
     pub retry_checks: usize,
-    /// Not a Delta domain unless status is Complete. No joint witness claim across cells.
+    /// Csak Complete státusznál tekinti Delta-domainnek; a különböző cellák mintáit nem tekinti közös értékadásnak.
     pub observed_values: BTreeSet<BigInt>,
     pub witnessed_non_unique: bool,
     pub limitation: Option<RecoveryLimitation>,
@@ -152,9 +152,9 @@ pub struct PrivacyDomainDiscoveryStatistics {
     pub reused_values: usize,
     pub attempted_cells: usize,
     pub complete_domains: usize,
-    /// Checks after a cell's first check, including any retries.
+    /// A cella első ellenőrzése utáni hívásokat számolja, az újrapróbálkozásokkal együtt.
     pub resumed_checks: usize,
-    /// A subset of resumed_checks and solver_checks.
+    /// A resumed_checks és solver_checks részeként számolja.
     pub retry_checks: usize,
     pub budget_exhausted: bool,
 }
@@ -199,7 +199,7 @@ impl DomainDiscoveryState {
         )
     }
 
-    /// One actual check per step, including subset probes and deferred full fallbacks.
+    /// Lépésenként egy tényleges ellenőrzést végez, a részhalmazpróbát és a későbbi teljes vizsgálatot is számolva.
     #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
     pub fn discover_next_with_subsets(
@@ -299,7 +299,7 @@ impl DomainDiscoveryState {
             }
             return None;
         }
-        // Fairness gates priority: high-impact cells cannot consume later cells' entire allowance.
+        // Előbb a méltányos körbeosztást tartja be; nagy hasznú cella sem használhatja el a többi teljes keretét.
         let round = |cell: &CellId| {
             self.cells
                 .get(cell)
@@ -405,7 +405,7 @@ impl DomainDiscoveryState {
         Ok(Some((cell, domain, evidence.witnessed_non_unique)))
     }
 
-    // Original C/P is unchanged by UCP progress: repeating an unknown needs a larger time budget.
+    // Az eredeti C/P-t az UCP nem módosítja; bizonytalan próbát csak nagyobb időkerettel ismétel.
     fn next_timeout(&self, cell: &CellId, initial: Option<u64>) -> Option<Option<u64>> {
         let Some(evidence) = self.cells.get(cell) else {
             return Some(initial);
@@ -454,7 +454,7 @@ fn discover_probe(
             evidence.subset_solver_checks += 1;
             evidence.subset_fallbacks += 1;
             evidence.subset_unknown_checks += usize::from(unknown);
-            // SAT/unknown of a weaker formula cannot add a feasible value or invalidate exhaustion.
+            // Gyengébb formula SAT vagy bizonytalan eredményéből nem vesz át megvalósítható értéket, és nem cáfol kimerítést.
             return Ok((None, true));
         }
         DiscoveryResponse::SubsetUnsat => {
@@ -472,7 +472,7 @@ fn discover_probe(
             !evidence.observed_values.is_empty(),
             "Domain discovery contradicts original satisfiability"
         );
-        // C implies its literal subset S; either UNSAT exclusion covers the full projection.
+        // A teljes C maga után vonja a kiválasztott S részhalmazt, így bármelyik UNSAT-kizárás lefedi a teljes vetületet.
         let domain = UcpValueDomain::finite_set(evidence.observed_values.iter().cloned())
             .context("Discovered complete domain exceeds the representation limit")?;
         evidence.status = PrivateDomainDiscoveryStatus::Complete;
@@ -489,7 +489,7 @@ fn discover_probe(
     );
     evidence.witnessed_non_unique |= !evidence.observed_values.is_empty();
     if evidence.observed_values.len() >= max_values {
-        // A SAT exhaustion probe is evidence of additional values, not a covering finite set.
+        // A mintakorláton kapott új SAT-értéket további lehetőség bizonyítékának tekinti, nem lefedő domainnek.
         evidence.limitation = Some(RecoveryLimitation::DomainSizeLimit);
     } else {
         evidence.observed_values.insert(value);
@@ -1040,7 +1040,7 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        assert_eq!(second.0, cells[0]); // Even a unique target must yield its first-round slot.
+        assert_eq!(second.0, cells[0]); // Az egyértelmű célcellától is megköveteli a többi cella első körének kivárását.
         result.value_facts.mark_known(cells[1].clone(), 3.into());
         let third = state
             .discover_next(
@@ -1307,7 +1307,7 @@ mod tests {
                         &101.into(),
                         Some(10),
                         |_, blocked, timeout, probe| {
-                            assert_eq!(timeout, Some(10)); // A subset unknown needs fallback, not escalation.
+                            assert_eq!(timeout, Some(10)); // A részhalmaz bizonytalan eredménye után teljes vizsgálatra vált, nem időkeretet emel.
                             probes.push(probe);
                             match probes.len() {
                                 1 => Ok(DiscoveryResponse::Full(Some(7.into()))),
@@ -1424,7 +1424,7 @@ mod tests {
                     probes.push(probe);
                     match probes.len() {
                         1 => Ok(DiscoveryResponse::Full(Some(7.into()))),
-                        2 => full_discovery_response(Err(timeout())), // No stored subset: actual check is full.
+                        2 => full_discovery_response(Err(timeout())), // Tárolt részhalmaz nélkül teljes kontextusú ellenőrzést végez.
                         3 => {
                             assert_eq!(probe, DiscoveryProbe::Full);
                             assert_eq!(timeout_ms, Some(20));

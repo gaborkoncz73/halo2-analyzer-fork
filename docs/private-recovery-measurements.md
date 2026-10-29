@@ -36,7 +36,7 @@ circuits; these are not additional unchanged external applications.
 
 Repository sources are
 `korrekt/src/sample_circuits/zcash/bit_decomposition/two_bit_decomp.rs` and
-`two_bit_decomp_lookup.rs`. Synthetic fixtures are reused from `ucp/demo_tests.rs`
+`two_bit_decomp_lookup.rs`. Synthetic fixtures are reused from `ucp/tests/demos/demo_tests.rs`
 instead of introducing different copies of their gates.
 
 Multiple witnesses in the missing-range control are not evidence of healthy

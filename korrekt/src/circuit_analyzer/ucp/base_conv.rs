@@ -1,8 +1,8 @@
-// Ez a modul a cikk Base-Conv szabályát valósítja meg.
-// A szabály olyan zero equationt keres, ahol egy unique x fel van írva c alapú számként:
+// Ez a modul a QED² cikk Base-Conv szabályát valósítja meg.
+// A szabály olyan nullával egyenlő kifejezést keres, amely egy egyértelmű x értéket c alapú számként ír fel:
 //   x = y_0 + c*y_1 + c^2*y_2 + ... + c^n*y_n
-// Ha minden digit y_i domainje [0, c-1]-ben van, x unique, és nincs modulo p átfordulás,
-// akkor a base representation egyértelmű, ezért minden y_i unique lesz.
+// Ha minden y_i számjegy domainje [0,c-1]-ben van, x egyértelmű, és kizárható a moduláris körbefordulás,
+// akkor igazolja a számjegyek egyértelműségét.
 use super::{
     cell::CellId,
     expr::{UcpExpr, UcpScalar},
@@ -14,17 +14,18 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseConvInference {
-    //Az a digit cella, amiről a szabály kimondta, hogy unique
+    // Az a számjegycella, amelynek egyértelműségét a szabály igazolja.
     pub cell: CellId,
-    //Ha x konkrét értéke ismert, akkor a digit konkrét értékét is visszaadjuk
+    // Ismert x esetén a számjegy konkrét értékét is visszaadja.
     pub value: Option<BigInt>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BaseConvCandidate {
-    //A base-conv alakban szereplő y_i digit cellák, növekvő hatvány szerint
+    base: BigInt,
+    // A felbontás y_i számjegycelláit növekvő helyiérték szerint tárolja.
     digits: Vec<CellId>,
-    //Ha x ismert, akkor a hozzá tartozó konkrét digitértékek
+    // Ismert x esetén a kiszámított számjegyértékeket tárolja.
     digit_values: Option<Vec<BigInt>>,
 }
 
@@ -36,7 +37,7 @@ struct LinearExpr {
     terms: BTreeMap<CellId, BigInt>,
 }
 
-//Base-Conv futtatása explicit p modulussal, hogy a cikk no-wrap feltételét is ellenőrizzük
+// A Base-Conv szabályt explicit p modulussal futtatja, és ellenőrzi a körbefordulás kizárását.
 pub fn infer_base_conversions_with_modulus(
     expressions: &[UcpExpr],
     facts: &UcpFacts,
@@ -49,14 +50,14 @@ pub fn infer_base_conversions_with_modulus(
     let mut inferences = BTreeMap::new();
 
     for expr in expressions {
-        //Csak lineáris zero equationökön tudjuk felismerni a base-conv alakot
+        // A számjegyes alakot csak lineáris, nullával egyenlő kifejezésekben ismeri fel.
         let Some(linear) = linearize_zero_equation(expr, modulus) else {
             continue;
         };
 
         for candidate in base_conversion_candidates(linear, facts, values, modulus) {
             for (index, digit) in candidate.digits.into_iter().enumerate() {
-                //Ha vannak konkrét digitértékek, az index alapján a megfelelő y_i-hez kötjük őket
+                // A kiszámított számjegyértékeket az indexük alapján a megfelelő y_i cellához rendeli.
                 let value = candidate
                     .digit_values
                     .as_ref()
@@ -66,7 +67,7 @@ pub fn infer_base_conversions_with_modulus(
         }
     }
 
-    //Deterministikus sorrendben adjuk vissza a megtanult digit cellákat
+    // Determinisztikus sorrendben adja vissza az igazolt számjegycellákat.
     inferences
         .into_iter()
         .map(|(cell, value)| BaseConvInference { cell, value })
@@ -81,7 +82,7 @@ fn base_conversion_candidates(
 ) -> Vec<BaseConvCandidate> {
     let mut candidates = Vec::new();
 
-    //A lineáris egyenletben végigpróbáljuk, melyik cella lehet az x
+    //A lineáris egyenletben végigpróbálja, melyik cella lehet az x
     for (x, x_coefficient) in &linear.terms {
         //A cikk feltétele: K |= x. Emellett x együtthatója csak +1 vagy -1 lehet.
         if !facts.is_unique(x) || !is_plus_or_minus_one(x_coefficient) {
@@ -105,7 +106,7 @@ fn base_conversion_candidate(
     values: &UcpValueFacts,
     modulus: &BigInt,
 ) -> Option<BaseConvCandidate> {
-    //A képen lévő alak tiszta zero equation: nincs külön konstans eltolás
+    // A szabályhoz külön konstans eltolás nélküli, nullával egyenlő alakot követel meg.
     if linear.constant != BigInt::from(0) {
         return None;
     }
@@ -113,12 +114,12 @@ fn base_conversion_candidate(
     let mut digits_with_coefficients = Vec::new();
 
     for (cell, coefficient) in &linear.terms {
-        //Az x nem digit, ezért kihagyjuk
+        // Az x cellát kihagyja a számjegyek közül.
         if cell == x {
             continue;
         }
 
-        //Az x előjelétől függően normalizáljuk a digit együtthatókat pozitívra
+        // Az x előjele alapján pozitívra normalizálja a számjegyek együtthatóit.
         let digit_coefficient = -coefficient * x_coefficient;
         if digit_coefficient <= BigInt::from(0) {
             return None;
@@ -131,7 +132,7 @@ fn base_conversion_candidate(
     let (base, digits) = parse_base_powers(digits_with_coefficients)?;
     let max_digit = &base - BigInt::from(1);
 
-    //A cikk Delta feltétele: minden digit domainje legyen [0, c-1]-ben
+    // Minden számjegy domainjét a [0,c-1] tartományba esőnek követeli meg.
     if digits
         .iter()
         .any(|digit| !values.domain_is_subset_of_range(digit, &BigInt::from(0), &max_digit))
@@ -139,32 +140,96 @@ fn base_conversion_candidate(
         return None;
     }
 
-    //A cikk modulus/no-wrap feltétele: y_n < p / c^n - 1
+    // Ellenőrzi a körbefordulást kizáró y_n < p / c^n - 1 feltételt.
     if !highest_digit_satisfies_modulus_bound(&digits, &base, values, modulus) {
         return None;
     }
 
-    //Ha x konkrét értéke ismert, akkor a base-c felbontás konkrét digitjeit is kiszámoljuk
+    // Ismert x esetén kiszámítja a c alapú felbontás konkrét számjegyeit.
     let digit_values = match values.known_value(x) {
         Some(x_value) => Some(exact_digits(x_value, &base, digits.len())?),
         None => None,
     };
 
     Some(BaseConvCandidate {
+        base,
         digits,
         digit_values,
     })
 }
 
+pub(crate) struct FiniteBaseCandidate {
+    pub packed: CellId,
+    pub branches: Vec<(BigInt, Option<Vec<(CellId, BigInt)>>)>,
+}
+
+/// A csomagolt érték véges jelölthalmazának elemeit számjegyekre bontja,
+/// ha a számjegykorlátok teljesülnek, és kizárható a moduláris körbefordulás.
+pub(crate) fn finite_base_candidates(
+    expressions: &[UcpExpr],
+    values: &UcpValueFacts,
+    modulus: &BigInt,
+) -> Vec<FiniteBaseCandidate> {
+    if modulus <= &BigInt::from(1) {
+        return Vec::new();
+    }
+    let mut candidates = BTreeMap::new();
+    for expr in expressions {
+        let Some(linear) = linearize_zero_equation(expr, modulus) else {
+            continue;
+        };
+        for (packed, coefficient) in &linear.terms {
+            if !is_plus_or_minus_one(coefficient) || values.domain_is_complete(packed) {
+                continue;
+            }
+            let Some(super::value::UcpValueDomain::FiniteSet(domain)) = values.domain(packed)
+            else {
+                continue;
+            };
+            let Some(candidate) =
+                base_conversion_candidate(&linear, packed, coefficient, values, modulus)
+            else {
+                continue;
+            };
+            // Minden jelöltet testbeli maradékra hoz, majd a bizonyítottan egyértelmű számjegyekre bont.
+            // Sikertelen felbontásnál None ágat ad, amelyet a feltételes vizsgálat kizárhat.
+            let branches = domain
+                .iter()
+                .map(|value| {
+                    let residue = ((value % modulus) + modulus) % modulus;
+                    let digits = exact_digits(&residue, &candidate.base, candidate.digits.len())
+                        .map(|digits| candidate.digits.iter().cloned().zip(digits).collect());
+                    (value.clone(), digits)
+                })
+                .collect();
+            candidates
+                .entry(packed.clone())
+                .or_insert(FiniteBaseCandidate {
+                    packed: packed.clone(),
+                    branches,
+                });
+        }
+    }
+    let mut candidates: Vec<_> = candidates.into_values().collect();
+    candidates.sort_by(|left, right| {
+        right
+            .branches
+            .len()
+            .cmp(&left.branches.len())
+            .then(left.packed.cmp(&right.packed))
+    });
+    candidates
+}
+
 fn parse_base_powers(
     mut digits_with_coefficients: Vec<(CellId, BigInt)>,
 ) -> Option<(BigInt, Vec<CellId>)> {
-    //Legalább y_0 és y_1 kell, mert ebből tudjuk meghatározni a base-t
+    // Legalább két számjegyet követel meg, mert ezek súlyaiból állapítja meg a számrendszer alapját.
     if digits_with_coefficients.len() < 2 {
         return None;
     }
 
-    //Együttható szerint rendezzük, így y_0, y_1, ... sorrendet kapunk
+    // Együttható szerint rendezi a cellákat, így növekvő helyiérték szerinti sorrendet kap.
     digits_with_coefficients.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
 
     //Az első együtthatónak 1-nek kell lennie: c^0
@@ -172,7 +237,7 @@ fn parse_base_powers(
         return None;
     }
 
-    //A második együttható adja a base-t: c^1
+    // A második együtthatóból határozza meg a c alapot.
     let base = digits_with_coefficients[1].1.clone();
     if base <= BigInt::from(1) {
         return None;
@@ -200,28 +265,28 @@ fn highest_digit_satisfies_modulus_bound(
     values: &UcpValueFacts,
     modulus: &BigInt,
 ) -> bool {
-    //A legfelső digit y_n
+    // A legfelső, y_n számjegy celláját választja ki.
     let Some(highest_digit) = digits.last() else {
         return false;
     };
-    //Domain nélkül nem tudjuk ellenőrizni a cikk feltételét, ezért nem következtetünk
+    //Domain nélkül nem tudja ellenőrizni a cikk feltételét, ezért nem következtet
     let Some(highest_domain) = values.domain(highest_digit) else {
         return false;
     };
 
-    //c^n, ahol n a legfelső digit indexe
+    // Kiszámítja a c^n súlyt, ahol n a legfelső számjegy indexe.
     let base_power = pow_bigint(base, digits.len() - 1);
-    //A domain legnagyobb lehetséges y_n értéke
+    // Lekéri a legfelső számjegy domainjének legnagyobb értékét.
     let highest_max = highest_domain.max_value();
 
     //A cikk feltétele: y_n < p / c^n - 1.
-    //Integer domainre biztonságos ekvivalens ellenőrzés: c^n * (max(y_n) + 1) < p.
+    // Egész számjegydomainnél az ekvivalens c^n * (max(y_n) + 1) < p feltételt ellenőrzi.
     let highest_bound_witness = &base_power * (highest_max + BigInt::from(1));
     highest_bound_witness < modulus.clone()
 }
 
 fn pow_bigint(base: &BigInt, exponent: usize) -> BigInt {
-    //Egyszerű BigInt hatványozás kis exponentekhez
+    // BigInt-hatványozást végez a megadott nemnegatív kitevővel.
     let mut result = BigInt::from(1);
     for _ in 0..exponent {
         result *= base;
@@ -230,7 +295,7 @@ fn pow_bigint(base: &BigInt, exponent: usize) -> BigInt {
 }
 
 fn exact_digits(value: &BigInt, base: &BigInt, digit_count: usize) -> Option<Vec<BigInt>> {
-    //Negatív x-et nem bontunk fel base-c digitként
+    // Negatív x értéknél nem ad nemnegatív számjegyekből álló felbontást.
     if value < &BigInt::from(0) {
         return None;
     }
@@ -239,13 +304,13 @@ fn exact_digits(value: &BigInt, base: &BigInt, digit_count: usize) -> Option<Vec
     let mut digits = Vec::with_capacity(digit_count);
 
     for _ in 0..digit_count {
-        //Alsó digit: maradék base szerint
+        // Az aktuális maradékból kiszámítja a legalsó számjegyet.
         digits.push(&remaining % base);
-        //Következő digithez osztunk base-szel
+        // A következő számjegyhez az alappal osztja a megmaradt értéket.
         remaining /= base;
     }
 
-    //Ha maradt még érték, akkor a megadott digit_count nem volt elég x reprezentálására
+    // Ha marad feldolgozatlan érték, elutasítja a túl rövid számjegyfelbontást.
     if remaining == BigInt::from(0) {
         Some(digits)
     } else {
@@ -254,18 +319,18 @@ fn exact_digits(value: &BigInt, base: &BigInt, digit_count: usize) -> Option<Vec
 }
 
 fn is_plus_or_minus_one(value: &BigInt) -> bool {
-    //Az x lehet +x vagy -x oldalon is a zero equationben
+    // A nullával egyenlő kifejezésben x-et +1 és -1 együtthatóval is felismeri.
     value == &BigInt::from(1) || value == &BigInt::from(-1)
 }
 
 fn linearize_zero_equation(expr: &UcpExpr, modulus: &BigInt) -> Option<LinearExpr> {
-    //Ha egy szorzásban csak egy érdemi faktor marad, azt külön lineárisítjuk
+    //Ha egy szorzásban csak egy érdemi faktor marad, azt külön lineárisítja
     let factors = meaningful_product_factors(expr, modulus);
     if factors.len() == 1 {
         return linearize(factors[0]);
     }
 
-    //Egyébként az egész expressiont próbáljuk lineáris alakra hozni
+    // Egyébként a teljes kifejezést próbálja lineáris alakra hozni.
     linearize(expr)
 }
 
@@ -281,7 +346,7 @@ fn collect_meaningful_product_factors<'a>(
     modulus: &BigInt,
 ) {
     match expr {
-        //A szorzásfát kilapítjuk faktorlistává
+        //A szorzásfát kilapítja faktorlistává
         UcpExpr::Mul(left, right) => {
             collect_meaningful_product_factors(left, factors, modulus);
             collect_meaningful_product_factors(right, factors, modulus);
@@ -292,9 +357,8 @@ fn collect_meaningful_product_factors<'a>(
         UcpExpr::Scale(inner, scalar) if scalar.is_non_zero_with_modulus(Some(modulus)) => {
             collect_meaningful_product_factors(inner, factors, modulus)
         }
-        //Nem nulla konstans szorzó nem változtatja meg a zero equation megoldáshalmazát
+        // Az igazoltan nemnulla konstans tényezőt elhagyja, mert nem változtatja meg a nullhelyeket.
         UcpExpr::Const(scalar) if scalar.is_non_zero_with_modulus(Some(modulus)) => {}
-        //Retain zero factors so a tautology cannot become a digit constraint.
         //Minden más valódi faktor marad
         _ => factors.push(expr),
     }
@@ -309,10 +373,10 @@ fn linearize(expr: &UcpExpr) -> Option<LinearExpr> {
     match expr {
         //Egy változó lineárisan 1 * cell
         UcpExpr::Var(cell) => Some(LinearExpr::term(cell.clone(), BigInt::from(1))),
-        //Ismeretlen konstansból nem tudunk pontos lineáris alakot képezni
+        //Ismeretlen konstansból nem tud pontos lineáris alakot képezni
         UcpExpr::Const(_) => None,
         UcpExpr::Neg(inner) => linearize(inner).map(|linear| linear.scale(BigInt::from(-1))),
-        //Lineáris expressionök összege is lineáris
+        // Lineáris kifejezések összegét szintén lineáris alakra hozza.
         UcpExpr::Add(left, right) => Some(linearize(left)?.add(linearize(right)?)),
         //Szorzás csak akkor marad lineáris, ha az egyik oldal konstans
         UcpExpr::Mul(left, right) => {
@@ -335,7 +399,7 @@ fn linearize(expr: &UcpExpr) -> Option<LinearExpr> {
 
 fn constant_expr_value(expr: &UcpExpr) -> Option<BigInt> {
     match expr {
-        //Változót tartalmazó expression nem konstans
+        // Változót tartalmazó kifejezést nem fogad el tiszta konstansként.
         UcpExpr::Var(_) => None,
         UcpExpr::Const(scalar) => bounded_value(scalar.as_known()?),
         UcpExpr::Neg(inner) => bounded_value(-constant_expr_value(inner)?),
@@ -399,12 +463,12 @@ mod tests {
     use super::*;
     use crate::circuit_analyzer::ucp::value::UcpValueDomain;
 
-    //Boolean digit domain: {0, 1}, vagyis base=2 esetén [0, c-1]
+    // A teszt a bináris számjegyek {0,1} domainjét állítja elő.
     fn boolean_domain() -> UcpValueDomain {
         UcpValueDomain::finite_set([BigInt::from(0), BigInt::from(1)]).unwrap()
     }
 
-    //Több bit cellára beállítja a boolean domaint
+    // A teszt több bitcellához beállítja a {0,1} domaint.
     fn mark_bits(values: &mut UcpValueFacts, bits: &[CellId]) {
         for bit in bits {
             values.mark_domain(bit.clone(), boolean_domain());
@@ -415,7 +479,7 @@ mod tests {
         BigInt::from(101)
     }
 
-    //Ellenőrzi, hogy ismert x esetén a konkrét binary digitértékeket is megtanuljuk
+    // A teszt ellenőrzi, hogy ismert x esetén a rendszer a bináris számjegyek értékét is kiszámítja.
     #[test]
     fn infers_binary_decomposition_digits_from_exact_x() {
         let x = CellId::instance(0, 0);
@@ -458,7 +522,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy x konkrét értéke nélkül is unique-k lesznek a digit cellák
+    // A teszt ellenőrzi, hogy a rendszer x konkrét értéke nélkül is igazolja a számjegyek egyértelműségét.
     #[test]
     fn infers_uniqueness_without_exact_x_value() {
         let x = CellId::instance(0, 0);
@@ -492,7 +556,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy digit domain nélkül nem alkalmazzuk a Base-Conv szabályt
+    // A teszt ellenőrzi, hogy számjegydomain nélkül nem alkalmazza a Base-Conv szabályt.
     #[test]
     fn does_not_fire_without_digit_domains() {
         let x = CellId::instance(0, 0);
@@ -513,7 +577,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy nem 1,c,c^2 alakú együtthatókra nem következtetünk
+    //Ellenőrzi, hogy nem 1,c,c^2 alakú együtthatókra nem következtet
     #[test]
     fn does_not_fire_for_non_power_coefficients() {
         let x = CellId::instance(0, 0);
@@ -539,7 +603,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy ha a legfelső digit modulo p átfordulást engedhet, akkor nem következtetünk
+    // A teszt ellenőrzi, hogy lehetséges moduláris körbefordulásnál nem következtet.
     #[test]
     fn does_not_fire_when_highest_digit_can_wrap_modulus() {
         let x = CellId::instance(0, 0);

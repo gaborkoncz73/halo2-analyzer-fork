@@ -4,19 +4,19 @@ use super::{
 };
 use std::collections::HashSet;
 
-//A cikkbeli K halmaz: azok a cellák, amelyekről már tudjuk, hogy unique-ok
+// A dolgozatbeli K halmazban az igazoltan egyértelmű cellákat tárolja.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UcpFacts {
     unique_cells: HashSet<CellId>,
 }
 
 impl UcpFacts {
-    //Üres K halmaz létrehozása
+    // Üres K halmazt hoz létre.
     pub fn new() -> Self {
         Self::default()
     }
 
-    //Cellát unique-ként jelöli, igazat ad vissza, ha új elem került be
+    // A cellát egyértelműként jelöli; új elem bejegyzésekor igazat ad vissza.
     pub fn mark_unique(&mut self, cell: CellId) -> bool {
         self.unique_cells.insert(cell)
     }
@@ -34,7 +34,7 @@ impl UcpFacts {
         self.unique_cells.contains(cell)
     }
 
-    //Visszaadja az összes eddig unique-nak ismert cellát
+    // Visszaadja az összes igazoltan egyértelmű cellát.
     pub fn unique_cells(&self) -> &HashSet<CellId> {
         &self.unique_cells
     }
@@ -59,7 +59,7 @@ where
     facts
 }
 
-//Expressionökből kigyűjti a kezdeti K-ba tehető instance és fixed cellákat
+// A kifejezésekből kigyűjti a kezdeti K-ba felvehető instance és fixed cellákat.
 pub fn initial_facts_from_expressions<'a, I>(expressions: I) -> UcpFacts
 where
     I: IntoIterator<Item = &'a UcpExpr>,
@@ -73,7 +73,7 @@ where
     facts
 }
 
-//Rekurzívan bejárja az expressiont, és csak a kezdetben unique cellákat gyűjti
+// Rekurzívan bejárja a kifejezést, és csak a kezdetben egyértelmű cellákat gyűjti ki.
 fn collect_initial_facts(expr: &UcpExpr, facts: &mut UcpFacts) {
     match expr {
         UcpExpr::Var(cell) => {
@@ -127,7 +127,7 @@ mod tests {
         assert_eq!(facts.unique_cells().len(), 1);
     }
 
-    //Azt ellenőrzi, hogy expressionből is csak instance és fixed cellák lesznek initial factek
+    // A teszt ellenőrzi, hogy a kifejezésekből csak instance és fixed cellát vesz fel kezdeti tényként.
     #[test]
     fn initial_facts_from_expressions_collect_instance_and_fixed_only() {
         let instance = CellId::instance(0, 0);

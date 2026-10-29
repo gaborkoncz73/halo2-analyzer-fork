@@ -1,7 +1,7 @@
 #![cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 
-//! Original-SMT control for whether a reported domain requires concrete public observations.
-//! Tests a particular covering claim, not entropy, all disclosure, or protocol zero knowledge.
+//! Az eredeti SMT-kényszerekkel ellenőrzi, hogy egy jelentett domainhez szükségesek-e a konkrét publikus megfigyelések.
+//! Egy lefedési állítást vizsgál; entrópiát, minden adatszivárgást vagy protokollszintű zéró tudású tulajdonságot nem minősít.
 
 use super::{
     cell::CellId,
@@ -31,9 +31,9 @@ pub(crate) const PRIVACY_OBSERVATION_POLICY: &str =
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PublicObservationEffectOptions {
-    /// Hard total on actual solver invocations, including the mandatory original SAT check.
+    /// A tényleges solverhívásokat összesítve korlátozza, a kötelező eredeti SAT-próbával együtt.
     pub max_solver_checks: usize,
-    /// None reuses the recovery report's solver budget, then the legacy environment fallback.
+    /// None esetén a visszaállítási riport időkeretét, majd a környezeti alapértéket használja.
     pub solver_timeout_ms: Option<u64>,
 }
 
@@ -58,11 +58,11 @@ pub enum PublicObservationEffectStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrivateDomainObservationEffect {
-    /// C AND P entails this domain, but C alone admits a value outside it.
+    /// C és P mellett igazolta a domaint, de C önmagában domainen kívüli értéket is megenged.
     ObservationDependent,
-    /// C alone entails this domain. Does not establish that public data has no other effects.
+    /// A domaint már C-ből igazolta; a publikus adatok minden más hatásának hiányát ebből nem állapítja meg.
     AlreadyImplied,
-    /// A full original model under the supplied observations violates the claimed domain.
+    /// A megadott megfigyelések mellett a teljes eredeti modellből domainen kívüli értéket talált.
     Refuted,
     NoDomainClaim,
     Unresolved,
@@ -74,9 +74,9 @@ pub struct PrivateObservationEffect {
     pub cell: CellId,
     pub domain: Option<UcpValueDomain>,
     pub effect: PrivateDomainObservationEffect,
-    /// Coverage independently verified under the concrete observations, even if control is incomplete.
+    /// A lefedést a konkrét megfigyelések mellett függetlenül igazolta, a kontrollvizsgálat hiányossága mellett is.
     pub observed_domain_verified: bool,
-    /// Feasible without P, not necessarily under P; never a newly recovered secret value.
+    /// P nélkül megvalósítható értéket tárol; P melletti megvalósíthatóságot vagy új titokvisszaállítást nem állít.
     pub unobserved_counterexample: Option<BigInt>,
     pub observed_counterexample: Option<BigInt>,
     pub limitation: Option<RecoveryLimitation>,
@@ -87,7 +87,7 @@ pub struct PublicObservationEffectReport {
     pub status: PublicObservationEffectStatus,
     pub cells: Vec<PrivateObservationEffect>,
     pub public_values: Vec<(CellId, BigInt)>,
-    /// Partitioned into the three check counters below; no hidden fallback/retry checks.
+    /// A három alábbi számlálóra bontja az összes hívást; nem végez rejtett ismétlést vagy tartalékpróbát.
     pub solver_checks: usize,
     pub satisfiability_checks: usize,
     pub observed_domain_checks: usize,
@@ -96,9 +96,9 @@ pub struct PublicObservationEffectReport {
     pub options: PublicObservationEffectOptions,
 }
 
-/// Independently checks reported domains under C AND P, then asks whether they hold under C alone.
-/// Captures both contexts from one fresh SMT encoding before any UCP facts or SAT hints are written.
-/// Does not mutate the recovery report, K, or Delta. Unknown is incomplete evidence, not a verdict.
+/// Előbb C és P mellett függetlenül ellenőrzi a domaint, majd C önálló következményeként is vizsgálja.
+/// Mindkét kontextust friss SMT-kódolásból rögzíti, UCP-tények és SAT-jelöltek beírása előtt.
+/// A riportot, K-t és Deltát nem módosítja; a bizonytalan eredményt hiányos bizonyítékként kezeli.
 pub fn analyze_public_observation_effect<F, ConcreteCircuit>(
     circuit: &ConcreteCircuit,
     k: u32,
@@ -133,7 +133,7 @@ where
         context.public_values == recovery.public_values,
         "Recovery report and observation control must use the same public observations"
     );
-    // No string filtering: capture C before prepare_ucp_query_context can write P.
+    // C-t a prepare_ucp_query_context P-t beíró lépése előtt rögzíti, szöveges szűrés nélkül.
     let unobserved = context
         .analyzer
         .original_private_query_context_without_observations(
@@ -166,7 +166,7 @@ where
     Ok(control)
 }
 
-// Deterministic failure tests and real SMT checks use the same budget/classification driver.
+// A valódi SMT-hívásokhoz és a determinisztikus hibatesztekhez ugyanazt a keret- és minősítéskezelést használja.
 fn classify_effects(
     claims: Vec<(CellId, Option<UcpValueDomain>)>,
     public_values: Vec<(CellId, BigInt)>,
@@ -656,7 +656,7 @@ mod tests {
             |_, _, _| Ok(None),
         )
         .unwrap();
-        // P could narrow inside {0,1}; only this covering claim is already implied by C.
+        // A teszt szerint P a {0,1} halmazon belül még szűkíthet; C-ből csak a vizsgált lefedési állítást igazolja.
         assert_eq!(
             control.cells[0].effect,
             PrivateDomainObservationEffect::AlreadyImplied

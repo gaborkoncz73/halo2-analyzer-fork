@@ -50,9 +50,11 @@ only after original-model exhaustion. Both searches can be enabled together;
 already complete discovered sets are not redundantly refined.
 
 The domain budget is a separate hard total on actual solver invocations, including
-covering checks. It never resets on progress. A full attempt with N candidates
-costs at most N+1 checks. The usual uniqueness-query allowance, bridge/retry
-limits, initial SAT checks, and optional fresh validation remain separate.
+covering checks. It never resets on progress. An initial full attempt with N
+candidates costs at most N+1 checks. Progress-gated continuations share the same
+remaining allowance and reuse previous proofs. The usual uniqueness-query
+allowance, bridge/retry limits, initial SAT checks, and optional fresh validation
+remain separate.
 Each domain check uses the initial per-process timeout, not the uniqueness retry
 floor. Total report time includes refinement; no global wall-clock deadline for
 synthesis, UCP, or the entire analysis is promised.
@@ -68,9 +70,18 @@ allowance and retry history; they do not spend candidate-refinement checks.
 ## Cell Selection
 
 `RefineNext` ranks eligible cells instead of always taking the first CellId.
-The policy is `coverage-candidate-feasibility-cost-domain-gain-v2` and is also
-recorded in measurement metadata. Existing eligibility, one-attempt-per-cell
-bookkeeping, and the hard total solver-check cap are unchanged.
+The policy is `progress-gated-resumable-domain-refinement-v3` and is also
+recorded in measurement metadata. Complete domains are never selected again.
+Partial and coverage-unknown attempts can resume only after the global knowledge
+generation advances: established uniqueness or value-domain information must
+change, not merely sample caches or statistics. At most one attempt per cell is
+permitted in a generation. All continuations retain the original hard check cap.
+
+Fresh eligible cells take priority over retries. Among retries, the oldest
+knowledge generation and then the least recent attempt take priority. Cost and
+conditional-gain scoring apply within this fairness shortlist; they cannot
+repeatedly promote a recently retried cell ahead of older eligible refinements.
+Other operation families retain the joint scheduler's existing ordering.
 
 A cell with N distinct field candidates has a full-attempt cost estimate of
 N+1 invocations, including coverage. Cells whose full attempt fits the remaining
@@ -112,7 +123,12 @@ candidate superset. Original satisfiability must already have been established.
 Step 2 skips a candidate already witnessed by a full-context SAT model in the
 same analysis run. Such values count as feasible, but skipped checks consume no
 solver allowance. Unknown, untested, and merely hypothesized values are not
-cached as feasible. This can reduce the N+1 bound without changing coverage.
+cached as feasible. Continuations also remember earlier SAT candidates and
+UNSAT exclusions without relying on the caller to resend those samples.
+Original-context coverage is reused only if its certified set, minus previously
+proved exclusions, is contained in the current domain. A smaller propagated
+domain that is not justified by those exclusions requires a fresh independent
+coverage check. A proposed domain contradicting cached feasibility fails closed.
 
 An immutable original snapshot is captured before ordinary semantic queries can
 write inferred facts. Each domain check writes a separate SMT file from that
@@ -139,13 +155,23 @@ An empty retained set contradicts original SAT and also fails the run.
 
 ## Report Meaning
 
-`PrivateCellReport.domain_refinement` records candidate counts, actual check
-counts, and one of:
+`PrivateCellReport.domain_refinement` records the latest attempt's candidate
+counts, cumulative actual solver checks across that cell's attempts, and one of:
 
 - `Complete`: coverage checked and every remaining value established feasible.
 - `Partial`: coverage checked; unresolved candidates remain in the superset.
 - `CoverageUnknown`: coverage could not be checked; no new exclusions exported.
 - `None`: no finite-domain attempt; this does not certify projection completeness.
+
+The separate `PrivateCellReport.domain_is_complete` flag describes the final
+domain, not just the last refinement attempt. It also recognizes singleton
+domains and covering sets whose members were all certified feasible by other
+operations. The same certificate is available to UCP and the scheduler through
+`UcpValueFacts::domain_is_complete`; complete targets are not narrowed or retried,
+but their values remain usable when reasoning about other cells. A false flag
+means completeness was not established. A true flag is scoped to the current
+original context, not reusable under changed public observations or speculative
+assumptions. Independent validation does not trust the flag as a coverage proof.
 
 A covering singleton is a special case: original SAT and exclusion of every
 other value already establish its feasibility and exact value, even if its own
@@ -155,8 +181,10 @@ non-uniqueness even if other candidates are still unresolved.
 Aggregate counts are in `report.domain_refinement_statistics`. Uniqueness-query
 attempts remain separate. `Analyzed` is not a promise that every finite domain
 is complete; inspect the per-cell domain evidence and budget-exhaustion flag.
-Progress can make additional selected cells eligible, but each cell receives
-at most one domain attempt in a run, and the shared total cap is unchanged.
+Progress can make additional cells eligible or reopen a partial attempt.
+`attempted_cells` counts distinct cells, not retries; `complete_domains` counts
+completed cells once, and `removed_candidates` counts newly proved SMT exclusions
+without charging cached exclusions again. The shared total cap is unchanged.
 
 Complete sets are marginal projections: every remaining value has some valid
 witness, not necessarily the same witness. Cartesian products of separately

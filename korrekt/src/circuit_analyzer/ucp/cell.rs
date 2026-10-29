@@ -1,26 +1,30 @@
+// A cellákat az értéküktől függetlenül azonosítja.
+
 use std::fmt;
 
 //A Halo2 cella típusát jelöli
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CellKind {
-    //Witness/advice cella, amit bizonyítani kell
+    // Az advice cellát jelöli; a szintézisben hozzárendelt privát értéket nem tekinti elemzési ténynek.
     Advice,
-    //Public input cella, kezdetben unique-nak tekinthető
+    //Publikus megfigyelés helye: bemenet, kimenet vagy publikált köztes eredmény is lehet.
     Instance,
-    //Fix oszlop cella, a circuit része, kezdetben unique-nak tekinthető
+    // A kapcsolás rögzített oszlopát jelöli; a ténylegesen hozzárendelt értéket nyilvános konstansként kezeli.
     Fixed,
 }
 
 //Egy konkrét cella azonosítója: típus, oszlop és sor
+//Az Eq/Hash a teljes hármast használja, az Ord determinisztikus rendezést ad a tárolókban.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CellId {
     pub kind: CellKind,
     pub column: usize,
+    //A rotáció feloldását és a sortartományra normalizálást nem ez a típus végzi.
     pub row: i32,
 }
 
 impl CellId {
-    //Advice cella létrehozása
+    //Csak azonosítót készít: nem foglal Halo2-oszlopot és nem rendel cellaértéket.
     pub fn advice(column: usize, row: i32) -> Self {
         Self {
             kind: CellKind::Advice,
@@ -29,7 +33,7 @@ impl CellId {
         }
     }
 
-    //Instance cella létrehozása
+    //Instance cella azonosítója
     pub fn instance(column: usize, row: i32) -> Self {
         Self {
             kind: CellKind::Instance,
@@ -38,7 +42,7 @@ impl CellId {
         }
     }
 
-    //Fixed cella létrehozása
+    //Fixed cella azonosítója
     pub fn fixed(column: usize, row: i32) -> Self {
         Self {
             kind: CellKind::Fixed,
@@ -49,7 +53,7 @@ impl CellId {
 }
 
 impl fmt::Display for CellId {
-    //String alak: A-0-0, I-0-0 vagy F-0-0
+    //Olvasható pozíciójelölés: A-0-0, I-0-0 vagy F-0-0; nem a tárolt érték.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let prefix = match self.kind {
             CellKind::Advice => "A",

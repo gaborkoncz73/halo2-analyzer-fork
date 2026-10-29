@@ -1,8 +1,8 @@
 #![cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 
-//! Independent SMT checking of recovered values and candidate supersets.
-//! This checks individual claims for the supplied circuit/public observations;
-//! it is not a formal proof of the Rust implementation or the Halo2-to-SMT encoding.
+//! A visszaállított értékeket és lefedő jelölthalmazokat független SMT-vizsgálattal ellenőrzi.
+//! A megadott kapcsolás és publikus megfigyelések egyedi állításait ellenőrzi;
+//! a Rust-megvalósítást vagy a Halo2-SMT-kódolást ezzel nem verifikálja formálisan.
 
 use super::{
     cell::CellId,
@@ -10,7 +10,9 @@ use super::{
 };
 use crate::{
     circuit_analyzer::{
-        analyzable::AnalyzableField, analyzer::DomainEntailmentResult, halo2_proofs_libs::Circuit,
+        analyzable::AnalyzableField,
+        analyzer::{Analyzer, DomainEntailmentResult},
+        halo2_proofs_libs::Circuit,
     },
     io::analyzer_io_type::AnalyzerInput,
     smt_solver::smt_parser::Satisfiability,
@@ -34,7 +36,7 @@ pub enum DomainValidationStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryValidationStatus {
-    /// Every reported domain is entailed; cells without domains are not certified.
+    /// Minden jelentett domain lefedését igazolta; domain nélküli cellát nem tanúsít.
     VerifiedDomains,
     Refuted,
     NoDomainClaims,
@@ -45,7 +47,7 @@ pub enum RecoveryValidationStatus {
 pub struct PrivateDomainValidation {
     pub cell: CellId,
     pub status: DomainValidationStatus,
-    /// A satisfying value outside the claimed domain, not a newly recovered secret.
+    /// Az állított domainen kívüli kielégítő értéket tárolja, nem újonnan visszaállított titkot.
     pub counterexample: Option<BigInt>,
 }
 
@@ -53,21 +55,23 @@ pub struct PrivateDomainValidation {
 pub struct PrivateRecoveryValidationReport {
     pub status: RecoveryValidationStatus,
     pub cells: Vec<PrivateDomainValidation>,
-    /// Checks absence of counterexamples after a shared original satisfiability check.
+    /// Közös eredeti SAT-ellenőrzés után ellenpélda hiányát vizsgálja.
     pub domain_queries: usize,
-    /// Actual initial SAT attempts plus subset/full exclusion checks.
+    /// A kezdeti SAT-próbákat és a részhalmazos vagy teljes kizárási hívásokat számolja.
     pub solver_checks: usize,
-    /// Subset SAT/unknown is inconclusive; only subset UNSAT can certify exclusion.
+    /// A részhalmaz SAT vagy bizonytalan eredményét nem tekinti döntésnek; kizárást csak UNSAT-ból igazol.
     pub subset_checks: usize,
+    /// Hívásonkénti tényleges időkeretet tárol, a visszaállítási futás keretétől függetlenül.
+    pub solver_timeout_ms: Option<u64>,
     pub elapsed: Duration,
 }
 
-/// Rebuilds SMT from the original circuit, using only concrete public observations.
-/// No inferred domain, uniqueness fact, baseline or witness assignment is assumed.
-/// Untrusted UCP candidates may guide original SAT only and are popped before exclusion.
-/// A finite domain is checked as a superset: this does not certify each candidate
-/// as feasible, nor certify the report's uniqueness or information-leakage labels.
-/// Solver failures/unknown results propagate as errors, never as verification.
+/// Az eredeti kapcsolásból új SMT-kódolást épít, csak a konkrét publikus megfigyeléseket használva.
+/// Kikövetkeztetett domaint, egyértelműségi tényt, alapállapotot vagy privát értékadást nem feltételez.
+/// Az UCP-jelöltet csak az eredeti SAT-próbához használja, és kizárás előtt visszavonja.
+/// A véges halmaz lefedését ellenőrzi; az egyes jelöltek megvalósíthatóságát,
+/// a riport egyértelműségi címkéit és az információszivárgási minősítést ezzel nem tanúsítja.
+/// A solverhibát és a bizonytalan választ hibaként adja tovább, nem sikeres ellenőrzésként.
 pub fn validate_private_recovery_report<F, ConcreteCircuit>(
     circuit: &ConcreteCircuit,
     k: u32,
@@ -78,7 +82,27 @@ where
     F: AnalyzableField,
     ConcreteCircuit: Circuit<F>,
 {
+    validate_private_recovery_report_with_timeout::<F, _>(circuit, k, analyzer_input, report, None)
+}
+
+/// Friss validálást végez opcionálisan felülírt, solverhívásonkénti időkerettel.
+/// None esetén a visszaállítási időkeretet, majd az elemző környezeti alapértékét használja.
+/// Az időkeret felülírásakor a premisszákat, állításokat és a visszaállítási riportot nem módosítja.
+pub fn validate_private_recovery_report_with_timeout<F, ConcreteCircuit>(
+    circuit: &ConcreteCircuit,
+    k: u32,
+    analyzer_input: &AnalyzerInput,
+    report: &PrivacyAnalysisReport,
+    solver_timeout_ms: Option<u64>,
+) -> Result<PrivateRecoveryValidationReport>
+where
+    F: AnalyzableField,
+    ConcreteCircuit: Circuit<F>,
+{
     let started = Instant::now();
+    let solver_timeout_ms = Analyzer::<F>::resolve_smt_timeout_ms(
+        solver_timeout_ms.or(report.options.solver_timeout_ms),
+    )?;
     let mut context = prepare_privacy_analysis::<F, _, _>(
         circuit,
         k,
@@ -93,11 +117,8 @@ where
         context.public_values == report.public_values,
         "Recovery report and validation must use the same public observations"
     );
-    //Fresh constraints, but the same per-check resource policy as the recovery run.
-    context
-        .analyzer
-        .set_smt_timeout_ms(report.options.solver_timeout_ms)?;
-    // Candidate-restricted SAT proves existence only; scopes are popped before checking any claim.
+    context.analyzer.set_smt_timeout_ms(solver_timeout_ms)?;
+    // A jelölttel korlátozott SAT csak létezést igazol; minden állításvizsgálat előtt visszavonja a jelöltet.
     let (satisfiable, mut solver_checks) = check_sat(&mut context);
     let satisfiable = satisfiable?;
     if satisfiable == Satisfiability::Unsatisfiable {
@@ -115,6 +136,7 @@ where
             domain_queries: 0,
             solver_checks,
             subset_checks: 0,
+            solver_timeout_ms,
             elapsed: started.elapsed(),
         });
     }
@@ -125,7 +147,7 @@ where
     for cell in &report.cells {
         let (status, counterexample) = if let Some(domain) = &cell.domain {
             domain_queries += 1;
-            //Never call set_ucp_value_facts/set_ucp_unique_cells on this analyzer.
+            // Ezen az analyzeren nem hívja a set_ucp_value_facts és set_ucp_unique_cells függvényt.
             let query = context.analyzer.query_private_domain_entailment_after_sat(
                 &context.analyzer_input,
                 &cell.cell,
@@ -167,6 +189,7 @@ where
         domain_queries,
         solver_checks,
         subset_checks,
+        solver_timeout_ms,
         elapsed: started.elapsed(),
     })
 }
@@ -176,6 +199,11 @@ impl fmt::Display for PrivateRecoveryValidationReport {
         writeln!(f, "Independent domain validation: {:?}; domain queries: {}; solver checks: {}; subset checks: {}; elapsed: {:?}",
             self.status, self.domain_queries, self.solver_checks, self.subset_checks, self.elapsed)?;
         writeln!(f, "Validation policy: {}", PRIVACY_VALIDATION_POLICY)?;
+        writeln!(
+            f,
+            "Validation solver timeout ms/invocation: {:?}",
+            self.solver_timeout_ms
+        )?;
         for cell in &self.cells {
             writeln!(
                 f,

@@ -25,7 +25,7 @@ pub(super) mod upstream {
     use zcash_halo2_proofs::pasta::Fp;
 
     // Unchanged excerpt from the pinned upstream benchmark; imports live in this adapter.
-    include!("external_fixtures/halo2_poseidon_benchmark_circuit.rs");
+    include!("fixtures/halo2_poseidon_benchmark_circuit.rs");
 
     pub(crate) fn original(message: [Fr; 2]) -> impl Circuit<Fr> {
         HashCircuit::<MySpec<3, 2>, 3, 2, 2> {

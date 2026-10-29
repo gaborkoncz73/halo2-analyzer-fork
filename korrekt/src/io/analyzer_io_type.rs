@@ -83,7 +83,7 @@ pub struct AnalyzerOutput {
 pub enum AnalyzerType {
     UnusedGates,
     UnconstrainedCells,
-    UnusedColumns,
+    UnusedColumns, 
     UnderconstrainedCircuit,
 }
 

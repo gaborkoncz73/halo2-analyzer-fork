@@ -1,30 +1,53 @@
+//Delta: lefedő domainek tárolása és kifejezések kiértékelése.
+//Az új tényeket levezető algoritmusok a value_inference.rs fájlban találhatók.
+//Az alábbi ábrahivatkozások a QED²-cikkre utalnak; az ábraszámok még ellenőrizendők.
+
 use super::{
     cell::CellId,
     expr::{UcpExpr, UcpScalar},
 };
+use anyhow::{ensure, Context, Result};
 use num_bigint::BigInt;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+// A következtető függvényeket a value modul elérési útján exportálja.
+#[path = "value_inference.rs"]
+mod inference;
+pub(crate) use inference::LinearDomains;
+#[cfg(test)]
+use inference::{
+    infer_base_conv_value_domains, infer_root_expression_domain, mod_field,
+    MAX_LINEAR_SYSTEM_CELLS, MAX_LINEAR_SYSTEM_EQUATIONS,
+};
+pub use inference::{
+    infer_domains_from_expression_domain, infer_domains_from_expression_domain_with_modulus,
+    infer_linear_system_values_with_modulus, infer_value_assignments_from_zero_equation,
+    infer_value_domains_from_zero_equation, infer_value_domains_from_zero_equation_with_modulus,
+};
+
+// Reprezentációs korlátnál nem tanul új domaint; a valódi lehetőségeket nem csonkítja.
 pub(crate) const MAX_FINITE_DOMAIN_SIZE: usize = 256;
-/// Covers the supported Halo2 fields while keeping stored integers explicitly bounded.
+/// A támogatott Halo2-testek értékei elférnek benne, de a tárolt egészek mérete korlátos marad.
 pub const MAX_VALUE_BITS: u64 = 4096;
-const MAX_LINEAR_SYSTEM_CELLS: usize = 64;
-const MAX_LINEAR_SYSTEM_EQUATIONS: usize = 256;
 
-//Enum a Domain konkrét értékeire (konkrét érték vagy tartomány)
+//Minden valóban lehetséges értéket lefed, de tartalmazhat még kizáratlan jelölteket is.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UcpValueDomain {
     Exact(BigInt),
+    //Explicit halmaz, nem intervallum: például {1,3} nem tartalmazza a 2-t.
     FiniteSet(BTreeSet<BigInt>),
 }
 
 //A cellákhoz rendelt domain-t tárolja
+//Hiányzó bejegyzés: nincs tárolt domain. Ez nem bizonyít sem egyértelműséget, sem titkosságot.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UcpValueFacts {
     domains: HashMap<CellId, UcpValueDomain>,
+    complete_domains: HashSet<CellId>,
 }
 
 //Enum az értékekhez
+//NonZero nem jelent egyetlen értéket: például a {3,7} domain is biztosan nem nulla.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueKind {
     Zero,
@@ -32,27 +55,21 @@ pub enum ValueKind {
     Unknown,
 }
 
-//Lineárisan felírható kifejezés
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct LinearExpr {
-    constant: BigInt,
-    terms: HashMap<CellId, BigInt>,
-}
-
 impl UcpValueDomain {
-    //Domain létrehozása konkrét értékkel
+    // Konkrét értékből egyelemű domaint készít.
     pub fn exact(value: BigInt) -> Self {
         Self::Exact(value)
     }
 
-    //Domain létrehozása a megadott tartománnyal
+    // A megadott értékekből véges domaint készít.
+    //Duplikátumokat töröl, az egyelemű halmazt Exact-tá alakítja; hibánál vagy üres halmaznál None.
     pub fn finite_set<I>(values: I) -> Option<Self>
     where
         I: IntoIterator<Item = BigInt>,
     {
         let mut set = BTreeSet::new();
 
-        //Biztonsági ellenőrzés
+        // A teljes halmaz felépítése közben ellenőrzi az érték- és elemszámkorlátot.
         for value in values {
             set.insert(bounded_value(value)?);
             if set.len() > MAX_FINITE_DOMAIN_SIZE {
@@ -75,7 +92,7 @@ impl UcpValueDomain {
         }
     }
 
-    //Megmondja, hogy tudjuk-e már biztosan
+    //Az egyeleműséget az Exact változat jelzi; a finite_set konstruktor biztosítja ezt az alakot.
     pub fn is_singleton(&self) -> bool {
         matches!(self, Self::Exact(_))
     }
@@ -88,7 +105,7 @@ impl UcpValueDomain {
         }
     }
 
-    //Visszaadja a domain legnagyobb lehetséges értékét, ha erre intervallumos feltételt akarunk ellenőrizni
+    // Visszaadja a domain legnagyobb értékét az intervallumos feltételek ellenőrzéséhez.
     pub fn max_value(&self) -> &BigInt {
         match self {
             Self::Exact(value) => value,
@@ -99,7 +116,7 @@ impl UcpValueDomain {
         }
     }
 
-    //Két domain metszetét adja vissza
+    // Visszaadja a két domain metszetét.
     fn intersect(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Exact(left), Self::Exact(right)) if left == right => {
@@ -137,18 +154,22 @@ impl UcpValueFacts {
         Self::default()
     }
 
-    //Kényelmi függvény a konkrét érték beállítására
-    //Igazat ad vissza, ha tanultunk újat és menjen még UCP kör
+    // A konkrét értéket egyelemű domainként jegyzi be.
+    // Új tény bejegyzésekor igazat ad vissza a következő UCP-kör jelzéséhez.
     pub fn mark_known(&mut self, cell: CellId, value: BigInt) -> bool {
         self.mark_domain(cell, UcpValueDomain::exact(value))
     }
 
-    //A domain beállítása
-    //Igazat ad vissza, ha tanultunk újat és menjen még UCP kör
+    // A megadott lefedő domaint az állapotba olvasztja.
+    // Új vagy szűkebb domain bejegyzésekor igazat ad vissza.
+    //Csak már igazolt lefedő domaint szabad átadni: ez a tároló nem ellenőriz kényszereket vagy SMT-t.
     pub fn mark_domain(&mut self, cell: CellId, domain: UcpValueDomain) -> bool {
-        //A megadott domain ellenőrzése
+        if self.domain_is_complete(&cell) {
+            return false;
+        }
+        // A bemeneti domain reprezentálhatóságát ellenőrzi.
         let domain = match domain {
-            //A bounded_value-ba esik-e
+            // A konkrét érték bitméretét ellenőrzi.
             UcpValueDomain::Exact(value) => UcpValueDomain::Exact(match bounded_value(value) {
                 Some(value) => value,
                 None => return false,
@@ -165,7 +186,8 @@ impl UcpValueFacts {
         //Megnézi, hogy a korábbi cellának volt-e már domain-je
         match self.domains.get(&cell) {
             Some(existing) => {
-                //Ha van megnézi a korábbi meg a mostani metszetét meg lehet-e határozni
+                // Meglévő domainnél a két halmaz metszetét képezi.
+                // Üres metszetet nem tárol; az engine külön vizsgálja az ellentmondást.
                 let Some(intersection) = existing.intersect(&domain) else {
                     return false;
                 };
@@ -178,7 +200,7 @@ impl UcpValueFacts {
                     true
                 }
             }
-            //Ha nem volt akkor a fent kapott lesz
+            // Meglévő bejegyzés hiányában felveszi az új domaint.
             None => {
                 self.domains.insert(cell, domain);
                 true
@@ -194,6 +216,73 @@ impl UcpValueFacts {
     //Visszaadja a tartományt
     pub fn domain(&self, cell: &CellId) -> Option<&UcpValueDomain> {
         self.domains.get(cell)
+    }
+
+    /// Kielégíthető premisszák mellett az egyelemű lefedő domain már teljes.
+    /// Az egyértelműség visszaállított érték nélkül nem igazolja a domain teljességét.
+    /// A false azt jelenti, hogy a teljesség nincs bizonyítva. Új premisszákhoz új elemzési állapot kell.
+    pub fn domain_is_complete(&self, cell: &CellId) -> bool {
+        self.domains
+            .get(cell)
+            .is_some_and(|domain| domain.is_singleton() || self.complete_domains.contains(cell))
+    }
+
+    /// A mintáknak ugyanazon eredeti kontextus kielégítő értékadásaiból kell származniuk.
+    //A W mintái belső, Delta jelöltjei külső közelítést adnak; egyezésük igazolja a teljességet.
+    pub(crate) fn mark_complete_from_samples(
+        &mut self,
+        cell: &CellId,
+        samples: &BTreeSet<BigInt>,
+        modulus: &BigInt,
+    ) -> Result<bool> {
+        let Some(domain) = self.domains.get(cell) else {
+            return Ok(false);
+        };
+        let entries: Vec<_> = match domain {
+            UcpValueDomain::Exact(value) => vec![value],
+            UcpValueDomain::FiniteSet(values) => values.iter().collect(),
+        };
+        let mut candidates = BTreeMap::new();
+        // Közös testbeli reprezentánsra normalizálja az értékeket; -1 és p-1 ugyanazt az elemet jelöli.
+        for value in entries {
+            let normalized = normalize_field_value(value.clone(), modulus)
+                .context("Unsupported complete-domain field value")?;
+            candidates
+                .entry(normalized)
+                .or_insert_with(|| value.clone());
+        }
+        let feasible: BTreeSet<_> = samples
+            .iter()
+            .map(|value| {
+                normalize_field_value(value.clone(), modulus)
+                    .context("Unsupported complete-domain sample")
+            })
+            .collect::<Result<_>>()?;
+        ensure!(
+            feasible.iter().all(|value| candidates.contains_key(value)),
+            "Recorded domain for {} excludes a proven feasible value",
+            cell
+        );
+        if feasible.len() != candidates.len() || feasible.is_empty() {
+            return Ok(false);
+        }
+        let canonical = UcpValueDomain::finite_set(candidates.into_values())
+            .context("Complete domain exceeds representation limits")?;
+        let changed = self.domains.get(cell) != Some(&canonical);
+        self.domains.insert(cell.clone(), canonical);
+        Ok(self.complete_domains.insert(cell.clone()) || changed)
+    }
+
+    /// Önálló másolatot készít a domainekről hipotetikus következtetéshez.
+    /// A másolatban törli a többértékű domainek teljességi jelöléseit, hogy azok
+    /// a vizsgált feltevés mellett szűkíthetők legyenek. Az eredeti állapotot nem módosítja.
+    /// Az egyelemű domaineket a domain_is_complete továbbra is teljesnek tekinti.
+    pub(crate) fn for_hypothetical_reasoning(&self) -> Self {
+        Self {
+            domains: self.domains.clone(),
+            // A másolatban engedi a többértékű teljes domain hipotetikus szűkítését; az eredeti állapotot nem módosítja.
+            complete_domains: HashSet::new(),
+        }
     }
 
     //Ellenőrzi, hogy a cellához tartozó domain teljesen a megadott intervallumba esik-e
@@ -221,7 +310,7 @@ impl UcpValueFacts {
     }
 }
 
-//Az analyzer input instance celláiból létrehozza a kezdeti Delta értékeket (Konkrét értékek)
+//Az elemző bemenetében megadott instance cellákból létrehozza a kezdeti konkrét Delta-értékeket.
 pub fn initial_values_from_instance_cells<'a, I, V>(instance_cells: I) -> UcpValueFacts
 where
     I: IntoIterator<Item = (&'a String, &'a V)>,
@@ -238,7 +327,8 @@ where
     values
 }
 
-//Megpróbál egy UCP expression-t konkrét értékre kiértékelni a már ismert Delta alapján
+//Megpróbál egy UCP-kifejezést konkrét értékre kiértékelni a már ismert Delta alapján.
+//Ez BigInt-aritmetika; a testmodulus szerinti normalizálást a modulusos domainfüggvények végzik.
 pub fn evaluate_expr(expr: &UcpExpr, values: &UcpValueFacts) -> Option<BigInt> {
     match expr {
         //Ha az adott cellához van konkrét érték, akkor megadja
@@ -255,13 +345,13 @@ pub fn evaluate_expr(expr: &UcpExpr, values: &UcpValueFacts) -> Option<BigInt> {
         UcpExpr::Mul(left, right) => {
             bounded_value(evaluate_expr(left, values)? * evaluate_expr(right, values)?)
         }
-        //Skálázásnál csak ismert skálával számolunk, kivéve ha a skála biztosan nulla
+        // Skálázásnál konkrét együtthatóval számol, vagy a biztos nulla eredményt ismeri fel.
         UcpExpr::Scale(inner, scalar) => match scalar {
             //Nullával szorzás mindig nulla
             UcpScalar::Zero => Some(BigInt::from(0)),
             //Konkrét skálánál kiszámolja a belső érték és a skála szorzatát
             UcpScalar::Known(scale) => bounded_value(evaluate_expr(inner, values)? * scale),
-            //Ismeretlen, de nem nulla skálánál csak akkor tudunk biztosat, ha a belső érték nulla
+            // Ismeretlen skálánál csak a nulla belső értékből ad konkrét eredményt.
             UcpScalar::NonZero | UcpScalar::Unknown => {
                 let inner_value = evaluate_expr(inner, values)?;
                 if inner_value == BigInt::from(0) {
@@ -274,12 +364,12 @@ pub fn evaluate_expr(expr: &UcpExpr, values: &UcpValueFacts) -> Option<BigInt> {
     }
 }
 
-//Fig. 9 Var/Const/Op: expression véges Delta domainjét számolja modulus nélkül
+//QED²-cikk 9. ábrája, Var/Const/Op: a kifejezés véges Delta-domainjét számolja modulus nélkül.
 pub fn expression_domain(expr: &UcpExpr, values: &UcpValueFacts) -> Option<UcpValueDomain> {
     expression_domain_with_optional_modulus(expr, values, None)
 }
 
-//Fig. 9 Var/Const/Op: expression véges Delta domainjét számolja a field modulus szerint
+//QED²-cikk 9. ábrája, Var/Const/Op: a kifejezés véges Delta-domainjét számolja a test modulusa szerint.
 pub fn expression_domain_with_modulus(
     expr: &UcpExpr,
     values: &UcpValueFacts,
@@ -288,7 +378,8 @@ pub fn expression_domain_with_modulus(
     expression_domain_with_optional_modulus(expr, values, Some(field_modulus))
 }
 
-//Fig. 9 közös motor: Var, Const és Op szabályok finite-setes kiértékelése
+// QED²-cikk 9. ábrája: a Var, Const és Op lépéseket közös végeshalmaz-kiértékelővel kezeli.
+//A műveleti eredmény is lefedő domain: a részfák közötti korrelációkat nem követi pontosan.
 fn expression_domain_with_optional_modulus(
     expr: &UcpExpr,
     values: &UcpValueFacts,
@@ -340,7 +431,7 @@ fn expression_domain_with_optional_modulus(
     }
 }
 
-//Bound stored integers, not machine words: field elements can exceed i64.
+//A tárolt egészek méretét korlátozza, nem gépi szavakat: a testelemek túlléphetik az i64 tartományát.
 pub(crate) fn bounded_value(value: BigInt) -> Option<BigInt> {
     if value.bits() <= MAX_VALUE_BITS {
         Some(value)
@@ -366,8 +457,8 @@ pub(crate) fn normalize_field_value(value: BigInt, modulus: &BigInt) -> Option<B
         normalized += modulus;
     }
 
-    //Signed reprezentánst használunk: p-1 például -1-ként tárolható,
-    //az analyzer SMT bridge később ezt újra visszanormalizálja field elemre.
+    // Előjeles reprezentánst használ: p-1 például -1-ként tárolható,
+    //az elemző SMT-illesztője később ezt újra testelemre normalizálja.
     if normalized > modulus / BigInt::from(2) {
         normalized -= modulus;
     }
@@ -379,6 +470,7 @@ fn finite_domain_from_values<I>(values: I, field_modulus: Option<&BigInt>) -> Op
 where
     I: IntoIterator<Item = BigInt>,
 {
+    // Normalizálás után szűri az ismétléseket; túl nagy eredménynél nem ad új domaint.
     let mut set = BTreeSet::new();
 
     for value in values {
@@ -426,6 +518,7 @@ where
     let left_values = domain_values(left);
     let right_values = domain_values(right);
 
+    // A Descartes-szorzat munkáját is korlátozza; None esetén nem állapít meg üres megoldáshalmazt.
     if left_values.len().saturating_mul(right_values.len()) > MAX_FINITE_DOMAIN_SIZE {
         return None;
     }
@@ -440,7 +533,7 @@ where
     finite_domain_from_values(values, field_modulus)
 }
 
-//Megmondja, hogy egy expression biztosan nulla, biztosan nem nulla, vagy ismeretlen
+//Megmondja, hogy egy kifejezés biztosan nulla, biztosan nem nulla, vagy ismeretlen.
 pub fn value_kind(expr: &UcpExpr, values: &UcpValueFacts) -> ValueKind {
     value_kind_with_optional_modulus(expr, values, None)
 }
@@ -453,6 +546,7 @@ fn value_kind_with_optional_modulus(
     if modulus.is_some_and(|modulus| modulus <= &BigInt::from(1)) {
         return ValueKind::Unknown;
     }
+    //Ha a teljes domain nem számolható ki, az algebrai nulla/nemnulla tulajdonság még felismerhető.
     if let Some(domain) = expression_domain_with_optional_modulus(expr, values, modulus) {
         domain.value_kind()
     } else {
@@ -494,806 +588,6 @@ fn value_kind_with_optional_modulus(
     }
 }
 
-//Fig. 10 dispatcher: null-egyenletből új Delta domain-eket tanul modulus nélkül
-pub fn infer_value_domains_from_zero_equation(
-    expr: &UcpExpr,
-    values: &UcpValueFacts,
-) -> Vec<(CellId, UcpValueDomain)> {
-    infer_value_domains_from_zero_equation_with_optional_modulus(expr, values, None)
-}
-
-//Fig. 10 dispatcher: null-egyenletből modulus-aware Delta domain-eket tanul
-pub fn infer_value_domains_from_zero_equation_with_modulus(
-    expr: &UcpExpr,
-    values: &UcpValueFacts,
-    field_modulus: &BigInt,
-) -> Vec<(CellId, UcpValueDomain)> {
-    infer_value_domains_from_zero_equation_with_optional_modulus(expr, values, Some(field_modulus))
-}
-
-//Fig. 10 közös hívási pont: Root, Assign, általános lineáris domain és Base-Conv futtatása
-fn infer_value_domains_from_zero_equation_with_optional_modulus(
-    expr: &UcpExpr,
-    values: &UcpValueFacts,
-    field_modulus: Option<&BigInt>,
-) -> Vec<(CellId, UcpValueDomain)> {
-    let mut inferences = Vec::new();
-
-    //Fig. 10 Root: szorzatgyökökből finite domain tanulása
-    if let Some((root_expr, domain)) = infer_root_expression_domain(expr, values, field_modulus) {
-        for (cell, domain) in infer_domains_from_expression_domain_with_optional_modulus(
-            root_expr,
-            &domain,
-            values,
-            field_modulus,
-        ) {
-            push_domain_inference(&mut inferences, cell, domain);
-        }
-    }
-
-    //Fig. 10 Assign: c*x-e=0 alakból konkrét érték tanulása, ha e konkrét
-    if let Some((cell, value)) = infer_from_zero_expr(expr, values, field_modulus) {
-        push_domain_inference(&mut inferences, cell, UcpValueDomain::exact(value));
-    }
-
-    //Fig. 10 Assign domain verzió: c*x-e=0 alakból finite domain tanulása, ha Delta(e) véges
-    for (cell, domain) in infer_linear_domains(expr, values, field_modulus) {
-        push_domain_inference(&mut inferences, cell, domain);
-    }
-
-    //Fig. 10 Base-Conv: c-alapú digitfelbontásból target-domain tanulása
-    for (cell, domain) in infer_base_conv_value_domains(expr, values, field_modulus) {
-        push_domain_inference(&mut inferences, cell, domain);
-    }
-
-    inferences
-}
-
-//Csak a konkrét értékű következtetéseket adja vissza
-pub fn infer_value_assignments_from_zero_equation(
-    expr: &UcpExpr,
-    values: &UcpValueFacts,
-) -> Vec<(CellId, BigInt)> {
-    infer_value_domains_from_zero_equation(expr, values)
-        .into_iter()
-        .filter_map(|(cell, domain)| match domain {
-            UcpValueDomain::Exact(value) => Some((cell, value)),
-            UcpValueDomain::FiniteSet(_) => None,
-        })
-        .collect()
-}
-
-//Konstans egyutthatos rendszereket old meg Delta szamara, akkor is, ha a cellak mar K-ban vannak.
-pub fn infer_linear_system_values_with_modulus(
-    expressions: &[UcpExpr],
-    values: &UcpValueFacts,
-    modulus: &BigInt,
-) -> Vec<(CellId, BigInt)> {
-    if modulus <= &BigInt::from(1) {
-        return Vec::new();
-    }
-
-    let mut equations = Vec::new();
-    let mut equations_by_cell: BTreeMap<CellId, Vec<usize>> = BTreeMap::new();
-    for expr in expressions {
-        let Some(mut linear) = linearize_field_system(expr, values) else {
-            continue;
-        };
-        linear.constant = mod_field(linear.constant, modulus);
-        for coefficient in linear.terms.values_mut() {
-            *coefficient = mod_field(coefficient.clone(), modulus);
-        }
-        linear
-            .terms
-            .retain(|_, coefficient| coefficient != &BigInt::from(0));
-        if linear.terms.is_empty() {
-            if linear.constant != BigInt::from(0) {
-                return Vec::new();
-            }
-            continue;
-        }
-        let index = equations.len();
-        for cell in linear.terms.keys() {
-            equations_by_cell
-                .entry(cell.clone())
-                .or_default()
-                .push(index);
-        }
-        equations.push(linear);
-    }
-
-    // A small full-rank subsystem can fix cells even if its larger component has free cells.
-    let mut groups: BTreeMap<Vec<CellId>, Vec<usize>> = BTreeMap::new();
-    for (index, equation) in equations
-        .iter()
-        .enumerate()
-        .take(MAX_LINEAR_SYSTEM_EQUATIONS)
-    {
-        if !(2..=MAX_LINEAR_SYSTEM_CELLS).contains(&equation.terms.len()) {
-            continue;
-        }
-        let mut cells: Vec<_> = equation.terms.keys().cloned().collect();
-        cells.sort();
-        groups.entry(cells).or_default().push(index);
-    }
-    let mut inferences = BTreeMap::new();
-    for (cells, indices) in groups {
-        if indices.len() >= cells.len() && indices.len() <= MAX_LINEAR_SYSTEM_EQUATIONS {
-            inferences.extend(solve_linear_subsystem(
-                &equations, &indices, &cells, values, modulus,
-            ));
-        }
-    }
-    //Fuggetlen komponenseket kulon oldunk meg; nagy rendszernel megmarad az SMT fallback.
-    let mut visited = HashSet::new();
-    for start in equations_by_cell.keys() {
-        if !visited.insert(start.clone()) {
-            continue;
-        }
-        let mut queue = VecDeque::from([start.clone()]);
-        let mut cells = BTreeSet::new();
-        let mut indices = BTreeSet::new();
-        while let Some(cell) = queue.pop_front() {
-            cells.insert(cell.clone());
-            for index in &equations_by_cell[&cell] {
-                if indices.insert(*index) {
-                    for next in equations[*index].terms.keys() {
-                        if visited.insert(next.clone()) {
-                            queue.push_back(next.clone());
-                        }
-                    }
-                }
-            }
-        }
-        if cells.len() > MAX_LINEAR_SYSTEM_CELLS
-            || indices.len() > MAX_LINEAR_SYSTEM_EQUATIONS
-            || indices.len() < cells.len()
-        {
-            continue;
-        }
-
-        let cells: Vec<_> = cells.into_iter().collect();
-        inferences.extend(solve_linear_subsystem(
-            &equations,
-            &indices.into_iter().collect::<Vec<_>>(),
-            &cells,
-            values,
-            modulus,
-        ));
-    }
-    inferences.into_iter().collect()
-}
-
-fn solve_linear_subsystem(
-    equations: &[LinearExpr],
-    indices: &[usize],
-    cells: &[CellId],
-    values: &UcpValueFacts,
-    modulus: &BigInt,
-) -> Vec<(CellId, BigInt)> {
-    let matrix = indices
-        .iter()
-        .map(|index| {
-            let equation = &equations[*index];
-            let mut row: Vec<_> = cells
-                .iter()
-                .map(|cell| {
-                    equation
-                        .terms
-                        .get(cell)
-                        .cloned()
-                        .unwrap_or_else(|| BigInt::from(0))
-                })
-                .collect();
-            row.push(mod_field(-equation.constant.clone(), modulus));
-            row
-        })
-        .collect();
-    let Some(solution) = solve_field_system(matrix, cells.len(), modulus) else {
-        return Vec::new();
-    };
-    //A megoldasnak az eddig bizonyitott domainekkel is osszeferhetonek kell lennie.
-    if cells.iter().zip(&solution).any(|(cell, value)| {
-        values.domain(cell).is_some_and(|domain| {
-            !domain_values(domain)
-                .iter()
-                .any(|candidate| mod_field(candidate.clone(), modulus) == *value)
-        })
-    }) {
-        return Vec::new();
-    }
-    cells
-        .iter()
-        .cloned()
-        .zip(solution)
-        .filter_map(|(cell, value)| {
-            normalize_field_value(value, modulus).map(|value| (cell, value))
-        })
-        .collect()
-}
-
-fn solve_field_system(
-    mut matrix: Vec<Vec<BigInt>>,
-    columns: usize,
-    modulus: &BigInt,
-) -> Option<Vec<BigInt>> {
-    //A bovitetett matrixon a jobb oldalt is ugyanazokkal a sormuveletekkel alakitjuk.
-    for column in 0..columns {
-        let pivot = (column..matrix.len()).find(|row| matrix[*row][column] != BigInt::from(0))?;
-        matrix.swap(column, pivot);
-        let inverse = mod_inverse(&matrix[column][column], modulus)?;
-        for entry in &mut matrix[column][column..=columns] {
-            *entry = mod_field(entry.clone() * &inverse, modulus);
-        }
-        for row in 0..matrix.len() {
-            if row == column || matrix[row][column] == BigInt::from(0) {
-                continue;
-            }
-            let factor = matrix[row][column].clone();
-            for col in column..=columns {
-                matrix[row][col] = mod_field(
-                    matrix[row][col].clone() - &factor * &matrix[column][col],
-                    modulus,
-                );
-            }
-        }
-    }
-    if matrix[columns..]
-        .iter()
-        .any(|row| row[columns] != BigInt::from(0))
-    {
-        return None;
-    }
-    Some(
-        (0..columns)
-            .map(|column| matrix[column][columns].clone())
-            .collect(),
-    )
-}
-
-fn linearize_field_system(expr: &UcpExpr, values: &UcpValueFacts) -> Option<LinearExpr> {
-    //A koefficiensek teljes field elemek lehetnek; csak a vegso Delta erteket korlatozzuk.
-    match expr {
-        UcpExpr::Var(cell) => Some(match values.known_value(cell) {
-            Some(value) => LinearExpr::constant(value.clone()),
-            None => LinearExpr::term(cell.clone(), BigInt::from(1)),
-        }),
-        UcpExpr::Const(scalar) => Some(LinearExpr::constant(scalar.as_known()?)),
-        UcpExpr::Neg(inner) => Some(linearize_field_system(inner, values)?.scale(BigInt::from(-1))),
-        UcpExpr::Add(left, right) => {
-            Some(linearize_field_system(left, values)?.add(linearize_field_system(right, values)?))
-        }
-        UcpExpr::Mul(left, right) => {
-            let left = linearize_field_system(left, values)?;
-            let right = linearize_field_system(right, values)?;
-            if left.terms.is_empty() {
-                Some(right.scale(left.constant))
-            } else if right.terms.is_empty() {
-                Some(left.scale(right.constant))
-            } else {
-                None
-            }
-        }
-        UcpExpr::Scale(_, UcpScalar::Zero) => Some(LinearExpr::constant(BigInt::from(0))),
-        UcpExpr::Scale(inner, scalar) => {
-            Some(linearize_field_system(inner, values)?.scale(scalar.as_known()?))
-        }
-    }
-}
-
-//Fig. 9/lookup bridge: külső Omega domainből lineáris expression bemeneti celladomaineket tanul
-pub fn infer_domains_from_expression_domain(
-    expr: &UcpExpr,
-    expr_domain: &UcpValueDomain,
-    values: &UcpValueFacts,
-) -> Vec<(CellId, UcpValueDomain)> {
-    infer_domains_from_expression_domain_with_optional_modulus(expr, expr_domain, values, None)
-}
-
-//Fig. 9/lookup bridge modulusosan: c*x inverzét fieldben tudjuk venni
-pub fn infer_domains_from_expression_domain_with_modulus(
-    expr: &UcpExpr,
-    expr_domain: &UcpValueDomain,
-    values: &UcpValueFacts,
-    field_modulus: &BigInt,
-) -> Vec<(CellId, UcpValueDomain)> {
-    infer_domains_from_expression_domain_with_optional_modulus(
-        expr,
-        expr_domain,
-        values,
-        Some(field_modulus),
-    )
-}
-
-fn infer_domains_from_expression_domain_with_optional_modulus(
-    expr: &UcpExpr,
-    expr_domain: &UcpValueDomain,
-    values: &UcpValueFacts,
-    field_modulus: Option<&BigInt>,
-) -> Vec<(CellId, UcpValueDomain)> {
-    let Some(linear) = linearize(expr, values) else {
-        return Vec::new();
-    };
-
-    let mut inferences = Vec::new();
-
-    for (cell, coefficient) in &linear.terms {
-        if coefficient == &BigInt::from(0) {
-            continue;
-        }
-
-        let Some(domain) = solve_linear_domain_for_cell_with_rhs(
-            &linear,
-            cell,
-            coefficient,
-            expr_domain,
-            values,
-            field_modulus,
-        ) else {
-            continue;
-        };
-
-        push_domain_inference(&mut inferences, cell.clone(), domain);
-    }
-
-    inferences
-}
-
-fn push_domain_inference(
-    inferences: &mut Vec<(CellId, UcpValueDomain)>,
-    cell: CellId,
-    domain: UcpValueDomain,
-) {
-    if let Some((_, existing_domain)) = inferences
-        .iter_mut()
-        .find(|(existing_cell, _)| existing_cell == &cell)
-    {
-        if let Some(intersection) = existing_domain.intersect(&domain) {
-            *existing_domain = intersection;
-        }
-    } else {
-        inferences.push((cell, domain));
-    }
-}
-
-//Fig. 10 Root on an affine expression: product(e - c_i) = 0 implies e in {c_i}.
-fn infer_root_expression_domain<'a>(
-    expr: &'a UcpExpr,
-    values: &UcpValueFacts,
-    field_modulus: Option<&BigInt>,
-) -> Option<(&'a UcpExpr, UcpValueDomain)> {
-    let mut factors = Vec::new();
-    collect_product_factors(expr, &mut factors, field_modulus);
-
-    if factors.len() < 2 {
-        return None;
-    }
-
-    let first = *factors.first()?;
-    let common = linearize(first, values)?;
-    if common.terms.is_empty() {
-        return None;
-    }
-    let mut roots = Vec::new();
-
-    for factor in factors {
-        let linear = linearize(factor, values)?;
-        //Allow both e-c and c-e, as used by the upstream polynomial range gadget.
-        if linear.terms == common.terms {
-            roots.push(&common.constant - linear.constant);
-        } else if linear.terms.len() == common.terms.len()
-            && linear.terms.iter().all(|(cell, coefficient)| {
-                common
-                    .terms
-                    .get(cell)
-                    .is_some_and(|other| coefficient == &-other)
-            })
-        {
-            roots.push(&common.constant + linear.constant);
-        } else {
-            return None;
-        }
-    }
-
-    Some((first, finite_domain_from_values(roots, field_modulus)?))
-}
-
-//Szorzatot faktorokra bont, hogy a root szabály felismerhető legyen
-//Például: [x,x-1,x-2]
-fn collect_product_factors<'a>(
-    expr: &'a UcpExpr,
-    factors: &mut Vec<&'a UcpExpr>,
-    modulus: Option<&BigInt>,
-) {
-    match expr {
-        UcpExpr::Mul(left, right) => {
-            collect_product_factors(left, factors, modulus);
-            collect_product_factors(right, factors, modulus);
-        }
-        UcpExpr::Neg(inner) => collect_product_factors(inner, factors, modulus),
-        UcpExpr::Scale(_, UcpScalar::Known(scale)) if scale == &BigInt::from(0) => {
-            factors.push(expr)
-        }
-        UcpExpr::Scale(inner, scalar) if scalar.is_non_zero_with_modulus(modulus) => {
-            collect_product_factors(inner, factors, modulus)
-        }
-        //A zero factor makes the equation tautological; retain it so Root rejects the product.
-        UcpExpr::Scale(_, UcpScalar::Zero) => factors.push(expr),
-        _ => factors.push(expr),
-    }
-}
-
-//Fig. 10 Assign előszűrő: nemnulla szorzótényezők mellett konkrét cellaértéket tanul
-fn infer_from_zero_expr(
-    expr: &UcpExpr,
-    values: &UcpValueFacts,
-    modulus: Option<&BigInt>,
-) -> Option<(CellId, BigInt)> {
-    match expr {
-        UcpExpr::Scale(_, UcpScalar::Known(scale)) if scale == &BigInt::from(0) => None,
-        UcpExpr::Mul(left, right) => match (
-            value_kind_with_optional_modulus(left, values, modulus),
-            value_kind_with_optional_modulus(right, values, modulus),
-        ) {
-            (ValueKind::NonZero, _) => infer_from_zero_expr(right, values, modulus),
-            (_, ValueKind::NonZero) => infer_from_zero_expr(left, values, modulus),
-            (ValueKind::Zero, _) | (_, ValueKind::Zero) => None,
-            _ => infer_linear_assignment(expr, values, modulus),
-        },
-        UcpExpr::Scale(inner, scalar) if scalar.is_non_zero_with_modulus(modulus) => {
-            infer_from_zero_expr(inner, values, modulus)
-        }
-        UcpExpr::Scale(_, UcpScalar::Zero) => None,
-        _ => infer_linear_assignment(expr, values, modulus),
-    }
-}
-
-//Fig. 10 Assign konkrét verzió: lineáris null-egyenletet old meg egy ismeretlen cellára
-fn infer_linear_assignment(
-    expr: &UcpExpr,
-    values: &UcpValueFacts,
-    modulus: Option<&BigInt>,
-) -> Option<(CellId, BigInt)> {
-    let linear = linearize(expr, values)?;
-
-    if linear.terms.len() != 1 {
-        return None;
-    }
-
-    let (cell, coefficient) = linear.terms.into_iter().next().unwrap();
-    if coefficient == BigInt::from(0) {
-        return None;
-    }
-
-    let numerator = -linear.constant;
-    Some((cell, solve_linear_value(&numerator, &coefficient, modulus)?))
-}
-
-//Fig. 10 Assign domain verzió: lineáris null-egyenletből finite domaint tanul célcellákra
-fn infer_linear_domains(
-    expr: &UcpExpr,
-    values: &UcpValueFacts,
-    field_modulus: Option<&BigInt>,
-) -> Vec<(CellId, UcpValueDomain)> {
-    let Some(linear) = linearize(expr, values) else {
-        return Vec::new();
-    };
-
-    let mut inferences = Vec::new();
-
-    for (cell, coefficient) in &linear.terms {
-        if coefficient == &BigInt::from(0) {
-            continue;
-        }
-
-        let Some(domain) =
-            solve_linear_domain_for_cell(&linear, cell, coefficient, values, field_modulus)
-        else {
-            continue;
-        };
-
-        inferences.push((cell.clone(), domain));
-    }
-
-    inferences
-}
-
-//Fig. 10 Base-Conv value rule: y0 + c*y1 + ... + c^n*yn - x = 0 esetén
-//ha minden yi domainje [0, c-1]-ben van, akkor x domainje [0, c^(n+1)-1].
-//Intervallum domainünk nincs, ezért csak akkor tanulunk, ha ez explicit finite setként kicsi marad.
-fn infer_base_conv_value_domains(
-    expr: &UcpExpr,
-    values: &UcpValueFacts,
-    field_modulus: Option<&BigInt>,
-) -> Vec<(CellId, UcpValueDomain)> {
-    let Some(linear) = linearize(expr, values) else {
-        return Vec::new();
-    };
-
-    if linear.constant != BigInt::from(0) {
-        return Vec::new();
-    }
-
-    let mut inferences = Vec::new();
-
-    for (target, target_coefficient) in &linear.terms {
-        if !is_plus_or_minus_one(target_coefficient) {
-            continue;
-        }
-
-        let Some(domain) = infer_base_conv_value_domain_for_target(
-            &linear,
-            target,
-            target_coefficient,
-            values,
-            field_modulus,
-        ) else {
-            continue;
-        };
-
-        push_domain_inference(&mut inferences, target.clone(), domain);
-    }
-
-    inferences
-}
-
-//Fig. 10 Base-Conv konkrét targetre: felismeri az 1,c,c^2,... coefficient mintát
-fn infer_base_conv_value_domain_for_target(
-    linear: &LinearExpr,
-    target: &CellId,
-    target_coefficient: &BigInt,
-    values: &UcpValueFacts,
-    field_modulus: Option<&BigInt>,
-) -> Option<UcpValueDomain> {
-    let mut digits_with_coefficients = Vec::new();
-
-    for (cell, coefficient) in &linear.terms {
-        if cell == target {
-            continue;
-        }
-
-        let digit_coefficient = -coefficient * target_coefficient;
-        if digit_coefficient <= BigInt::from(0) {
-            return None;
-        }
-
-        digits_with_coefficients.push((cell.clone(), digit_coefficient));
-    }
-
-    let (base, digits) = parse_base_conv_digit_powers(digits_with_coefficients)?;
-    let max_digit = &base - BigInt::from(1);
-
-    if digits
-        .iter()
-        .any(|digit| !values.domain_is_subset_of_range(digit, &BigInt::from(0), &max_digit))
-    {
-        return None;
-    }
-
-    let domain_size = pow_bigint(&base, digits.len());
-    if domain_size <= BigInt::from(0) || domain_size > BigInt::from(MAX_FINITE_DOMAIN_SIZE as i64) {
-        return None;
-    }
-
-    let mut domain_values = Vec::new();
-    let mut value = BigInt::from(0);
-    while value < domain_size {
-        domain_values.push(value.clone());
-        value += 1;
-    }
-
-    finite_domain_from_values(domain_values, field_modulus)
-}
-
-//Fig. 10 Base-Conv segéd: ellenőrzi, hogy a coefficientek pontosan c hatványai
-fn parse_base_conv_digit_powers(
-    mut digits_with_coefficients: Vec<(CellId, BigInt)>,
-) -> Option<(BigInt, Vec<CellId>)> {
-    if digits_with_coefficients.len() < 2 {
-        return None;
-    }
-
-    digits_with_coefficients.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
-
-    if digits_with_coefficients[0].1 != BigInt::from(1) {
-        return None;
-    }
-
-    let base = digits_with_coefficients[1].1.clone();
-    if base <= BigInt::from(1) {
-        return None;
-    }
-
-    let mut expected = BigInt::from(1);
-    let mut digits = Vec::with_capacity(digits_with_coefficients.len());
-
-    for (digit, coefficient) in digits_with_coefficients {
-        if coefficient != expected {
-            return None;
-        }
-
-        digits.push(digit);
-        expected *= &base;
-    }
-
-    Some((base, digits))
-}
-
-fn pow_bigint(base: &BigInt, exponent: usize) -> BigInt {
-    let mut result = BigInt::from(1);
-    for _ in 0..exponent {
-        result *= base;
-    }
-    result
-}
-
-fn is_plus_or_minus_one(value: &BigInt) -> bool {
-    value == &BigInt::from(1) || value == &BigInt::from(-1)
-}
-
-//Fig. 10 Assign segéd: target cella domainjét oldja meg nulla jobb oldal mellett
-fn solve_linear_domain_for_cell(
-    linear: &LinearExpr,
-    target: &CellId,
-    coefficient: &BigInt,
-    values: &UcpValueFacts,
-    field_modulus: Option<&BigInt>,
-) -> Option<UcpValueDomain> {
-    solve_linear_domain_for_cell_with_rhs(
-        linear,
-        target,
-        coefficient,
-        &UcpValueDomain::exact(BigInt::from(0)),
-        values,
-        field_modulus,
-    )
-}
-
-//Fig. 10 Assign/lookup segéd: target cella domainjét oldja meg tetszőleges véges jobb oldal mellett
-fn solve_linear_domain_for_cell_with_rhs(
-    linear: &LinearExpr,
-    target: &CellId,
-    coefficient: &BigInt,
-    rhs_domain: &UcpValueDomain,
-    values: &UcpValueFacts,
-    field_modulus: Option<&BigInt>,
-) -> Option<UcpValueDomain> {
-    let mut rest_values = vec![normalize_value(linear.constant.clone(), field_modulus)?];
-
-    for (cell, term_coefficient) in &linear.terms {
-        if cell == target {
-            continue;
-        }
-
-        let domain = values.domain(cell)?;
-        let term_values = domain_values(domain);
-
-        if rest_values.len().saturating_mul(term_values.len()) > MAX_FINITE_DOMAIN_SIZE {
-            return None;
-        }
-
-        let mut next_values = Vec::with_capacity(rest_values.len() * term_values.len());
-        for rest in &rest_values {
-            for value in &term_values {
-                next_values.push(normalize_value(
-                    rest + term_coefficient * value,
-                    field_modulus,
-                )?);
-            }
-        }
-        rest_values = next_values;
-    }
-
-    let rhs_values = domain_values(rhs_domain);
-    if rhs_values.len().saturating_mul(rest_values.len()) > MAX_FINITE_DOMAIN_SIZE {
-        return None;
-    }
-
-    let mut solved_values = Vec::with_capacity(rhs_values.len() * rest_values.len());
-    for rhs in &rhs_values {
-        for rest in &rest_values {
-            solved_values.push(solve_linear_value(
-                &(rhs - rest),
-                coefficient,
-                field_modulus,
-            )?);
-        }
-    }
-
-    finite_domain_from_values(solved_values, field_modulus)
-}
-
-fn solve_linear_value(
-    numerator: &BigInt,
-    coefficient: &BigInt,
-    field_modulus: Option<&BigInt>,
-) -> Option<BigInt> {
-    match field_modulus {
-        Some(modulus) => {
-            if modulus <= &BigInt::from(1) {
-                return None;
-            }
-            let inverse = mod_inverse(coefficient, modulus)?;
-            normalize_value(numerator * inverse, Some(modulus))
-        }
-        None => {
-            if coefficient == &BigInt::from(0) {
-                return None;
-            }
-            if numerator % coefficient != BigInt::from(0) {
-                return None;
-            }
-            bounded_value(numerator / coefficient)
-        }
-    }
-}
-
-fn mod_inverse(value: &BigInt, modulus: &BigInt) -> Option<BigInt> {
-    let mut t = BigInt::from(0);
-    let mut new_t = BigInt::from(1);
-    let mut r = modulus.clone();
-    let mut new_r = mod_field(value.clone(), modulus);
-
-    while new_r != BigInt::from(0) {
-        let quotient = &r / &new_r;
-
-        let old_t = t;
-        t = new_t.clone();
-        new_t = old_t - &quotient * &new_t;
-
-        let old_r = r;
-        r = new_r.clone();
-        new_r = old_r - quotient * new_r;
-    }
-
-    if r != BigInt::from(1) {
-        return None;
-    }
-
-    Some(mod_field(t, modulus))
-}
-
-fn mod_field(value: BigInt, modulus: &BigInt) -> BigInt {
-    let mut value = value % modulus;
-    if value < BigInt::from(0) {
-        value += modulus;
-    }
-    value
-}
-
-//UcpExpr-ből lineáris alakot készít: constant + coefficient * cell + ...
-fn linearize(expr: &UcpExpr, values: &UcpValueFacts) -> Option<LinearExpr> {
-    if let Some(value) = evaluate_expr(expr, values) {
-        return Some(LinearExpr::constant(value));
-    }
-
-    match expr {
-        UcpExpr::Var(cell) => Some(LinearExpr::term(cell.clone(), BigInt::from(1))),
-        UcpExpr::Const(_) => None,
-        UcpExpr::Neg(inner) => {
-            linearize(inner, values).map(|linear| linear.scale(BigInt::from(-1)))
-        }
-        UcpExpr::Add(left, right) => Some(linearize(left, values)?.add(linearize(right, values)?)),
-        UcpExpr::Mul(left, right) => {
-            if let Some(value) = evaluate_expr(left, values) {
-                return Some(linearize(right, values)?.scale(value));
-            }
-            if let Some(value) = evaluate_expr(right, values) {
-                return Some(linearize(left, values)?.scale(value));
-            }
-            None
-        }
-        UcpExpr::Scale(inner, scalar) => match scalar {
-            UcpScalar::Zero => Some(LinearExpr::constant(BigInt::from(0))),
-            UcpScalar::Known(scale) => {
-                Some(linearize(inner, values)?.scale(bounded_value(scale.clone())?))
-            }
-            UcpScalar::NonZero | UcpScalar::Unknown => None,
-        },
-    }
-}
-
-//String cellanévből CellId-t készít, például "I-0-0" -> instance(0, 0)
 pub(crate) fn parse_cell_id(name: &str) -> Option<CellId> {
     let mut parts = name.split('-');
     let kind = parts.next()?;
@@ -1309,47 +603,6 @@ pub(crate) fn parse_cell_id(name: &str) -> Option<CellId> {
         "I" => Some(CellId::instance(column, row)),
         "F" => Some(CellId::fixed(column, row)),
         _ => None,
-    }
-}
-
-impl LinearExpr {
-    //Konstans lineáris kifejezést hoz létre
-    fn constant(value: BigInt) -> Self {
-        Self {
-            constant: value,
-            terms: HashMap::new(),
-        }
-    }
-
-    //Egy darab cellatagot hoz létre a megadott együtthatóval
-    fn term(cell: CellId, coefficient: BigInt) -> Self {
-        Self {
-            constant: BigInt::from(0),
-            terms: HashMap::from([(cell, coefficient)]),
-        }
-    }
-
-    //Két lineáris kifejezést összead, az azonos cellák együtthatóit összevonva
-    fn add(mut self, other: Self) -> Self {
-        self.constant += other.constant;
-        for (cell, coefficient) in other.terms {
-            let entry = self.terms.entry(cell).or_insert_with(|| BigInt::from(0));
-            *entry += coefficient;
-        }
-        self.terms
-            .retain(|_, coefficient| coefficient != &BigInt::from(0));
-        self
-    }
-
-    //Lineáris kifejezést beszoroz egy skalárral
-    fn scale(mut self, scalar: BigInt) -> Self {
-        self.constant *= &scalar;
-        for coefficient in self.terms.values_mut() {
-            *coefficient *= &scalar;
-        }
-        self.terms
-            .retain(|_, coefficient| coefficient != &BigInt::from(0));
-        self
     }
 }
 
@@ -1377,7 +630,7 @@ mod tests {
         ]
     }
 
-    //Az egyenkenti Assign elakadna, de a ket egyenlet egyutt x=6,y=4-et ad.
+    // A teszt ellenőrzi, hogy a két egyenletet együtt megoldja x=6,y=4-re, ahol az egyenkénti Assign elakad.
     #[test]
     fn solves_coupled_linear_values() {
         let x = CellId::advice(0, 0);
@@ -1392,7 +645,7 @@ mod tests {
         );
     }
 
-    //Nem valasztunk tetszoleges modellt, ha a rang hianyos vagy az extra sor ellentmond.
+    // A teszt ellenőrzi, hogy ranghiánynál vagy ellentmondó további sornál nem választ tetszőleges modellt.
     #[test]
     fn rejects_singular_and_inconsistent_linear_systems() {
         let x = CellId::advice(0, 0);
@@ -1420,7 +673,7 @@ mod tests {
         .is_empty());
     }
 
-    //A p-1 koefficiens -1-et jelent akkor is, ha a pozitiv reprezentans nem fer i64-be.
+    // A teszt ellenőrzi, hogy a p-1 együtthatót -1-ként kezeli az i64-en túli reprezentánsnál is.
     #[test]
     fn solves_with_large_field_coefficients() {
         let modulus = (BigInt::from(1) << 127usize) - BigInt::from(1);
@@ -1454,7 +707,7 @@ mod tests {
         .is_empty());
     }
 
-    //A nagy komponens koltsegkorlatja nem akadalyozza a fuggetlen kis rendszer megoldasat.
+    // A teszt ellenőrzi, hogy nagy komponens korlátja mellett is megoldja a független kis rendszert.
     #[test]
     fn limits_large_components_but_solves_small_independent_ones() {
         let count = MAX_LINEAR_SYSTEM_CELLS + 1;
@@ -1487,7 +740,7 @@ mod tests {
         let x = CellId::advice(0, 0);
         let y = CellId::advice(1, 0);
         let mut equations = coupled_equations(&x, &y, 10, 2);
-        // x+y=10 and x-y=2 fix x,y; adding x+z+w=0 leaves z,w ambiguous.
+        //Az x+y=10 és x-y=2 rögzíti x és y értékét; az x+z+w=0 mellett z és w nem egyértelmű.
         equations.push(UcpExpr::add(
             UcpExpr::var(x.clone()),
             UcpExpr::add(
@@ -1544,7 +797,7 @@ mod tests {
                 )
             })
             .collect();
-        // The useful pair is beyond the local search budget; the full component is oversized.
+        //A hasznos egyenletpár már a helyi keresési kereten kívül van; a teljes komponens túl nagy.
         equations.extend(coupled_equations(&x, &y, 10, 2));
         assert!(infer_linear_system_values_with_modulus(
             &equations,
@@ -1605,7 +858,7 @@ mod tests {
         }
     }
 
-    //Both large and small coordinates survive: an i64 bound must not drop a field solution.
+    //A nagy és kis értékek is megmaradnak: az i64 korlátja nem zárhat ki testbeli megoldást.
     #[test]
     fn solves_values_beyond_i64_alongside_small_signed_solutions() {
         let modulus = (BigInt::from(1) << 127usize) - BigInt::from(1);
@@ -1657,7 +910,7 @@ mod tests {
         let x = CellId::advice(0, 0);
         let root = BigInt::from(1) << 200usize;
         let modulus = (BigInt::from(1) << 521usize) - BigInt::from(1);
-        // (x - 2^200) * (x - (2^200 + 2)) = 0 permits two roots, not their midpoint.
+        //Az (x - 2^200) * (x - (2^200 + 2)) = 0 két gyököt enged meg, nem a középpontjukat.
         let expression = UcpExpr::mul(
             UcpExpr::add(UcpExpr::var(x.clone()), UcpExpr::known_constant(-&root)),
             UcpExpr::add(
@@ -1679,7 +932,7 @@ mod tests {
         assert_eq!(values.known_value(&x), Some(&(&root + 2)));
     }
 
-    //Azt ellenőrzi, hogy ismert értékekkel egy egyszerű aritmetikai expression kiértékelhető
+    //Azt ellenőrzi, hogy ismert értékekkel egy egyszerű aritmetikai kifejezés kiértékelhető.
     #[test]
     fn evaluates_known_arithmetic_expression() {
         let x = CellId::instance(0, 0);
@@ -1691,7 +944,7 @@ mod tests {
         assert_eq!(value_kind(&expr, &values), ValueKind::NonZero);
     }
 
-    //Azt ellenőrzi, hogy nonzero * y = 0 alakból y = 0 következik
+    //Azt ellenőrzi, hogy nem nulla szorzótényező mellett a c * y = 0 alakból y = 0 következik.
     #[test]
     fn learns_zero_from_nonzero_product_equation() {
         let x = CellId::instance(0, 0);
@@ -1749,7 +1002,7 @@ mod tests {
 
     #[test]
     fn root_rule_handles_opposite_sign_factors() {
-        //The library uses b*(1-b), rather than b*(b-1).
+        //A könyvtár a b*(1-b) alakot használja a b*(b-1) helyett.
         let b = CellId::advice(0, 0);
         let expr = UcpExpr::mul(
             UcpExpr::var(b.clone()),
@@ -1766,7 +1019,7 @@ mod tests {
 
     #[test]
     fn affine_root_projection_covers_every_small_field_solution() {
-        //A shifted first factor and reversed-sign second factor test the shared-expression identity.
+        //Az eltolt első és az ellentétes előjelű második tényező a közös kifejezés felismerését teszteli.
         let x = CellId::advice(0, 0);
         let y = CellId::advice(1, 0);
         let word = UcpExpr::add(
@@ -1821,7 +1074,7 @@ mod tests {
 
     #[test]
     fn root_rule_does_not_drop_a_zero_factor() {
-        //Raw enum construction intentionally bypasses the constructor's zero simplification.
+        //A közvetlen enum-létrehozás szándékosan megkerüli a konstruktor nullával való egyszerűsítését.
         let x = UcpExpr::var(CellId::advice(0, 0));
         for scalar in [UcpScalar::Zero, UcpScalar::Known(BigInt::from(0))] {
             let zero = UcpExpr::Scale(Box::new(x.clone()), scalar);
@@ -1850,7 +1103,7 @@ mod tests {
         assert!(infer_root_expression_domain(&product, &UcpValueFacts::new(), None).is_none());
     }
 
-    //Azt ellenőrzi, hogy két domain metszete szűkítheti a boolean domaint konkrét értékre
+    //Azt ellenőrzi, hogy két domain metszete szűkítheti a logikai értéktartományt konkrét értékre.
     #[test]
     fn intersecting_domain_can_refine_boolean_to_exact_value() {
         let b = CellId::advice(0, 0);
@@ -1862,7 +1115,7 @@ mod tests {
         assert_eq!(values.known_value(&b), Some(&BigInt::from(1)));
     }
 
-    //Azt ellenőrzi, hogy egy finite domain teljesen beleesik-e egy adott intervallumba
+    //Azt ellenőrzi, hogy egy véges domain teljesen beleesik-e egy adott intervallumba.
     #[test]
     fn finite_domain_can_be_checked_against_digit_range() {
         let b = CellId::advice(0, 0);
@@ -1875,7 +1128,7 @@ mod tests {
         assert!(!values.domain_is_subset_of_range(&b, &BigInt::from(1), &BigInt::from(9)));
     }
 
-    //Azt ellenőrzi, hogy a Fig. 9 szerinti expression-domain szabályok működnek finite domainekkel
+    //QED²-cikk 9. ábrája, Var/Const/Op: a véges kifejezésdomainek kiértékelését teszteli.
     #[test]
     fn expression_domain_combines_finite_sets() {
         let x = CellId::advice(0, 0);
@@ -1918,7 +1171,7 @@ mod tests {
         assert_eq!(inferences, vec![(x, finite_domain(&[1, 2]))]);
     }
 
-    //Azt ellenőrzi, hogy c*x - e = 0 esetén modulus mellett c inverzével számolunk
+    // A teszt ellenőrzi, hogy c*x-e=0 esetén a testben c inverzével számol.
     #[test]
     fn scaled_linear_equation_uses_field_modulus_for_domain_division() {
         let b = CellId::advice(0, 0);
@@ -1937,7 +1190,7 @@ mod tests {
         assert_eq!(inferences, vec![(x, finite_domain(&[0, 1]))]);
     }
 
-    //Azt ellenőrzi, hogy lookup-szerű e in Omega feltételből is tudunk cella-domaint tanulni
+    // A teszt ellenőrzi, hogy az e in Omega tagsági feltételből celladomaint következtet.
     #[test]
     fn expression_membership_learns_affine_input_domain() {
         let x = CellId::advice(0, 0);
@@ -1950,7 +1203,8 @@ mod tests {
         assert_eq!(inferences, vec![(x, finite_domain(&[0, 1, 2]))]);
     }
 
-    //Azt ellenőrzi, hogy a Fig. 10 Base-Conv value szabály explicit finite domainként tanulja x tartományát
+    //QED²-cikk 10. ábrája, Base-Conv: a számjegyes alakhoz kapcsolódó domainkövetkeztetést teszteli.
+    // A számjegykorlátokból x lefedő domainjét képezi; a számjegyek egyértelműségét itt nem bizonyítja.
     #[test]
     fn base_conv_value_rule_learns_target_range_as_finite_set() {
         let x = CellId::advice(0, 0);
@@ -1982,7 +1236,7 @@ mod tests {
         );
     }
 
-    //Azt ellenőrzi, hogy túl nagy base-conv tartományt nem listázunk ki finite setként
+    // A teszt ellenőrzi, hogy túl nagy számjegytartományt nem sorol fel csonkított véges halmazként.
     #[test]
     fn base_conv_value_rule_respects_finite_domain_limit() {
         let x = CellId::advice(0, 0);
@@ -2001,5 +1255,146 @@ mod tests {
         }
 
         assert!(infer_base_conv_value_domains(&expr, &values, None).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod completeness_tests {
+    use super::*;
+    use crate::circuit_analyzer::ucp::{
+        engine::analyze_expressions_with_values_and_modulus, facts::UcpFacts,
+    };
+
+    fn domain(values: &[i64]) -> UcpValueDomain {
+        UcpValueDomain::finite_set(values.iter().copied().map(BigInt::from)).unwrap()
+    }
+
+    fn samples(values: &[i64]) -> BTreeSet<BigInt> {
+        values.iter().copied().map(BigInt::from).collect()
+    }
+
+    #[test]
+    fn uniqueness_and_partial_samples_do_not_certify_a_finite_domain() {
+        let cell = CellId::advice(0, 0);
+        let mut values = UcpValueFacts::new();
+        assert!(!values.domain_is_complete(&cell));
+        values.mark_domain(cell.clone(), domain(&[0, 1, 2]));
+        assert!(!values
+            .mark_complete_from_samples(&cell, &samples(&[0, 1]), &101.into())
+            .unwrap());
+        let result = analyze_expressions_with_values_and_modulus(
+            &[],
+            UcpFacts::from_iter([cell.clone()]),
+            values,
+            &101.into(),
+        );
+        assert!(result.facts.is_unique(&cell));
+        assert!(!result.value_facts.domain_is_complete(&cell));
+        assert_eq!(result.value_facts.domain(&cell), Some(&domain(&[0, 1, 2])));
+    }
+
+    #[test]
+    fn complete_domains_are_stable_but_hypothetical_copies_can_narrow() {
+        let cell = CellId::advice(0, 0);
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(cell.clone(), domain(&[3, 7]));
+        assert!(values
+            .mark_complete_from_samples(&cell, &samples(&[3, 7]), &101.into())
+            .unwrap());
+        assert!(values.domain_is_complete(&cell));
+        assert!(!values.mark_known(cell.clone(), 3.into()));
+        assert_eq!(values.domain(&cell), Some(&domain(&[3, 7])));
+        assert!(!values
+            .mark_complete_from_samples(&cell, &samples(&[3, 7]), &101.into())
+            .unwrap());
+        let mut hypothetical = values.for_hypothetical_reasoning();
+        assert!(!hypothetical.domain_is_complete(&cell));
+        assert!(hypothetical.mark_known(cell.clone(), 3.into()));
+        assert!(hypothetical.domain_is_complete(&cell));
+        assert_eq!(values.domain(&cell), Some(&domain(&[3, 7])));
+        assert_eq!(hypothetical.known_value(&cell), Some(&3.into()));
+    }
+
+    #[test]
+    fn inconsistent_empty_and_oversized_samples_cannot_certify_a_domain() {
+        let cell = CellId::advice(0, 0);
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(cell.clone(), domain(&[0, 1]));
+        assert!(!values
+            .mark_complete_from_samples(&cell, &BTreeSet::new(), &101.into())
+            .unwrap());
+        assert!(values
+            .mark_complete_from_samples(&cell, &samples(&[0, 1, 2]), &101.into())
+            .is_err());
+        let oversized = BTreeSet::from([BigInt::from(1) << (MAX_VALUE_BITS + 1) as usize]);
+        assert!(values
+            .mark_complete_from_samples(&cell, &oversized, &101.into())
+            .is_err());
+        assert!(!values.domain_is_complete(&cell));
+        assert_eq!(values.domain(&cell), Some(&domain(&[0, 1])));
+    }
+
+    #[test]
+    fn singleton_domains_and_field_aliases_have_one_feasible_value() {
+        let cell = CellId::advice(0, 0);
+        let mut values = UcpValueFacts::new();
+        values.mark_known(cell.clone(), 3.into());
+        assert!(values.domain_is_complete(&cell));
+        let mut aliases = UcpValueFacts::new();
+        aliases.mark_domain(cell.clone(), domain(&[-1, 12]));
+        assert!(!aliases.domain_is_complete(&cell));
+        assert!(aliases
+            .mark_complete_from_samples(&cell, &samples(&[-1, 12]), &13.into())
+            .unwrap());
+        assert!(aliases.domain_is_complete(&cell));
+        assert_eq!(aliases.known_value(&cell), Some(&(-1).into()));
+    }
+
+    #[test]
+    fn complete_domains_remain_operands_for_other_cells_without_exporting_completeness() {
+        let source = CellId::advice(0, 0);
+        let shifted = CellId::advice(1, 0);
+        let zero = CellId::advice(2, 0);
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(source.clone(), domain(&[3, 7]));
+        values
+            .mark_complete_from_samples(&source, &samples(&[3, 7]), &101.into())
+            .unwrap();
+        let equations = [
+            UcpExpr::add(
+                UcpExpr::var(shifted.clone()),
+                UcpExpr::neg(UcpExpr::add(
+                    UcpExpr::var(source.clone()),
+                    UcpExpr::known_constant_i64(1),
+                )),
+            ),
+            UcpExpr::mul(
+                UcpExpr::var(zero.clone()),
+                UcpExpr::add(
+                    UcpExpr::var(source.clone()),
+                    UcpExpr::known_constant_i64(-5),
+                ),
+            ),
+        ];
+        let inferences = infer_value_domains_from_zero_equation_with_modulus(
+            &equations[0],
+            &values,
+            &101.into(),
+        );
+        assert!(inferences.iter().all(|(cell, _)| cell != &source));
+        let result = analyze_expressions_with_values_and_modulus(
+            &equations,
+            UcpFacts::new(),
+            values,
+            &101.into(),
+        );
+        assert_eq!(result.value_facts.domain(&source), Some(&domain(&[3, 7])));
+        assert!(result.value_facts.domain_is_complete(&source));
+        assert!(!result.facts.is_unique(&source));
+        assert_eq!(result.value_facts.domain(&shifted), Some(&domain(&[4, 8])));
+        assert!(!result.value_facts.domain_is_complete(&shifted));
+        assert_eq!(result.value_facts.known_value(&zero), Some(&0.into()));
+        assert!(result.facts.is_unique(&zero));
+        assert!(result.value_facts.domain_is_complete(&zero));
     }
 }

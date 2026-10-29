@@ -32,6 +32,7 @@ impl Drop for ManagedChild {
 }
 
 pub(crate) fn run(mut command: Command, budget: Option<Duration>) -> Result<Output> {
+    let _profile = crate::circuit_analyzer::ucp::profiling::scope("smt.process");
     let Some(budget) = budget else {
         let output = command.output().context("Failed to execute solver");
         #[cfg(test)]

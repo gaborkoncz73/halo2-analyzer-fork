@@ -1,21 +1,25 @@
+//Kifejezésfák és skalártulajdonságok; a kiértékelés és a következtetés más modulok feladata.
+
 use super::cell::CellId;
 use num_bigint::BigInt;
 
 //Skalár/konstans érték absztrakt reprezentációja UCP-hez
+//A NonZero csak tulajdonságot közöl, a Known konkrét számot is. Ez nem celladomain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UcpScalar {
     //Biztosan nulla érték
     Zero,
     //Biztosan nem nulla, de a konkrét érték nem ismert
     NonZero,
-    //Nem tudjuk, hogy nulla-e vagy nem nulla
+    // A rendszer nem ismeri a skalár nulla vagy nemnulla voltát.
     Unknown,
-    //Konkreten ismert BigInt ertek; a Delta tarolas kulon bitkorlatot alkalmaz
+    //Konkrétan ismert BigInt érték
     Known(BigInt),
 }
 
 impl UcpScalar {
     //Konkrét értékből UcpScalar-t készít, a nullát külön Zero-ként tárolva
+    //Itt még nincs testmodulus
     pub fn known(value: BigInt) -> Self {
         if value == BigInt::from(0) {
             Self::Zero
@@ -30,6 +34,7 @@ impl UcpScalar {
     }
 
     //Visszaadja a konkrét értéket, ha ténylegesen ismert
+    //A None nem nullát jelent, hanem azt, hogy nincs kiolvasható konkrét szám.
     pub fn as_known(&self) -> Option<BigInt> {
         match self {
             Self::Zero => Some(BigInt::from(0)),
@@ -39,6 +44,7 @@ impl UcpScalar {
     }
 
     //Azt jelzi, hogy a skalár statikusan biztosan nem nulla-e
+    //A Known értékét egész számként vizsgálja; testbeli egyszerűsítéshez a modulusos változat kell.
     pub fn is_statically_non_zero(&self) -> bool {
         match self {
             Self::NonZero => true,
@@ -52,6 +58,7 @@ impl UcpScalar {
             || matches!(self, Self::Known(value) if value == &BigInt::from(0))
     }
 
+    //Known(p)-vel nem szabad osztani a p modulusú testben, mert ott az értéke nulla.
     pub(crate) fn is_non_zero_with_modulus(&self, modulus: Option<&BigInt>) -> bool {
         match (self, modulus) {
             (Self::Known(value), Some(modulus)) => {
@@ -62,55 +69,58 @@ impl UcpScalar {
     }
 }
 
-//A Halo2 expressionökből képzett egyszerű UCP expression fa
+// A Halo2-kifejezéseket egyszerű UCP-kifejezésfával reprezentálja.
+//A Box miatt a csomópont tárolhat újabb UcpExpr-t anélkül, hogy a típus mérete végtelen lenne.
+//Például 2*x + y egy Add csomópont, benne egy skálázott Var(x) és egy Var(y).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UcpExpr {
     //Cella/változó hivatkozás
     Var(CellId),
     //Konstans vagy absztrakt skalár érték
     Const(UcpScalar),
-    //Negált expression
+    // A belső kifejezés negáltját jelöli.
     Neg(Box<UcpExpr>),
     //Összeadás
     Add(Box<UcpExpr>, Box<UcpExpr>),
     //Szorzás
     Mul(Box<UcpExpr>, Box<UcpExpr>),
-    //Expression skálázása egy skalárral
+    //A Mul két részfát szoroz; a Scale külön kezeli a skalár együtthatót.
     Scale(Box<UcpExpr>, UcpScalar),
 }
 
 impl UcpExpr {
-    //Változó expression létrehozása cellából
+    //Az építőfüggvények csak helyi azonosságokat egyszerűsítenek, nem oldanak meg egyenleteket.
+    // Cellahivatkozásból változókifejezést készít.
     pub fn var(cell: CellId) -> Self {
         Self::Var(cell)
     }
 
-    //Ismeretlen konstans létrehozása
+    //Ismeretlen értékű konstans, nem új advice változó.
     pub fn constant() -> Self {
         Self::Const(UcpScalar::Unknown)
     }
 
-    //Nulla konstans létrehozása
+    // Nulla értékű konstanscsomópontot készít.
     pub fn zero() -> Self {
         Self::Const(UcpScalar::Zero)
     }
 
-    //Nem nulla, de konkrétan nem ismert konstans létrehozása
+    // Nemnulla, de konkrétan ismeretlen konstanscsomópontot készít.
     pub fn non_zero_constant() -> Self {
         Self::Const(UcpScalar::NonZero)
     }
 
-    //Konkrét ismert konstans létrehozása
+    // Konkrét ismert értékből konstanscsomópontot készít.
     pub fn known_constant(value: BigInt) -> Self {
         Self::Const(UcpScalar::known(value))
     }
 
-    //Kényelmi függvény i64 konstans létrehozására
+    // i64 értékből konstanscsomópontot készít.
     pub fn known_constant_i64(value: i64) -> Self {
         Self::known_constant(BigInt::from(value))
     }
 
-    //Tetszőleges UcpScalar-ból konstans expressiont készít
+    // Tetszőleges UcpScalar értékből konstanskifejezést készít.
     pub fn scalar_constant(scalar: UcpScalar) -> Self {
         if scalar.is_zero() {
             Self::zero()
@@ -119,7 +129,7 @@ impl UcpExpr {
         }
     }
 
-    //Negált expression létrehozása
+    // A megadott kifejezés negáltját készíti el.
     pub fn neg(expr: UcpExpr) -> Self {
         match expr {
             Self::Const(UcpScalar::Zero) => Self::zero(),
@@ -127,7 +137,7 @@ impl UcpExpr {
         }
     }
 
-    //Két expression összeadásának létrehozása
+    // Két kifejezés összegét készíti el.
     pub fn add(left: UcpExpr, right: UcpExpr) -> Self {
         match (left, right) {
             (Self::Const(UcpScalar::Zero), right) => right,
@@ -136,7 +146,8 @@ impl UcpExpr {
         }
     }
 
-    //Két expression szorzatának létrehozása
+    // Két kifejezés szorzatát készíti el.
+    //A 0*e, 1*e és (-1)*e alakokat rögtön rövidebb fára cseréli; más szorzatot megtart.
     pub fn mul(left: UcpExpr, right: UcpExpr) -> Self {
         match (left, right) {
             (Self::Const(UcpScalar::Zero), _) | (_, Self::Const(UcpScalar::Zero)) => Self::zero(),
@@ -153,11 +164,12 @@ impl UcpExpr {
     }
 
     //Nem nulla, de konkrétan nem ismert skálával szoroz
+    //Ez nem egységgel szorzás: a tényleges együttható ismeretlen marad.
     pub fn scale(expr: UcpExpr) -> Self {
         Self::scale_by(expr, UcpScalar::NonZero)
     }
 
-    //Expression skálázása, nulla skála esetén azonnal nulla expression lesz
+    // Skálázott kifejezést készít; nulla együtthatónál azonnal nullára egyszerűsít.
     pub fn scale_by(expr: UcpExpr, scalar: UcpScalar) -> Self {
         if scalar.is_zero() {
             return Self::zero();

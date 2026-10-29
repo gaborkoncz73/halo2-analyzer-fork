@@ -229,6 +229,7 @@ fn finite_projection_recovers_two_values_then_ucp_recovers_a_different_cell() {
         UcpValueDomain::finite_set((0..16).map(BigInt::from))
     );
     assert_eq!(coarse.cells[1].domain, None);
+    assert!(coarse.cells.iter().all(|cell| !cell.domain_is_complete));
     assert_eq!(coarse.status, PrivacyAnalysisStatus::QueryLimitReached);
     let report = analyze::<false>(3, 21, 17);
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
@@ -236,6 +237,7 @@ fn finite_projection_recovers_two_values_then_ucp_recovers_a_different_cell() {
     assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::NonUnique);
     assert_eq!(report.cells[1].domain, Some(candidates(&[0])));
     assert_eq!(report.cells[1].uniqueness, PrivateCellUniqueness::Unique);
+    assert!(report.cells.iter().all(|cell| cell.domain_is_complete));
     assert_eq!(
         report.cells[0].domain_refinement.as_ref().unwrap().status,
         PrivateDomainRefinementStatus::Complete
@@ -275,6 +277,7 @@ fn partial_refinement_preserves_unchecked_values_and_reports_its_cost() {
         UcpValueDomain::finite_set((3..16).map(BigInt::from))
     );
     assert_eq!(report.cells[1].domain, None);
+    assert!(report.cells.iter().all(|cell| !cell.domain_is_complete));
     let evidence = report.cells[0].domain_refinement.as_ref().unwrap();
     assert_eq!(evidence.status, PrivateDomainRefinementStatus::Partial);
     assert_eq!(evidence.feasible_candidates, 0);
@@ -801,12 +804,23 @@ fn finite_refinement_preserves_full_lookup_tuple_correlations() {
     MockProver::run(K, &circuit, vec![vec![Fr::from(0)]])
         .unwrap()
         .assert_satisfied();
+    let propagated = analyze_private_recoverability::<Fr, _, _>(
+        &circuit,
+        K,
+        &observations(0),
+        finite_projection_demo_targets(),
+        options(0),
+    )
+    .unwrap();
+    assert_eq!(propagated.cells[0].domain, Some(candidates(&[0, 1])));
+    assert!(!propagated.cells[0].domain_is_complete);
+    assert_eq!(propagated.domain_refinement_statistics.solver_checks, 0);
     let report = analyze_private_recoverability::<Fr, _, _>(
         &circuit,
         K,
         &observations(0),
         finite_projection_demo_targets(),
-        options(5),
+        options(3),
     )
     .unwrap();
     assert_eq!(
@@ -819,5 +833,7 @@ fn finite_refinement_preserves_full_lookup_tuple_correlations() {
         PrivateDomainRefinementStatus::Complete
     );
     assert_eq!(report.cells[1].domain, Some(candidates(&[0])));
-    assert_eq!(report.domain_refinement_statistics.solver_checks, 5);
+    assert!(report.cells[0].domain_is_complete);
+    // Tuple propagation removes two infeasible candidates before SMT feasibility checks.
+    assert_eq!(report.domain_refinement_statistics.solver_checks, 3);
 }

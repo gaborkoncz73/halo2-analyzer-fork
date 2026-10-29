@@ -1,10 +1,10 @@
 //Ez a modul a cikk ChooseVar(C, V) lépésének heurisztikus Plonkish megfelelője.
-//A cél az, hogy amikor az UCP fixpoint megakad, ne véletlenszerű/első advice cellát
-//kérdezzünk SMT-től, hanem azt, amelyik várhatóan a legtöbb további UCP propagációt indítja el.
+// A következtetési fixpont elérése után azt a cellát választja SMT-vizsgálatra,
+// amelytől a legtöbb további UCP-következtetést várja.
 
 use super::{
     cell::{CellId, CellKind},
-    engine::analyze_expressions_with_values_and_modulus,
+    engine::simulate_expressions_with_relations_and_modulus,
     expr::UcpExpr,
     facts::UcpFacts,
     rules::expression_is_unique,
@@ -17,27 +17,27 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CandidateScore {
     cell: CellId,
-    //Hány target lenne unique, ha ezt a cellát SMT unique-nak bizonyítaná
+    // A cella egyértelműségét feltételezve ennyi célcella lenne egyértelmű.
     unique_targets_after_simulation: usize,
-    //Hány új targetet tanulnánk
+    // Ennyi új célcella egyértelműségét várja a szimulációtól.
     newly_unique_targets: usize,
-    //Maga a cella target-e
+    // Azt jelzi, hogy a vizsgált cella célcella-e.
     is_target: bool,
-    //Hány új unique cellát tanulna az UCP szimuláció
+    // A szimulációban újonnan egyértelművé váló cellák számát tárolja.
     newly_unique_cells: usize,
-    //Hány expression válna unique-ká
+    // A szimulációban egyértelművé váló kifejezések számát tárolja.
     newly_unique_expressions: usize,
-    //Hány olyan expressionben szerepel, ahol egy második unknown cellát nyithat meg
+    // Ennyi kifejezésben szerepel, ahol egy további ismeretlen cella egyértelműségét segítheti.
     bridge_expressions: usize,
-    //Hány még unresolved expressionben szerepel
+    // A még nem igazoltan egyértelmű kifejezések közötti előfordulásait számolja.
     unresolved_expression_count: usize,
-    //Hány expressionben szerepel összesen
+    // A kifejezések közötti összes előfordulását számolja.
     expression_count: usize,
-    //Target graph távolság: kisebb jobb
+    // A célcelláktól mért gráftávolságot tárolja; a kisebbet részesíti előnyben.
     target_distance: usize,
 }
 
-//Kiválasztja, melyik cellára kérdezzünk rá SMT-vel a cikk szerinti V = (O unio W) \ K halmazból
+// A cikk szerinti V = (O unio W) \ K halmazból választ cellát SMT-vizsgálatra.
 pub(crate) fn choose_query_cell(
     expressions: &[UcpExpr],
     facts: &UcpFacts,
@@ -47,6 +47,7 @@ pub(crate) fn choose_query_cell(
     witness_cells: &[CellId],
     queried_cells: &HashSet<CellId>,
 ) -> Option<CellId> {
+    let _profile = super::profiling::scope("scheduler.choose_query");
     let candidates = collect_candidate_cells(output_cells, witness_cells, facts, queried_cells);
     if candidates.is_empty() {
         return None;
@@ -89,14 +90,14 @@ fn collect_candidate_cells(
 ) -> BTreeSet<CellId> {
     let mut candidates = BTreeSet::new();
 
-    //O: output/target cellák
+    // Az O halmazból a kimeneti célcellákat veszi figyelembe.
     for output in output_cells {
         if !facts.is_unique(output) && !queried_cells.contains(output) {
             candidates.insert(output.clone());
         }
     }
 
-    //W: witness/advice cellák. Instance/fixed cellára nem kérdezünk SMT-vel.
+    // A W halmazból az advice cellákat veszi figyelembe; instance és fixed cellát nem kérdez le.
     for witness in witness_cells {
         if matches!(witness.kind, CellKind::Advice)
             && !facts.is_unique(witness)
@@ -201,10 +202,12 @@ fn score_candidate(
 ) -> CandidateScore {
     let mut simulated_facts = facts.clone();
     simulated_facts.mark_unique(cell.clone());
-    let simulated = analyze_expressions_with_values_and_modulus(
+    let simulated = simulate_expressions_with_relations_and_modulus(
         expressions,
+        &[],
+        &[],
         simulated_facts,
-        value_facts.clone(),
+        value_facts.for_hypothetical_reasoning(),
         field_modulus,
     );
 
@@ -247,7 +250,7 @@ fn compare_scores(left: &CandidateScore, right: &CandidateScore) -> Ordering {
     left.unique_targets_after_simulation
         .cmp(&right.unique_targets_after_simulation)
         .then(left.newly_unique_targets.cmp(&right.newly_unique_targets))
-        //Előbb a várható UCP "lavina" számít; targetet csak valódi döntetlenben preferálunk
+        // Elsősorban a várható UCP-következtetési hasznot rangsorolja; holtversenyben célcellát választ.
         .then(left.newly_unique_cells.cmp(&right.newly_unique_cells))
         .then(
             left.newly_unique_expressions
@@ -260,9 +263,9 @@ fn compare_scores(left: &CandidateScore, right: &CandidateScore) -> Ordering {
                 .cmp(&right.unresolved_expression_count),
         )
         .then(left.expression_count.cmp(&right.expression_count))
-        //Távolságnál a kisebb jobb, ezért fordítva hasonlítjuk
+        // A távolságot fordított sorrendben hasonlítja össze, hogy a kisebb legyen kedvezőbb.
         .then(right.target_distance.cmp(&left.target_distance))
-        //Deterministikus tie-break: kisebb CellId nyer
+        // Holtversenyben a kisebb CellId-t választja, így determinisztikus marad a sorrend.
         .then(right.cell.cmp(&left.cell))
 }
 
@@ -303,7 +306,7 @@ mod tests {
         BigInt::from(101)
     }
 
-    //Azt ellenőrzi, hogy ha egy köztes cella több targetet nyit meg, azt választjuk
+    // A teszt ellenőrzi, hogy több célcellát segítő köztes cellát választ.
     #[test]
     fn chooses_cell_with_best_ucp_simulated_gain() {
         let x = CellId::advice(0, 0);
@@ -338,7 +341,7 @@ mod tests {
         assert_eq!(chosen, Some(CellId::advice(0, 0)));
     }
 
-    //Azt ellenőrzi, hogy valódi holtversenyben target cellát választunk
+    // A teszt ellenőrzi, hogy valódi holtversenyben célcellát választ.
     #[test]
     fn prefers_target_when_gain_is_tied() {
         let target = CellId::advice(0, 0);
@@ -361,7 +364,7 @@ mod tests {
         assert_eq!(chosen, Some(target));
     }
 
-    //Azt ellenőrzi, hogy a már lekérdezett cellákat kihagyjuk
+    // A teszt ellenőrzi, hogy a már lekérdezett cellákat kihagyja.
     #[test]
     fn skips_already_queried_cells() {
         let first = CellId::advice(0, 0);
@@ -382,8 +385,8 @@ mod tests {
         assert_eq!(chosen, Some(second));
     }
 
-    //Azt ellenőrzi, hogy nem minden expressionben szereplő advice automatikus jelölt,
-    //hanem tényleg az explicit V = O unio W halmazból választunk
+    // A teszt ellenőrzi, hogy nem vesz fel automatikusan minden hivatkozott advice cellát,
+    // hanem kizárólag az explicit V = O unio W halmazból választ.
     #[test]
     fn uses_explicit_output_and_witness_candidate_set() {
         let allowed = CellId::advice(0, 0);

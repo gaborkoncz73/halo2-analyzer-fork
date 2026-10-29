@@ -8,7 +8,7 @@ originating in `zcash/halo2`, retrieved unchanged from the analyzer-compatible
 `Analyzable-Halo2/zcash-halo2` fork at revision
 `7fc5e14d53c19cc4e09f0af2ed4b87440e1bb4fb`.
 The unchanged source, SHA-256, original path, and MIT license are recorded in
-`korrekt/src/circuit_analyzer/ucp/external_fixtures/README.md`.
+`korrekt/src/circuit_analyzer/ucp/tests/external/fixtures/README.md`.
 
 This is an educational example, not a production application or an upstream
 privacy vulnerability. The positive leakage control below is our own modification

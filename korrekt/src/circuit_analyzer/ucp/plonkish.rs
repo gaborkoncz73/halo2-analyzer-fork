@@ -6,7 +6,7 @@ use crate::circuit_analyzer::{analyzable::AnalyzableField, halo2_proofs_libs::*}
 use num::{BigInt, Num};
 use std::collections::HashSet;
 
-//Region kezdet, lokális sor és rotation alapján abszolút UCP sort számol
+// A régió kezdetéből, a helyi sorból és a rotációból abszolút UCP-sort számít.
 fn absolute_row(region_begin: usize, row: i32, rotation: Rotation) -> i32 {
     let region_begin =
         i32::try_from(region_begin).expect("region_begin does not fit into i32 for UCP");
@@ -17,7 +17,7 @@ fn absolute_row(region_begin: usize, row: i32, rotation: Rotation) -> i32 {
         .expect("absolute UCP row overflowed i32")
 }
 
-//Halo2 rotations wrap around the evaluation domain, including negative rotations.
+// A rotációt a kiértékelési tartományon körbefordítja, negatív eltolás esetén is.
 pub(crate) fn query_row(
     region_begin: usize,
     row: i32,
@@ -29,12 +29,12 @@ pub(crate) fn query_row(
     (base + i64::from(row) + i64::from(rotation.0)).rem_euclid(period) as usize
 }
 
-//Halo2 field elemből BigInt-et készít, hogy UCP konstansként tudjuk használni
+// A Halo2-testelemet BigInt alakra hozza az UCP-konstanshoz.
 pub(crate) fn field_to_bigint<F: AnalyzableField>(value: &F) -> BigInt {
     BigInt::from_str_radix(format!("{:?}", value).strip_prefix("0x").unwrap(), 16).unwrap()
 }
 
-//Halo2 field elemből UCP konstans expressiont készít
+// A Halo2-testelemből UCP-konstanskifejezést készít.
 fn field_to_ucp_constant<F: AnalyzableField>(value: &F) -> UcpExpr {
     if bool::from(value.is_zero()) {
         UcpExpr::zero()
@@ -43,7 +43,7 @@ fn field_to_ucp_constant<F: AnalyzableField>(value: &F) -> UcpExpr {
     }
 }
 
-//Assigned fixed/selector cella értékét olvassa ki, ha az adott sorban ismert
+// A fixed vagy szelektorcella ténylegesen hozzárendelt értékét olvassa ki, ha elérhető.
 fn fixed_query_value<F: AnalyzableField>(
     query: &FixedQuery,
     region_begin: usize,
@@ -62,7 +62,7 @@ fn fixed_query_value<F: AnalyzableField>(
     }
 }
 
-//Alap Halo2 Expression -> UcpExpr konverzió, selectorokról még nem tud konkrét értéket
+// A Halo2-kifejezést UcpExpr fára fordítja a szelektorértékek ismerete nélkül.
 pub fn expression_to_ucp_expr<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -77,7 +77,7 @@ pub fn expression_to_ucp_expr<F: AnalyzableField>(
     )
 }
 
-//Konverzió úgy, hogy a fixed/selector cellák konkrét assigned értékeit is felhasználjuk
+// A fordításban felhasználja a fixed és szelektorcellák ténylegesen hozzárendelt értékeit.
 pub fn expression_to_ucp_expr_with_fixed_values<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -93,7 +93,7 @@ pub fn expression_to_ucp_expr_with_fixed_values<F: AnalyzableField>(
     )
 }
 
-//Konverzió úgy, hogy tudjuk mely fixed oszlopok selector oszlopok
+// A megadott oszlopindexek alapján megkülönbözteti a fixed szelektoroszlopokat.
 pub fn expression_to_ucp_expr_with_selector_indices<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -109,7 +109,7 @@ pub fn expression_to_ucp_expr_with_selector_indices<F: AnalyzableField>(
     )
 }
 
-//Konverzió aktív selectorral, tehát a selector értéke biztosan nem nulla
+// Aktív szelektor mellett fordít; a szelektort nemnullának tekinti.
 pub fn expression_to_ucp_expr_with_active_selectors<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -125,7 +125,7 @@ pub fn expression_to_ucp_expr_with_active_selectors<F: AnalyzableField>(
     )
 }
 
-//Konverzió inaktív selectorral, tehát a selector értéke nulla
+// Inaktív szelektor mellett fordít; a szelektort nullának tekinti.
 pub fn expression_to_ucp_expr_with_inactive_selectors<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -142,7 +142,7 @@ pub fn expression_to_ucp_expr_with_inactive_selectors<F: AnalyzableField>(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Konverzió konkrétan ismert aktív selector indexek alapján
+// A megadott aktív szelektorindexek alapján fordítja a kifejezést.
 pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -151,11 +151,11 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
     enabled_selector_indices: &HashSet<usize>,
 ) -> UcpExpr {
     match expr {
-        //Konstans érték átvitele UCP konstansként
+        // A konstans értékét UCP-konstansként adja tovább.
         Expression::Constant(value) => field_to_ucp_constant(value),
-        //Selector értéke attól függ, hogy az adott sorban engedélyezve van-e
+        // A szelektor értékét az adott sorban ismert engedélyezésből állapítja meg.
         Expression::Selector(selector) => selector_constant(selector.0, enabled_selector_indices),
-        //Fixed oszlop lehet valódi fixed cella vagy selector fixed oszlop
+        // A fixed hivatkozásnál megkülönbözteti a szelektoroszlopot és a szokásos fixed cellát.
         Expression::Fixed(query) => {
             if selector_indices.contains(&query.column_index) {
                 selector_constant(query.column_index, enabled_selector_indices)
@@ -166,17 +166,17 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
                 ))
             }
         }
-        //Advice query-ből UCP advice cella lesz
+        // Az advice lekérdezést konkrét UCP-cellahivatkozásra fordítja.
         Expression::Advice(query) => UcpExpr::var(CellId::advice(
             query.column_index,
             absolute_row(region_begin, row, query.rotation),
         )),
-        //Instance query-ből UCP instance cella lesz
+        // Az instance lekérdezést konkrét UCP-cellahivatkozásra fordítja.
         Expression::Instance(query) => UcpExpr::var(CellId::instance(
             query.column_index,
             absolute_row(region_begin, row, query.rotation),
         )),
-        //Negált Halo2 expression rekurzívan UCP negálássá alakul
+        // A negálás belső kifejezését rekurzívan UCP-re fordítja.
         Expression::Negated(inner) => {
             UcpExpr::neg(expression_to_ucp_expr_with_enabled_selector_indices(
                 inner,
@@ -186,7 +186,7 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
                 enabled_selector_indices,
             ))
         }
-        //Halo2 összeg rekurzívan UCP összeadássá alakul
+        // Az összeg tagjait rekurzívan UCP-re fordítja.
         Expression::Sum(left, right) => UcpExpr::add(
             expression_to_ucp_expr_with_enabled_selector_indices(
                 left,
@@ -203,7 +203,7 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
                 enabled_selector_indices,
             ),
         ),
-        //Halo2 szorzat rekurzívan UCP szorzássá alakul
+        // A szorzat tényezőit rekurzívan UCP-re fordítja.
         Expression::Product(left, right) => UcpExpr::mul(
             expression_to_ucp_expr_with_enabled_selector_indices(
                 left,
@@ -220,7 +220,7 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
                 enabled_selector_indices,
             ),
         ),
-        //Halo2 skálázásnál nulla skála azonnal nulla expression
+        // Nulla skálázásnál azonnal nulla kifejezést állít elő.
         Expression::Scaled(inner, scale) => {
             if bool::from(scale.is_zero()) {
                 UcpExpr::zero()
@@ -242,13 +242,13 @@ pub fn expression_to_ucp_expr_with_enabled_selector_indices<F: AnalyzableField>(
             feature = "use_axiom_halo2_proofs",
             feature = "use_scroll_halo2_proofs"
         ))]
-        //Challenge értékét itt nem modellezzük pontosan, ezért absztrakt konstans lesz
+        // A kihívásértéket itt absztrakt konstansként kezeli, konkrét értéket nem feltételez.
         Expression::Challenge(_) => UcpExpr::constant(),
     }
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Selector indexből UCP konstans: aktív esetben 1, inaktív esetben zero
+// Aktív szelektorhoz 1, inaktív szelektorhoz 0 UCP-konstanst készít.
 fn selector_constant(selector_index: usize, enabled_selector_indices: &HashSet<usize>) -> UcpExpr {
     if enabled_selector_indices.contains(&selector_index) {
         UcpExpr::known_constant_i64(1)
@@ -257,7 +257,7 @@ fn selector_constant(selector_index: usize, enabled_selector_indices: &HashSet<u
     }
 }
 
-//Általános fixed-value aware konverzió, ahol a caller mondja meg az absztrakt selector skalárt
+// Az ismert fixed értékekkel és a hívó által megadott absztrakt szelektorskalárral fordít.
 pub fn expression_to_ucp_expr_with_fixed_values_and_selector_scalar<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -266,11 +266,11 @@ pub fn expression_to_ucp_expr_with_fixed_values_and_selector_scalar<F: Analyzabl
     selector_scalar: UcpScalar,
 ) -> UcpExpr {
     match expr {
-        //Konstans érték átvitele UCP konstansként
+        // A konstans értékét UCP-konstansként adja tovább.
         Expression::Constant(value) => field_to_ucp_constant(value),
-        //Raw selector csak nem-kompresszált expressionben fordulhat elő
+        // A nyers szelektort a tömörítés előtti kifejezés részeként kezeli.
         Expression::Selector(_) => UcpExpr::scalar_constant(selector_scalar.clone()),
-        //Fixed query-nél ha van assigned érték, konstansként használjuk; különben fixed cella marad
+        // Ismert fixed értéket konstansra cserél; máskor fixed cellahivatkozást tart meg.
         Expression::Fixed(query) => fixed_query_value(query, region_begin, row, fixed_values)
             .unwrap_or_else(|| {
                 UcpExpr::var(CellId::fixed(
@@ -278,17 +278,17 @@ pub fn expression_to_ucp_expr_with_fixed_values_and_selector_scalar<F: Analyzabl
                     absolute_row(region_begin, row, query.rotation),
                 ))
             }),
-        //Advice query-ből UCP advice cella lesz
+        // Az advice lekérdezést konkrét UCP-cellahivatkozásra fordítja.
         Expression::Advice(query) => UcpExpr::var(CellId::advice(
             query.column_index,
             absolute_row(region_begin, row, query.rotation),
         )),
-        //Instance query-ből UCP instance cella lesz
+        // Az instance lekérdezést konkrét UCP-cellahivatkozásra fordítja.
         Expression::Instance(query) => UcpExpr::var(CellId::instance(
             query.column_index,
             absolute_row(region_begin, row, query.rotation),
         )),
-        //Negált Halo2 expression rekurzívan UCP negálássá alakul
+        // A negálás belső kifejezését rekurzívan UCP-re fordítja.
         Expression::Negated(inner) => UcpExpr::neg(
             expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
                 inner,
@@ -298,7 +298,7 @@ pub fn expression_to_ucp_expr_with_fixed_values_and_selector_scalar<F: Analyzabl
                 selector_scalar.clone(),
             ),
         ),
-        //Halo2 összeg rekurzívan UCP összeadássá alakul
+        // Az összeg tagjait rekurzívan UCP-re fordítja.
         Expression::Sum(left, right) => UcpExpr::add(
             expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
                 left,
@@ -315,7 +315,7 @@ pub fn expression_to_ucp_expr_with_fixed_values_and_selector_scalar<F: Analyzabl
                 selector_scalar.clone(),
             ),
         ),
-        //Halo2 szorzat rekurzívan UCP szorzássá alakul
+        // A szorzat tényezőit rekurzívan UCP-re fordítja.
         Expression::Product(left, right) => UcpExpr::mul(
             expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
                 left,
@@ -332,7 +332,7 @@ pub fn expression_to_ucp_expr_with_fixed_values_and_selector_scalar<F: Analyzabl
                 selector_scalar.clone(),
             ),
         ),
-        //Halo2 skálázásnál nulla skála azonnal nulla expression
+        // Nulla skálázásnál azonnal nulla kifejezést állít elő.
         Expression::Scaled(inner, scale) => UcpExpr::scale_by(
             expression_to_ucp_expr_with_fixed_values_and_selector_scalar(
                 inner,
@@ -348,12 +348,12 @@ pub fn expression_to_ucp_expr_with_fixed_values_and_selector_scalar<F: Analyzabl
             feature = "use_axiom_halo2_proofs",
             feature = "use_scroll_halo2_proofs"
         ))]
-        //Challenge értékét itt nem modellezzük pontosan, ezért absztrakt konstans lesz
+        // A kihívásértéket itt absztrakt konstansként kezeli, konkrét értéket nem feltételez.
         Expression::Challenge(_) => UcpExpr::constant(),
     }
 }
 
-//Általános konverzió, ahol a caller mondja meg milyen absztrakt selector skalárt használjunk
+// A hívó által megadott absztrakt szelektorskalárral fordítja a kifejezést.
 pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -362,11 +362,11 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
     selector_scalar: UcpScalar,
 ) -> UcpExpr {
     match expr {
-        //Konstans érték átvitele UCP konstansként
+        // A konstans értékét UCP-konstansként adja tovább.
         Expression::Constant(value) => field_to_ucp_constant(value),
-        //Selector értékét a caller által megadott absztrakt skalár adja
+        // A szelektort a hívó által megadott absztrakt skalárral helyettesíti.
         Expression::Selector(_) => UcpExpr::scalar_constant(selector_scalar.clone()),
-        //Fixed query lehet selector fixed oszlop vagy valódi fixed cella
+        // A fixed hivatkozásnál megkülönbözteti a szelektoroszlopot és a szokásos fixed cellát.
         Expression::Fixed(query) => {
             if selector_indices.contains(&query.column_index) {
                 UcpExpr::scalar_constant(selector_scalar.clone())
@@ -377,17 +377,17 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
                 ))
             }
         }
-        //Advice query-ből UCP advice cella lesz
+        // Az advice lekérdezést konkrét UCP-cellahivatkozásra fordítja.
         Expression::Advice(query) => UcpExpr::var(CellId::advice(
             query.column_index,
             absolute_row(region_begin, row, query.rotation),
         )),
-        //Instance query-ből UCP instance cella lesz
+        // Az instance lekérdezést konkrét UCP-cellahivatkozásra fordítja.
         Expression::Instance(query) => UcpExpr::var(CellId::instance(
             query.column_index,
             absolute_row(region_begin, row, query.rotation),
         )),
-        //Negált Halo2 expression rekurzívan UCP negálássá alakul
+        // A negálás belső kifejezését rekurzívan UCP-re fordítja.
         Expression::Negated(inner) => UcpExpr::neg(expression_to_ucp_expr_with_selector_scalar(
             inner,
             region_begin,
@@ -395,7 +395,7 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
             selector_indices,
             selector_scalar.clone(),
         )),
-        //Halo2 összeg rekurzívan UCP összeadássá alakul
+        // Az összeg tagjait rekurzívan UCP-re fordítja.
         Expression::Sum(left, right) => UcpExpr::add(
             expression_to_ucp_expr_with_selector_scalar(
                 left,
@@ -412,7 +412,7 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
                 selector_scalar.clone(),
             ),
         ),
-        //Halo2 szorzat rekurzívan UCP szorzássá alakul
+        // A szorzat tényezőit rekurzívan UCP-re fordítja.
         Expression::Product(left, right) => UcpExpr::mul(
             expression_to_ucp_expr_with_selector_scalar(
                 left,
@@ -429,7 +429,7 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
                 selector_scalar.clone(),
             ),
         ),
-        //Halo2 skálázásnál nulla skála azonnal nulla expression
+        // Nulla skálázásnál azonnal nulla kifejezést állít elő.
         Expression::Scaled(inner, scale) => {
             if bool::from(scale.is_zero()) {
                 UcpExpr::zero()
@@ -451,7 +451,7 @@ pub fn expression_to_ucp_expr_with_selector_scalar<F: AnalyzableField>(
             feature = "use_axiom_halo2_proofs",
             feature = "use_scroll_halo2_proofs"
         ))]
-        //Challenge értékét itt nem modellezzük pontosan, ezért absztrakt konstans lesz
+        // A kihívásértéket itt absztrakt konstansként kezeli, konkrét értéket nem feltételez.
         Expression::Challenge(_) => UcpExpr::constant(),
     }
 }
@@ -461,7 +461,7 @@ mod tests {
     use super::*;
     use crate::circuit_analyzer::ucp::cell::CellId;
 
-    //Teszt helper: összegyűjti az expressionben szereplő változó cellákat
+    // A teszt segédfüggvénye összegyűjti a kifejezés cellahivatkozásait.
     fn collect_vars(expr: &UcpExpr, vars: &mut HashSet<CellId>) {
         match expr {
             UcpExpr::Var(cell) => {
@@ -476,7 +476,7 @@ mod tests {
         }
     }
 
-    //Azt ellenőrzi, hogy advice/instance/fixed query-k abszolút UCP cellákká alakulnak
+    // A teszt ellenőrzi az advice, instance és fixed lekérdezések abszolút cellára fordítását.
     #[test]
     fn converts_plonkish_queries_to_absolute_ucp_cells() {
         let mut cs = ConstraintSystem::<Fr>::default();
@@ -504,7 +504,7 @@ mod tests {
         assert!(vars.contains(&CellId::fixed(0, 12)));
     }
 
-    //Azt ellenőrzi, hogy nulla skálával szorzott expression UCP-ben nulla konstans lesz
+    // A teszt ellenőrzi, hogy nullával skálázásnál nulla UCP-konstanst készít.
     #[test]
     fn zero_scaled_expression_is_constant_for_ucp() {
         let expr = Expression::Scaled(Box::new(Expression::Constant(Fr::from(9))), Fr::zero());
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(expression_to_ucp_expr(&expr, 0, 0), UcpExpr::zero());
     }
 
-    //Azt ellenőrzi, hogy egy egyszerű sample gate minden advice cellája átkerül UCP-be
+    // A teszt ellenőrzi, hogy a mintakapu összes advice celláját megőrzi a fordítás.
     #[test]
     fn converts_sample_circuit_gate_expression() {
         let mut cs = ConstraintSystem::<Fr>::default();
@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(vars.len(), 3);
     }
 
-    //Azt ellenőrzi, hogy aktív selector mellett az assignment constraintből lehet propagálni
+    // A teszt ellenőrzi az aktív szelektorral vezérelt értékadási kényszer propagációját.
     #[test]
     fn active_selector_conversion_allows_assign_propagation() {
         use crate::circuit_analyzer::ucp::engine::analyze_expressions;
@@ -579,7 +579,7 @@ mod tests {
         assert!(active_result.all_expressions_unique());
     }
 
-    //Azt ellenőrzi, hogy inaktív selector mellett nem tanulunk advice uniqueness-t
+    // A teszt ellenőrzi, hogy inaktív szelektor mellett nem igazol advice-egyértelműséget.
     #[test]
     fn inactive_selector_conversion_does_not_propagate_assignment() {
         use crate::circuit_analyzer::ucp::engine::analyze_expressions;
@@ -613,7 +613,7 @@ mod tests {
         assert!(inactive_result.all_expressions_unique());
     }
 
-    //Azt ellenőrzi, hogy assigned fixed selector értékből konkrét 1 lesz, így tiszta gate marad
+    // A teszt ellenőrzi, hogy az 1 értékű fixed szelektort konstansként kezeli.
     #[test]
     fn fixed_value_conversion_uses_assigned_one_selector() {
         use crate::circuit_analyzer::ucp::engine::analyze_expressions;
@@ -641,7 +641,7 @@ mod tests {
         assert!(result.all_expressions_unique());
     }
 
-    //Azt ellenőrzi, hogy assigned fixed selector 0 esetén az egész constraint nulla lesz
+    // A teszt ellenőrzi, hogy a 0 értékű fixed szelektor a teljes kényszert lenullázza.
     #[test]
     fn fixed_value_conversion_uses_assigned_zero_selector() {
         use crate::circuit_analyzer::ucp::{

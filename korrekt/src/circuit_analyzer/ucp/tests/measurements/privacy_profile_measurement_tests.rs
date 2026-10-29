@@ -73,6 +73,7 @@ impl Profile {
         PrivacyAnalysisOptions {
             max_semantic_queries: 32,
             solver_timeout_ms: Some(timeout_ms),
+            initial_sat_timeout_ms: None,
             search: PrivacySearchOptions {
                 // No profile silently buys a longer solver timeout on retry.
                 retry_solver_timeout_ms: None,
@@ -749,6 +750,7 @@ fn write_cells(writer: &mut impl Write, cases: &[Measurements]) -> Result<()> {
             "target_role",
             "uniqueness",
             "domain",
+            "domain_is_complete",
             "expected_projection",
             "baseline",
             "ucp_baseline_refined",
@@ -782,6 +784,7 @@ fn write_cells(writer: &mut impl Write, cases: &[Measurements]) -> Result<()> {
                         expected.role.into(),
                         format!("{:?}", cell.uniqueness),
                         format!("{:?}", cell.domain),
+                        cell.domain_is_complete.to_string(),
                         expected
                             .values
                             .as_ref()

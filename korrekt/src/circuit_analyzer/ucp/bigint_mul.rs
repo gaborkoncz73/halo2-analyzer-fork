@@ -1,19 +1,19 @@
 //Ez a modul a cikk BigInt-Mul szabályának Plonkish/UCP megfelelőjét valósítja meg.
-//A szabály lényege: ha több zero equation együtt egy invertálható, konstans
-//együtthatós lineáris rendszert alkot az ismeretlen cellákra, akkor ezek az
-//ismeretlen cellák unique-k.
+// Több nullával egyenlő kifejezést közösen konstans együtthatós lineáris rendszerként vizsgál.
+// Ha a rendszer az ismeretlen cellákra nézve teljes oszloprangú,
+// igazolja ezeknek a celláknak az egyértelműségét.
 //
-// Papíron:
+// A szabály alakja:
 //   A * x_vec - b_vec = 0
-//   b_vec unique
+//    b_vec egyértelmű
 //   A invertálható
 //   ----------------
-//   x_vec unique
+//    x_vec egyértelmű
 //
-//Itt ezt úgy ellenőrizzük, hogy minden equationt felbontunk egy konstans
-//együtthatós A*x részre és egy K alapján unique b részre. Ezután komponensekre
-//bontjuk az ismeretlen cellákat, és csak akkor tanulunk, ha létezik invertálható
-//négyzetes részrendszer modulo p.
+// Minden egyenletet konstans együtthatós A*x részre
+// és K alapján egyértelmű b részre bont. Az összetartozó cellákat komponensekbe rendezi,
+// majd csak invertálható négyzetes részrendszer létezése esetén
+// állapít meg új egyértelműséget a p modulusú testben.
 
 use super::{
     cell::CellId,
@@ -32,7 +32,7 @@ pub struct BigIntMulInference {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct UnknownLinearExpr {
-    //Az ismeretlen cellák konstans field együtthatói: cella -> együttható
+    // Az ismeretlen cellák konkrét testbeli együtthatóit tárolja: cella -> együttható.
     terms: BTreeMap<CellId, BigInt>,
 }
 
@@ -42,7 +42,7 @@ struct LinearEquation {
     unknown_terms: BTreeMap<CellId, BigInt>,
 }
 
-//BigInt-Mul szabály futtatása explicit p modulussal
+// A BigInt-Mul szabályt explicit p modulussal futtatja.
 pub fn infer_bigint_mul_with_modulus(
     expressions: &[UcpExpr],
     facts: &UcpFacts,
@@ -61,8 +61,8 @@ pub fn infer_bigint_mul_with_modulus(
         }
 
         let matrix = coefficient_matrix(&equations, &component);
-        //A rank == változószám feltétel pontosan azt jelenti, hogy a sorok között
-        //van egy invertálható n x n részrendszer, vagyis a képen szereplő A.
+        // A rangot a változók számával összevetve ellenőrzi, hogy létezik-e
+        // invertálható n x n részrendszer.
         if rank_mod(matrix, modulus) == component.cells.len() {
             inferences.extend(component.cells);
         }
@@ -109,10 +109,11 @@ fn collect_linear_equations(
 struct EquationComponent {
     //A komponensben szereplő ismeretlen cellák
     cells: Vec<CellId>,
-    //Azok az equation indexek, amelyek ezekhez a cellákhoz kapcsolódnak
+    // A komponens celláit tartalmazó egyenletek indexeit tárolja.
     equation_indices: Vec<usize>,
 }
 
+// Az együtt szereplő ismeretlen cellák gráfját járja be; a független rendszereket külön választja.
 fn connected_components(equations: &[LinearEquation]) -> Vec<EquationComponent> {
     let mut equations_by_cell: BTreeMap<CellId, Vec<usize>> = BTreeMap::new();
     for (index, equation) in equations.iter().enumerate() {
@@ -188,6 +189,7 @@ fn coefficient_matrix(
     matrix
 }
 
+// Gauss-Jordan-eliminációval csak a rangot számítja ki; konkrét jobb oldali értéket nem igényel.
 fn rank_mod(mut matrix: Vec<Vec<BigInt>>, modulus: &BigInt) -> usize {
     if matrix.is_empty() || matrix[0].is_empty() {
         return 0;
@@ -269,7 +271,7 @@ fn mod_field(value: BigInt, modulus: &BigInt) -> BigInt {
 }
 
 fn linearize_unknown_part(expr: &UcpExpr, facts: &UcpFacts) -> Option<UnknownLinearExpr> {
-    //Ha az egész részexpression unique, akkor ez a b_vec oldal része lehet.
+    // A K alapján egyértelmű részkifejezést a jobb oldalhoz sorolja.
     if expression_is_unique(expr, facts) {
         return Some(UnknownLinearExpr::empty());
     }
@@ -300,8 +302,8 @@ fn linearize_unknown_part(expr: &UcpExpr, facts: &UcpFacts) -> Option<UnknownLin
             if let Some(value) = constant_expr_value(right) {
                 return Some(linearize_unknown_part(left, facts)?.scale(value));
             }
-            //Ha a szorzat unique, akkor már fent visszatértünk. Minden más szorzat
-            //változó együtthatót vagy nemlineáris ismeretlent jelentene, ami nem A*x.
+            // A már egyértelmű szorzatot a jobb oldalhoz sorolja. Más szorzatot csak konkrét
+            // konstans tényező mellett fogad el, hogy az ismeretlen rész lineáris maradjon.
             None
         }
         UcpExpr::Scale(inner, scalar) => match scalar {
@@ -309,8 +311,8 @@ fn linearize_unknown_part(expr: &UcpExpr, facts: &UcpFacts) -> Option<UnknownLin
             UcpScalar::Known(scale) => {
                 Some(linearize_unknown_part(inner, facts)?.scale(scale.clone()))
             }
-            //Absztrakt nonzero/unknown skalárral unknown cellát nem teszünk A-ba,
-            //mert az A mátrix együtthatóinak konkrét field elemeknek kell lenniük.
+            // Absztrakt nemnulla vagy ismeretlen skálával nem képez mátrixegyütthatót,
+            // mert az A mátrixhoz konkrét testelemeket követel meg.
             UcpScalar::NonZero | UcpScalar::Unknown => None,
         },
     }
@@ -332,14 +334,14 @@ fn constant_expr_value(expr: &UcpExpr) -> Option<BigInt> {
 }
 
 impl UnknownLinearExpr {
-    //Üres unknown részt hoz létre, vagyis az expression teljesen a b_vec oldalra kerül
+    // Üres ismeretlen részt készít, így a teljes kifejezés a jobb oldalhoz tartozik.
     fn empty() -> Self {
         Self {
             terms: BTreeMap::new(),
         }
     }
 
-    //Konstans expression unknown része üres
+    // Konstans kifejezéshez üres ismeretlen részt készít.
     fn constant(_value: BigInt) -> Self {
         Self::empty()
     }
@@ -385,7 +387,7 @@ mod tests {
         UcpExpr::add(UcpExpr::add(left, middle), right)
     }
 
-    //Ellenőrzi, hogy egy invertálható 2x2 lineáris rendszerből mindkét ismeretlen unique lesz
+    // A teszt ellenőrzi, hogy invertálható 2x2 rendszerből mindkét cella egyértelműségét igazolja.
     #[test]
     fn infers_unknowns_from_invertible_linear_system() {
         let a = CellId::instance(0, 0);
@@ -417,7 +419,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy szinguláris mátrixból nem következtetünk uniqueness-t
+    // A teszt ellenőrzi, hogy szinguláris rendszerből nem állapít meg egyértelműséget.
     #[test]
     fn does_not_fire_for_singular_matrix() {
         let a = CellId::instance(0, 0);
@@ -443,7 +445,7 @@ mod tests {
         assert!(infer_bigint_mul_with_modulus(&expressions, &facts, &modulus()).is_empty());
     }
 
-    //Ellenőrzi, hogy ha nincs elég független equation, akkor nem következtetünk
+    // A teszt ellenőrzi, hogy elegendő független egyenlet nélkül nem következtet.
     #[test]
     fn does_not_fire_when_rhs_contains_unconstrained_cell() {
         let a = CellId::instance(0, 0);
@@ -463,7 +465,7 @@ mod tests {
         assert!(infer_bigint_mul_with_modulus(&expressions, &facts, &modulus()).is_empty());
     }
 
-    //Ellenőrzi, hogy sparse 3x3 teljes rangú rendszerre is működik
+    // A teszt ellenőrzi a ritka, teljes rangú 3x3 rendszer feldolgozását.
     #[test]
     fn infers_sparse_full_rank_component() {
         let a = CellId::instance(0, 0);
@@ -503,7 +505,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy a b_vec oldal lehet összetett, ha K alapján unique
+    // A teszt ellenőrzi, hogy a jobb oldal összetett, de K alapján egyértelmű kifejezés is lehet.
     #[test]
     fn accepts_unique_nonlinear_rhs_expression() {
         let a = CellId::instance(0, 0);
@@ -535,7 +537,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy unique, de nem konkrét konstans együtthatót nem teszünk az A mátrixba
+    // A teszt ellenőrzi, hogy a rendszer egyértelmű, de konkrétan ismeretlen együtthatót nem tesz A-ba.
     #[test]
     fn rejects_unique_variable_coefficient() {
         let a = CellId::instance(0, 0);
@@ -560,7 +562,7 @@ mod tests {
         assert!(infer_bigint_mul_with_modulus(&expressions, &facts, &modulus()).is_empty());
     }
 
-    //Ellenőrzi, hogy extra equation mellett is elég, ha létezik invertálható négyzetes részrendszer
+    // A teszt ellenőrzi, hogy további egyenletek mellett is felismeri az invertálható részrendszert.
     #[test]
     fn accepts_invertible_square_subsystem_with_extra_equation() {
         let a = CellId::instance(0, 0);

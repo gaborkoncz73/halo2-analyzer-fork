@@ -747,12 +747,14 @@ fn discovers_a_complete_two_value_projection_without_an_initial_domain_then_rest
     let input = discovery_demo_input();
     let coarse = analyze(&circuit, &input, 0, 2);
     assert!(coarse.cells.iter().all(|cell| cell.domain.is_none()));
+    assert!(coarse.cells.iter().all(|cell| !cell.domain_is_complete));
     let report = analyze(&circuit, &input, 3, 2);
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(report.cells[0].domain, Some(domain(&[3, 7])));
     assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::NonUnique);
     assert_eq!(report.cells[1].domain, Some(domain(&[0])));
     assert_eq!(report.cells[1].uniqueness, PrivateCellUniqueness::Unique);
+    assert!(report.cells.iter().all(|cell| cell.domain_is_complete));
     assert!(report
         .cells
         .iter()
@@ -824,6 +826,7 @@ fn two_sat_samples_without_exhaustion_are_non_unique_but_not_a_delta_domain() {
     let circuit = UnboundedProjectionCircuit::<TWO_ROOTS>::new(Fr::from(3), Fr::from(0));
     let report = analyze(&circuit, &discovery_demo_input(), 2, 2);
     assert!(report.cells.iter().all(|cell| cell.domain.is_none()));
+    assert!(report.cells.iter().all(|cell| !cell.domain_is_complete));
     assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::NonUnique);
     assert_eq!(report.cells[1].uniqueness, PrivateCellUniqueness::Unknown);
     let evidence = report.cells[0].domain_discovery.as_ref().unwrap();

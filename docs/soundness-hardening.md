@@ -43,7 +43,7 @@ same domain size. Tests include two distinct rotations referring to one cell.
 
 ## Evidence
 
-`ucp/soundness_regression_tests.rs` contains thirteen regression tests, including
+`ucp/tests/soundness_regression_tests.rs` contains thirteen regression tests, including
 exhaustive solution checks for linear equations and products of affine factors
 over `F_2`, `F_3`, `F_5` and `F_7`. Every inferred domain must contain every actual
 solution, and a uniqueness claim must not admit two distinct solutions.

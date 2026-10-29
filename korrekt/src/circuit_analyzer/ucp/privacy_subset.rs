@@ -1,5 +1,5 @@
-//! Bounded selection of literal original equations using encoder-supplied variable metadata.
-//! A selected conjunction is weaker than the original model, never a replacement for SAT evidence.
+//! Az eredeti egyenletekből korlátos részhalmazt választ a kódolótól kapott változómetaadatok alapján.
+//! A kiválasztott gyengébb konjunkciót kizárási bizonyításhoz használja, teljes modellbeli SAT-bizonyíték helyett nem.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,6 +24,7 @@ impl OriginalAssertionStore {
         self.assertions.len() < MAX_ORIGINAL_RECOVERY_ASSERTIONS
     }
 
+    // Csak a kiegészítő tárolást korlátozza; az eredeti SMT-kontextusból nem töröl állítást.
     pub fn retain(&mut self, body: String, variables: impl IntoIterator<Item = String>) {
         if self.has_capacity() {
             self.assertions.push(OriginalSmtAssertion {
@@ -43,6 +44,8 @@ impl OriginalAssertionStore {
         index
     }
 
+    // A célváltozó kapcsolati környezetét korlátozott mélységig bővíti eredeti egyenletekkel.
+    // A kiválasztás a solvernek átadott állítások szövegét nem írja át.
     pub fn select<'a>(
         &'a self,
         target: &str,
@@ -63,7 +66,7 @@ impl OriginalAssertionStore {
                         break;
                     }
                     if selected.insert(position) {
-                        // Concrete public observations are leaves, not connections to unrelated gates.
+                        // A konkrét publikus megfigyeléseket levélként kezeli, és nem kapcsol rajtuk keresztül független kapukat.
                         next.extend(
                             self.assertions[position]
                                 .variables

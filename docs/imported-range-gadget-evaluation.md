@@ -28,7 +28,7 @@ source is redistributed as a fixture. `Cargo.lock` is ignored by this repository
 the explicit git revisions therefore matter, although registry dependency versions
 still depend on the locally resolved lockfile.
 
-The local harness is `ucp/external_range_tests.rs`. It supplies private values,
+The local harness is `ucp/tests/external/external_range_tests.rs`. It supplies private values,
 the polynomial strict-mode constant column, the lookup table `{0,1,2,3}`, one
 addition gate, and one public instance binding. All range gates, rotations,
 running-sum assignments, and strict final-zero constraints come from the imported

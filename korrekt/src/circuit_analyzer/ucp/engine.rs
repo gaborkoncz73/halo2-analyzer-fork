@@ -1,39 +1,43 @@
 use super::{
     all_but_one::{infer_all_but_one_zero, infer_all_but_one_zero_with_modulus},
-    base_conv::infer_base_conversions_with_modulus,
+    base_conv::{finite_base_candidates, infer_base_conversions_with_modulus},
     bigint_mul::infer_bigint_mul_with_modulus,
     cell::CellId,
     expr::UcpExpr,
     facts::UcpFacts,
+    lookup::{disjoint, entries, UcpLookup},
     rules::{
         expression_is_unique, infer_assigned_cell_from_zero_equation,
         infer_assigned_cell_from_zero_equation_with_modulus,
     },
     value::{
-        infer_domains_from_expression_domain_with_modulus, infer_linear_system_values_with_modulus,
-        infer_value_domains_from_zero_equation,
-        infer_value_domains_from_zero_equation_with_modulus, UcpValueDomain, UcpValueFacts,
+        expression_domain_with_modulus, infer_domains_from_expression_domain_with_modulus,
+        infer_linear_system_values_with_modulus, UcpValueDomain, UcpValueFacts,
     },
 };
-use num_bigint::BigInt;
 
-//Egy expression végső UCP státusza
+#[path = "propagation_cache.rs"]
+mod propagation_cache;
+use num_bigint::BigInt;
+use propagation_cache::PropagationCache;
+
+// Egy kifejezés végső UCP-státuszát jelöli.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UcpExpressionStatus {
-    //A végső K alapján unique
+    // A végső K alapján igazoltan egyértelmű.
     Unique,
-    //A végső K alapján még nem bizonyított unique
+    // A végső K alapján nem igazolta az egyértelműségét.
     Unresolved,
 }
 
-//Egy expression indexéhez tartozó kiértékelési eredmény
+// Egy kifejezés indexéhez rendeli a kiértékelés eredményét.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpExpressionResult {
     pub index: usize,
     pub status: UcpExpressionStatus,
 }
 
-//A megadott target/output cellák constrainedness ellenőrzésének eredménye
+// A megadott kimeneti célcellák egyértelműségi ellenőrzését összesíti.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpTargetCheck {
     pub checked_targets: usize,
@@ -42,7 +46,7 @@ pub struct UcpTargetCheck {
 }
 
 impl UcpTargetCheck {
-    //Igaz, ha nincs unresolved target cella
+    // Azt jelzi, hogy minden célcella egyértelműsége igazolt-e.
     pub fn all_targets_unique(&self) -> bool {
         self.unresolved_targets.is_empty()
     }
@@ -55,23 +59,23 @@ pub struct UcpResult {
     pub facts: UcpFacts,
     //A végső Delta érték/domain információ
     pub value_facts: UcpValueFacts,
-    //Hány expressiont ellenőriztünk
+    // A megvizsgált kifejezések számát tárolja.
     pub checked_expressions: usize,
-    //Hány expression lett unique
+    // Az igazoltan egyértelmű kifejezések számát tárolja.
     pub unique_expressions: usize,
-    //Hány expression maradt unresolved
+    // A nem igazoltan egyértelmű kifejezések számát tárolja.
     pub unresolved_expressions: usize,
-    //Expressionenkénti státusz index alapján
+    // Index szerint tárolja a kifejezések státuszát.
     pub expression_results: Vec<UcpExpressionResult>,
 }
 
 impl UcpResult {
-    //Igaz, ha minden expression unique lett
+    // Azt jelzi, hogy minden kifejezés egyértelműsége igazolt-e.
     pub fn all_expressions_unique(&self) -> bool {
         self.unresolved_expressions == 0
     }
 
-    //Visszaadja az unresolved expressionök indexeit
+    // Visszaadja a nem igazoltan egyértelmű kifejezések indexeit.
     pub fn unresolved_indices(&self) -> Vec<usize> {
         self.expression_results
             .iter()
@@ -82,12 +86,12 @@ impl UcpResult {
             .collect()
     }
 
-    //Igaz, ha minden megadott target cella szerepel a végső K halmazban
+    // Azt jelzi, hogy minden megadott célcella szerepel-e a végső K halmazban.
     pub fn all_targets_unique(&self, targets: &[CellId]) -> bool {
         targets.iter().all(|target| self.facts.is_unique(target))
     }
 
-    //Kigyűjti azokat a target cellákat, amelyek nem kerültek be a K halmazba
+    // Kigyűjti a K halmazból hiányzó célcellákat.
     pub fn unresolved_targets(&self, targets: &[CellId]) -> Vec<CellId> {
         targets
             .iter()
@@ -96,7 +100,7 @@ impl UcpResult {
             .collect()
     }
 
-    //Összefoglaló target check eredményt készít
+    // Elkészíti a célcellák ellenőrzési összefoglalóját.
     pub fn check_targets(&self, targets: &[CellId]) -> UcpTargetCheck {
         let unresolved_targets = self.unresolved_targets(targets);
 
@@ -108,12 +112,12 @@ impl UcpResult {
     }
 }
 
-//UCP futtatása value inference nélkül megadott kezdeti K halmazból
+// A megadott kezdeti K halmazból indít UCP-elemzést, kezdeti értékadatok nélkül.
 pub fn analyze_expressions(expressions: &[UcpExpr], initial_facts: UcpFacts) -> UcpResult {
     analyze_expressions_with_values(expressions, initial_facts, UcpValueFacts::new())
 }
 
-//UCP fixpoint futtatása kezdeti K és Delta információval, modulusfüggő szabályok nélkül
+// Kezdeti K és Delta alapján fixpontig következtet, modulusfüggő szabályok nélkül.
 pub fn analyze_expressions_with_values(
     expressions: &[UcpExpr],
     initial_facts: UcpFacts,
@@ -122,13 +126,14 @@ pub fn analyze_expressions_with_values(
     analyze_expressions_with_optional_modulus(
         expressions,
         &[],
+        &[],
         initial_facts,
         initial_value_facts,
         None,
     )
 }
 
-//UCP fixpoint futtatása a circuit tényleges mezőmodulusával
+// A kapcsolás tényleges testmodulusával futtatja az UCP-fixpontszámítást.
 pub fn analyze_expressions_with_values_and_modulus(
     expressions: &[UcpExpr],
     initial_facts: UcpFacts,
@@ -138,13 +143,14 @@ pub fn analyze_expressions_with_values_and_modulus(
     analyze_expressions_with_optional_modulus(
         expressions,
         &[],
+        &[],
         initial_facts,
         initial_value_facts,
         Some(field_modulus),
     )
 }
 
-/// Propagate zero equations and finite expression memberships in the same Delta fixpoint.
+/// A nullával egyenlő kifejezéseket és a véges tagsági feltételeket közös Delta-fixpontban kezeli.
 pub fn analyze_expressions_with_domains_and_modulus(
     expressions: &[UcpExpr],
     expression_domains: &[(UcpExpr, UcpValueDomain)],
@@ -155,137 +161,396 @@ pub fn analyze_expressions_with_domains_and_modulus(
     analyze_expressions_with_optional_modulus(
         expressions,
         expression_domains,
+        &[],
         initial_facts,
         initial_value_facts,
         Some(field_modulus),
     )
 }
 
+pub fn analyze_expressions_with_relations_and_modulus(
+    expressions: &[UcpExpr],
+    expression_domains: &[(UcpExpr, UcpValueDomain)],
+    lookups: &[UcpLookup],
+    initial_facts: UcpFacts,
+    initial_value_facts: UcpValueFacts,
+    field_modulus: &BigInt,
+) -> UcpResult {
+    analyze_expressions_with_optional_modulus(
+        expressions,
+        expression_domains,
+        lookups,
+        initial_facts,
+        initial_value_facts,
+        Some(field_modulus),
+    )
+}
+
+/// Az ütemezési szimulációban kikapcsolja a beágyazott jelöltvizsgálatot.
+pub(crate) fn simulate_expressions_with_relations_and_modulus(
+    expressions: &[UcpExpr],
+    expression_domains: &[(UcpExpr, UcpValueDomain)],
+    lookups: &[UcpLookup],
+    facts: UcpFacts,
+    values: UcpValueFacts,
+    modulus: &BigInt,
+) -> UcpResult {
+    run(
+        expressions,
+        expression_domains,
+        lookups,
+        facts,
+        values,
+        Some(modulus),
+        false,
+        None,
+    )
+    .0
+}
+
 fn analyze_expressions_with_optional_modulus(
     expressions: &[UcpExpr],
     expression_domains: &[(UcpExpr, UcpValueDomain)],
+    lookups: &[UcpLookup],
     initial_facts: UcpFacts,
     initial_value_facts: UcpValueFacts,
     field_modulus: Option<&BigInt>,
 ) -> UcpResult {
-    //K halmaz: unique-nak ismert cellák
+    run(
+        expressions,
+        expression_domains,
+        lookups,
+        initial_facts,
+        initial_value_facts,
+        field_modulus,
+        true,
+        None,
+    )
+    .0
+}
+
+// A feltételes vizsgálatot korlátozza; nem indít rekurzív próbákat, és félbeszakadásból nem állapít meg cáfolatot.
+const MAX_PACKED_PROBES: usize = 256;
+const MAX_CONDITIONAL_ROUNDS: usize = 16;
+
+fn run(
+    expressions: &[UcpExpr],
+    expression_domains: &[(UcpExpr, UcpValueDomain)],
+    lookups: &[UcpLookup],
+    initial_facts: UcpFacts,
+    initial_value_facts: UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+    allow_probes: bool,
+    round_limit: Option<usize>,
+) -> (UcpResult, bool) {
+    let mut cache = PropagationCache::new(expressions, field_modulus);
+    run_cached(
+        expressions,
+        expression_domains,
+        lookups,
+        initial_facts,
+        initial_value_facts,
+        field_modulus,
+        allow_probes,
+        round_limit,
+        &mut cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cached(
+    expressions: &[UcpExpr],
+    expression_domains: &[(UcpExpr, UcpValueDomain)],
+    lookups: &[UcpLookup],
+    initial_facts: UcpFacts,
+    initial_value_facts: UcpValueFacts,
+    field_modulus: Option<&BigInt>,
+    allow_probes: bool,
+    round_limit: Option<usize>,
+    cache: &mut PropagationCache<'_>,
+) -> (UcpResult, bool) {
+    let _profile = super::profiling::scope(if allow_probes {
+        "ucp.propagation"
+    } else if round_limit.is_some() {
+        "ucp.conditional"
+    } else {
+        "ucp.simulation"
+    });
+    // A kezdeti pontos tényekből levezetett sorok minden leszármazott hipotetikus ágban is érvényesek.
+    cache.prepare_relations(&initial_value_facts);
+    let mut inconsistent = false;
+    let mut probes_left = MAX_PACKED_PROBES;
+    let mut rounds = 0;
+    // A K halmazban az igazoltan egyértelmű cellákat tartja nyilván.
     let mut facts = initial_facts;
     //Delta: ismert értékek és domainek
     let mut value_facts = initial_value_facts;
-    //Ha Delta már induláskor pontos értéket tud egy cellára, abból uniqueness is következik
+    // A kezdeti egyelemű lefedő domainekből egyértelműséget is bejegyez.
     for (cell, domain) in value_facts.domains() {
         if domain.is_singleton() {
             facts.mark_unique(cell.clone());
         }
     }
-    //Addig futunk, amíg valamelyik szabály új információt tanul
+    // Addig ismétli a szabályokat, amíg új tényt tanul, vagy eléri a feltételes körkorlátot.
     let mut changed = true;
 
     while changed {
+        if round_limit.is_some_and(|limit| rounds >= limit) {
+            break;
+        }
+        rounds += 1;
         changed = false;
 
-        for expr in expressions {
-            //Fig. 9-10 value inference: Delta domaineket tanulunk a null-egyenletekből
-            //Először érték/domain információt próbálunk tanulni a zero equationből
-            let value_inferences = match field_modulus {
-                Some(field_modulus) => infer_value_domains_from_zero_equation_with_modulus(
-                    expr,
-                    &value_facts,
-                    field_modulus,
-                ),
-                None => infer_value_domains_from_zero_equation(expr, &value_facts),
+        for (index, expr) in expressions.iter().enumerate() {
+            // A nullával egyenlő kifejezésből először érték- és domainkövetkeztetést végez.
+            // Az új domainből származó pontos értéket a következő szabályok is felhasználhatják.
+            let value_inferences = {
+                let _profile = super::profiling::scope("ucp.equation_domains");
+                cache.infer(index, &value_facts)
             };
 
             for (cell, domain) in value_inferences {
-                changed |= value_facts.mark_domain(cell.clone(), domain);
-                //Konkrét egyértékű domainből uniqueness is következik
+                changed |= learn_domain(
+                    cell.clone(),
+                    domain,
+                    &mut value_facts,
+                    field_modulus,
+                    &mut inconsistent,
+                );
+                // Az egyelemű lefedő domainből egyértelműséget is bejegyez.
                 if value_facts.known_value(&cell).is_some() {
                     changed |= facts.mark_unique(cell);
                 }
             }
 
-            //Ha az expression már unique, nincs mit assign szabállyal tanulni belőle
+            // Az egyértelmű kifejezést kihagyja az új cellát kereső Assign-vizsgálatból.
             if expression_is_unique(expr, &facts) {
                 continue;
             }
 
-            //Assign-szerű szabály: egyetlen lineáris ismeretlen cellát unique-nak jelöl
-            let assigned = match field_modulus {
-                Some(modulus) => {
-                    infer_assigned_cell_from_zero_equation_with_modulus(expr, &facts, modulus)
+            // Az Assign szabállyal egyetlen lineáris ismeretlen cella egyértelműségét igazolja.
+            let assigned = {
+                let _profile = super::profiling::scope("ucp.assign");
+                match field_modulus {
+                    Some(modulus) => {
+                        infer_assigned_cell_from_zero_equation_with_modulus(expr, &facts, modulus)
+                    }
+                    None => infer_assigned_cell_from_zero_equation(expr, &facts),
                 }
-                None => infer_assigned_cell_from_zero_equation(expr, &facts),
             };
             if let Some(cell) = assigned {
                 changed |= facts.mark_unique(cell);
             }
         }
 
-        //Több constraintes all-but-one-0 szabály futtatása
-        let all_but_one = match field_modulus {
-            Some(modulus) => {
-                infer_all_but_one_zero_with_modulus(expressions, &facts, &value_facts, modulus)
+        // Az All-But-One-0 szabályt több kényszeren együttesen alkalmazza.
+        let all_but_one = {
+            let _profile = super::profiling::scope("ucp.all_but_one");
+            match field_modulus {
+                Some(modulus) => {
+                    infer_all_but_one_zero_with_modulus(expressions, &facts, &value_facts, modulus)
+                }
+                None => infer_all_but_one_zero(expressions, &facts, &value_facts),
             }
-            None => infer_all_but_one_zero(expressions, &facts, &value_facts),
         };
         for inference in all_but_one {
             if let Some(value) = inference.value {
-                changed |= value_facts.mark_known(inference.cell.clone(), value);
+                changed |= learn_domain(
+                    inference.cell.clone(),
+                    UcpValueDomain::exact(value),
+                    &mut value_facts,
+                    field_modulus,
+                    &mut inconsistent,
+                );
             }
             changed |= facts.mark_unique(inference.cell);
         }
 
         if let Some(field_modulus) = field_modulus {
-            //Lookup projections remain available when later equations reveal other operands.
-            for (expr, domain) in expression_domains {
-                for (cell, domain) in infer_domains_from_expression_domain_with_modulus(
-                    expr,
-                    domain,
-                    &value_facts,
-                    field_modulus,
-                ) {
-                    changed |= value_facts.mark_domain(cell.clone(), domain);
-                    if value_facts.known_value(&cell).is_some() {
-                        changed |= facts.mark_unique(cell);
+            {
+                let _profile = super::profiling::scope("ucp.lookups");
+                // A lookup-vetületeket újra feldolgozza, ha más egyenletekből új operandusértéket tanul.
+                for (expr, domain) in expression_domains {
+                    for (cell, domain) in infer_domains_from_expression_domain_with_modulus(
+                        expr,
+                        domain,
+                        &value_facts,
+                        field_modulus,
+                    ) {
+                        changed |= learn_domain(
+                            cell.clone(),
+                            domain,
+                            &mut value_facts,
+                            Some(field_modulus),
+                            &mut inconsistent,
+                        );
+                        if value_facts.known_value(&cell).is_some() {
+                            changed |= facts.mark_unique(cell);
+                        }
+                    }
+                }
+                for lookup in lookups {
+                    for (cell, domain) in lookup.infer(&value_facts, field_modulus) {
+                        changed |= learn_domain(
+                            cell.clone(),
+                            domain,
+                            &mut value_facts,
+                            Some(field_modulus),
+                            &mut inconsistent,
+                        );
+                        if value_facts.known_value(&cell).is_some() {
+                            changed |= facts.mark_unique(cell);
+                        }
                     }
                 }
             }
-            //A rangvizsgalat melle konkret megoldast is tanulunk, ami uj Delta koroket indithat.
-            for (cell, value) in
+            // A rangvizsgálat mellett konkrét megoldást is keres, amely további Delta-következtetést indíthat.
+            let linear_values = {
+                let _profile = super::profiling::scope("ucp.linear_systems");
                 infer_linear_system_values_with_modulus(expressions, &value_facts, field_modulus)
-            {
-                changed |= value_facts.mark_known(cell.clone(), value);
+            };
+            for (cell, value) in linear_values {
+                changed |= learn_domain(
+                    cell.clone(),
+                    UcpValueDomain::exact(value),
+                    &mut value_facts,
+                    Some(field_modulus),
+                    &mut inconsistent,
+                );
                 if value_facts.known_value(&cell).is_some() {
                     changed |= facts.mark_unique(cell);
                 }
             }
-            //Base conversion szabály futtatása a circuit tényleges field modulusával
-            for inference in infer_base_conversions_with_modulus(
-                expressions,
-                &facts,
-                &value_facts,
-                field_modulus,
-            ) {
+            // Az alulhatározott lineáris sorokból is átviszi a tartomány- és intervallumkorlátokat.
+            let (domains, conflict) = cache.infer_relations(&value_facts);
+            inconsistent |= conflict;
+            for (cell, domain) in domains {
+                changed |= learn_domain(
+                    cell.clone(),
+                    domain,
+                    &mut value_facts,
+                    Some(field_modulus),
+                    &mut inconsistent,
+                );
+                if value_facts.known_value(&cell).is_some() {
+                    changed |= facts.mark_unique(cell);
+                }
+            }
+            // A Base-Conv szabályt a kapcsolás tényleges testmodulusával futtatja.
+            let base_conversions = {
+                let _profile = super::profiling::scope("ucp.base_conversion");
+                infer_base_conversions_with_modulus(
+                    expressions,
+                    &facts,
+                    &value_facts,
+                    field_modulus,
+                )
+            };
+            for inference in base_conversions {
                 if let Some(value) = inference.value {
-                    changed |= value_facts.mark_known(inference.cell.clone(), value);
+                    changed |= learn_domain(
+                        inference.cell.clone(),
+                        UcpValueDomain::exact(value),
+                        &mut value_facts,
+                        Some(field_modulus),
+                        &mut inconsistent,
+                    );
                 }
                 changed |= facts.mark_unique(inference.cell);
             }
 
-            //BigInt-Mul/lineáris rendszer szabály futtatása a circuit tényleges field modulusával
-            for inference in infer_bigint_mul_with_modulus(expressions, &facts, field_modulus) {
+            // A BigInt-Mul szabályt a kapcsolás tényleges testmodulusával futtatja.
+            let bigint_inferences = {
+                let _profile = super::profiling::scope("ucp.bigint_mul");
+                infer_bigint_mul_with_modulus(expressions, &facts, field_modulus)
+            };
+            for inference in bigint_inferences {
                 changed |= facts.mark_unique(inference.cell);
+            }
+            if round_limit.is_some() {
+                inconsistent |= constraints_inconsistent(
+                    expressions,
+                    expression_domains,
+                    lookups,
+                    &value_facts,
+                    field_modulus,
+                    cache,
+                );
+            }
+            if inconsistent {
+                break;
+            }
+            // A rendes fixpont után külön másolaton kipróbálja a csomagolt értékek jelöltjeit.
+            // Csak bizonyított ellentmondásnál zár ki értéket; a hipotetikus tényeket nem másolja vissza.
+            if !changed && allow_probes && probes_left > 0 {
+                for candidate in finite_base_candidates(expressions, &value_facts, field_modulus) {
+                    let mut kept = std::collections::BTreeSet::new();
+                    for (value, digits) in candidate.branches {
+                        // Elfogyott keretnél megtartja a nem vizsgált jelöltet a lefedés megőrzéséhez.
+                        if probes_left == 0 {
+                            kept.insert(value);
+                            continue;
+                        }
+                        probes_left -= 1;
+                        let Some(digits) = digits else {
+                            continue;
+                        };
+                        let mut hypothetical = value_facts.for_hypothetical_reasoning();
+                        let mut refuted = false;
+                        for (cell, exact) in
+                            std::iter::once((candidate.packed.clone(), value.clone())).chain(digits)
+                        {
+                            learn_domain(
+                                cell,
+                                UcpValueDomain::exact(exact),
+                                &mut hypothetical,
+                                Some(field_modulus),
+                                &mut refuted,
+                            );
+                        }
+                        // A feltételes futásban kikapcsolja a további jelöltpróbákat, és körkorlátot ad.
+                        if !refuted {
+                            refuted = run_cached(
+                                expressions,
+                                expression_domains,
+                                lookups,
+                                facts.clone(),
+                                hypothetical,
+                                Some(field_modulus),
+                                false,
+                                Some(MAX_CONDITIONAL_ROUNDS),
+                                cache,
+                            )
+                            .1;
+                        }
+                        if !refuted {
+                            kept.insert(value);
+                        }
+                    }
+                    if let Some(domain) = UcpValueDomain::finite_set(kept) {
+                        changed |= learn_domain(
+                            candidate.packed.clone(),
+                            domain,
+                            &mut value_facts,
+                            Some(field_modulus),
+                            &mut inconsistent,
+                        );
+                        if value_facts.known_value(&candidate.packed).is_some() {
+                            changed |= facts.mark_unique(candidate.packed);
+                        }
+                    }
+                }
             }
         }
     }
 
-    //Fixpoint után minden expressiont a végső K alapján osztályozunk
+    // A végső K alapján osztályozza a kifejezéseket.
     let mut unique_expressions = 0;
     let mut unresolved_expressions = 0;
     let mut expression_results = Vec::with_capacity(expressions.len());
 
     for (index, expr) in expressions.iter().enumerate() {
-        //Expression unique, ha a végső facts alapján expression_is_unique igaz rá
+        // A kifejezést az expression_is_unique eredménye alapján minősíti egyértelműnek.
         let status = if expression_is_unique(expr, &facts) {
             unique_expressions += 1;
             UcpExpressionStatus::Unique
@@ -297,21 +562,131 @@ fn analyze_expressions_with_optional_modulus(
         expression_results.push(UcpExpressionResult { index, status });
     }
 
-    //A teljes eredmény visszaadása a végső K-val és Deltával együtt
-    UcpResult {
-        facts,
-        value_facts,
-        checked_expressions: expressions.len(),
-        unique_expressions,
-        unresolved_expressions,
-        expression_results,
+    // A végső K és Delta mellett visszaadja az osztályozás eredményét.
+    (
+        UcpResult {
+            facts,
+            value_facts,
+            checked_expressions: expressions.len(),
+            unique_expressions,
+            unresolved_expressions,
+            expression_results,
+        },
+        inconsistent,
+    )
+}
+
+// A domainütközést külön jelzi; a tároló önmagában nem reprezentál üres megoldáshalmazt.
+fn learn_domain(
+    cell: CellId,
+    domain: UcpValueDomain,
+    values: &mut UcpValueFacts,
+    modulus: Option<&BigInt>,
+    inconsistent: &mut bool,
+) -> bool {
+    if let (Some(modulus), Some(existing)) = (modulus, values.domain(&cell)) {
+        *inconsistent |= disjoint(existing, &domain, modulus);
     }
+    values.mark_domain(cell, domain)
+}
+
+fn constraints_inconsistent(
+    expressions: &[UcpExpr],
+    domains: &[(UcpExpr, UcpValueDomain)],
+    lookups: &[UcpLookup],
+    values: &UcpValueFacts,
+    modulus: &BigInt,
+    cache: &mut PropagationCache<'_>,
+) -> bool {
+    let _profile = super::profiling::scope("ucp.consistency");
+    expressions.iter().enumerate().any(|(index, _)| {
+        cache
+            .evaluate(index, values)
+            .is_some_and(|domain| !entries(&domain).contains(&BigInt::from(0)))
+    }) || domains.iter().any(|(expr, required)| {
+        expression_domain_with_modulus(expr, values, modulus)
+            .is_some_and(|domain| disjoint(&domain, required, modulus))
+    }) || lookups
+        .iter()
+        .any(|lookup| lookup.inconsistent(values, modulus))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::circuit_analyzer::ucp::cell::CellId;
+
+    #[test]
+    fn propagation_cache_matches_uncached_conditional_reasoning() {
+        let x = CellId::advice(0, 0);
+        let a = CellId::advice(1, 0);
+        let b = CellId::advice(2, 0);
+        let expressions = [
+            UcpExpr::mul(
+                UcpExpr::var(a.clone()),
+                UcpExpr::add(
+                    UcpExpr::var(a.clone()),
+                    UcpExpr::known_constant((-1).into()),
+                ),
+            ),
+            UcpExpr::mul(
+                UcpExpr::var(b.clone()),
+                UcpExpr::add(
+                    UcpExpr::var(b.clone()),
+                    UcpExpr::known_constant((-1).into()),
+                ),
+            ),
+            UcpExpr::add(
+                UcpExpr::var(x.clone()),
+                UcpExpr::neg(UcpExpr::add(
+                    UcpExpr::var(a.clone()),
+                    UcpExpr::scale_by(
+                        UcpExpr::var(b.clone()),
+                        super::super::expr::UcpScalar::known_i64(2),
+                    ),
+                )),
+            ),
+        ];
+        let lookup = UcpLookup::new(
+            vec![UcpExpr::var(a.clone()), UcpExpr::var(b.clone())],
+            vec![vec![0.into(), 1.into()], vec![1.into(), 0.into()]],
+        )
+        .unwrap();
+        for modulus in [17, 31, 97].map(BigInt::from) {
+            for target in 0..4 {
+                let mut values = UcpValueFacts::new();
+                values.mark_domain(
+                    x.clone(),
+                    UcpValueDomain::finite_set([target.into(), ((target + 1) % 4).into()]).unwrap(),
+                );
+                let mut cached = PropagationCache::new(&expressions, Some(&modulus));
+                let mut uncached = PropagationCache::with_capacity(&expressions, Some(&modulus), 0);
+                let actual = run_cached(
+                    &expressions,
+                    &[],
+                    &[lookup.clone()],
+                    UcpFacts::new(),
+                    values.clone(),
+                    Some(&modulus),
+                    true,
+                    None,
+                    &mut cached,
+                );
+                let expected = run_cached(
+                    &expressions,
+                    &[],
+                    &[lookup.clone()],
+                    UcpFacts::new(),
+                    values,
+                    Some(&modulus),
+                    true,
+                    None,
+                    &mut uncached,
+                );
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 
     #[test]
     fn relational_lookup_domains_join_the_equation_fixpoint() {
@@ -409,7 +784,7 @@ mod tests {
         assert!(result.facts.is_unique(&x));
     }
 
-    //Azt ellenőrzi, hogy az engine külön tudja választani a unique és unresolved expressionöket
+    // A teszt ellenőrzi az egyértelmű és a még nem igazolt kifejezések megkülönböztetését.
     #[test]
     fn classifies_unique_and_unresolved_expressions() {
         let x = CellId::advice(0, 0);
@@ -430,7 +805,7 @@ mod tests {
         assert!(!result.all_expressions_unique());
     }
 
-    //Azt ellenőrzi, hogy minden expression unique esetén a summary is all unique
+    // A teszt ellenőrzi, hogy minden egyértelmű kifejezés esetén az összesítés is sikert jelez.
     #[test]
     fn reports_all_unique_when_every_expression_is_known() {
         let x = CellId::instance(0, 0);
@@ -450,7 +825,7 @@ mod tests {
         assert!(result.all_expressions_unique());
     }
 
-    //Azt ellenőrzi, hogy egy zero equationből az assign szabály új advice cellát tanul
+    // A teszt ellenőrzi, hogy az Assign szabály egy egyenletből új advice cellát határoz meg.
     #[test]
     fn propagates_single_unknown_from_zero_equation() {
         let known = CellId::instance(0, 0);
@@ -469,7 +844,7 @@ mod tests {
         assert!(result.all_expressions_unique());
     }
 
-    //Azt ellenőrzi, hogy a target check csak a megadott output/target cellákat nézi
+    // A teszt ellenőrzi, hogy a célcella-ellenőrzés csak a megadott célokra vonatkozik.
     #[test]
     fn checks_target_cells_against_final_facts() {
         let known = CellId::instance(0, 0);
@@ -492,7 +867,7 @@ mod tests {
         assert_eq!(target_check.unresolved_targets, vec![unresolved]);
     }
 
-    //Azt ellenőrzi, hogy boolean domain önmagában még nem jelent uniqueness-t
+    // A teszt ellenőrzi, hogy a {0,1} domain önmagában nem igazol egyértelműséget.
     #[test]
     fn root_domain_does_not_make_boolean_cell_unique_by_itself() {
         use crate::circuit_analyzer::ucp::value::UcpValueDomain;
@@ -516,7 +891,7 @@ mod tests {
         );
     }
 
-    //Azt ellenőrzi, hogy all-but-one-0 szabály az engine-ben is unique-ként jelöli a kimeneteket
+    // A teszt ellenőrzi, hogy az All-But-One-0 szabály a kimenetek egyértelműségét bejegyzi.
     #[test]
     fn all_but_one_zero_marks_one_hot_outputs_unique() {
         use num_bigint::BigInt;
@@ -559,7 +934,7 @@ mod tests {
         assert_eq!(result.value_facts.known_value(&y2), Some(&BigInt::from(0)));
     }
 
-    //Azt ellenőrzi, hogy base-conv szabály az engine-ben is unique-ként jelöli a biteket
+    // A teszt ellenőrzi, hogy a Base-Conv szabály a bitek egyértelműségét bejegyzi.
     #[test]
     fn base_conv_marks_binary_decomposition_bits_unique() {
         use crate::circuit_analyzer::ucp::{expr::UcpScalar, value::UcpValueDomain};
@@ -603,7 +978,7 @@ mod tests {
         assert_eq!(result.value_facts.known_value(&b2), Some(&BigInt::from(1)));
     }
 
-    //Mar unique cellak konkret megoldasa is elinditja a nemlinearis ertekkovetkeztetest.
+    // A teszt ellenőrzi, hogy már egyértelmű cellák értékvisszaállítása is elindít nemlineáris következtetést.
     #[test]
     fn linear_system_values_unlock_nonlinear_value_inference() {
         let u = CellId::instance(0, 0);
@@ -647,7 +1022,7 @@ mod tests {
         }
     }
 
-    //Azt ellenorzi, hogy a BigInt-Mul/linearis rendszer szabaly az engine-ben is fut
+    // A teszt ellenőrzi a BigInt-Mul szabály beillesztését az UCP-futásba.
     #[test]
     fn bigint_mul_marks_full_rank_linear_system_unique() {
         let a = CellId::instance(0, 0);
@@ -682,7 +1057,7 @@ mod tests {
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
-    //Azt ellenőrzi, hogy Halo2 gate expressionök UCP-re fordítva is elemezhetők
+    // A teszt ellenőrzi a Halo2-kapuk UCP-re fordított kifejezéseinek elemzését.
     #[test]
     fn classifies_plonkish_constraint_system_gate_expressions() {
         use crate::circuit_analyzer::halo2_proofs_libs::*;
@@ -722,7 +1097,7 @@ mod tests {
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
-    //Azt ellenőrzi, hogy plonkish expressionökből automatikusan kigyűjthetők az initial facts elemei
+    // A teszt ellenőrzi a kezdeti tények kigyűjtését PLONKish kifejezésekből.
     #[test]
     fn extracts_initial_facts_from_plonkish_expressions() {
         use crate::circuit_analyzer::halo2_proofs_libs::*;
@@ -760,7 +1135,7 @@ mod tests {
     }
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
-    //Azt ellenőrzi, hogy aktív selectoros assignment láncon végig tud propagálni az UCP
+    // A teszt ellenőrzi az aktív szelektorral vezérelt értékadási lánc propagációját.
     #[test]
     fn propagates_through_selected_plonkish_assignment_chain() {
         use crate::circuit_analyzer::halo2_proofs_libs::*;
@@ -800,7 +1175,7 @@ mod tests {
                     * (z.clone()
                         - Expression::Constant(Fr::from(2)) * y
                         - Expression::Constant(Fr::from(11))),
-                // This gate is inactive, so it must not make `dead` unique.
+                // Az inaktív kapuból nem állapíthatja meg a dead cella egyértelműségét.
                 s_dead * (dead + z - Expression::Constant(Fr::from(13))),
             ]
         });
@@ -829,7 +1204,7 @@ mod tests {
         assert!(result.facts.is_unique(&CellId::advice(1, 0)));
         assert!(result.facts.is_unique(&CellId::advice(2, 0)));
 
-        // The inactive gate contains `dead`, but UCP must not learn it.
+        // A teszt ellenőrzi, hogy az inaktív kapuban szereplő dead celláról nem tanul új tényt.
         assert!(!result.facts.is_unique(&CellId::advice(3, 0)));
 
         assert_eq!(result.checked_expressions, 4);

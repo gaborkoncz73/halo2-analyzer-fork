@@ -7,7 +7,7 @@ observation determines it on its own. This is a synthetic finite-field example,
 not a cryptographic commitment scheme or a claim about protocol zero-knowledge.
 
 The demo uses the existing recovery and independent validation APIs unchanged.
-The circuit variants are in `korrekt/src/circuit_analyzer/ucp/demo_tests.rs`, and
+The circuit variants are in `korrekt/src/circuit_analyzer/ucp/tests/demos/demo_tests.rs`, and
 the repeated measurement suite reuses those same gates.
 
 ## Three Controls

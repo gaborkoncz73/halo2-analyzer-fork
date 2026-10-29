@@ -25,7 +25,8 @@ use super::{
     privacy_domain::PrivateDomainRefinementStatus,
     privacy_observation::PublicObservationEffectReport,
     privacy_validation::{
-        validate_private_recovery_report, PrivateRecoveryValidationReport, RecoveryValidationStatus,
+        validate_private_recovery_report, validate_private_recovery_report_with_timeout,
+        PrivateRecoveryValidationReport, RecoveryValidationStatus,
     },
     value::UcpValueDomain,
 };
@@ -37,6 +38,9 @@ use crate::{
     },
 };
 use std::{array, collections::HashMap, fmt, marker::PhantomData, time::Duration, time::Instant};
+
+#[path = "risk_audit_demo_tests.rs"]
+mod risk_audit;
 
 fn demo_verbose() -> bool {
     std::env::var("UCP_DEMO_VERBOSE").is_ok_and(|value| value == "1")
@@ -95,6 +99,9 @@ fn short_privacy_report(report: &PrivacyAnalysisReport) -> String {
             cell.uniqueness,
             short_demo_domain(cell.domain.as_ref())
         );
+        if cell.domain_is_complete && matches!(cell.domain, Some(UcpValueDomain::FiniteSet(_))) {
+            line.push_str("; complete domain");
+        }
         if let Some(limitation) = &cell.recovery_limitation {
             line.push_str(&format!("; limitation: {limitation:?}"));
         }
@@ -820,6 +827,257 @@ impl Circuit<Fr> for PackagePriceCircuit {
     }
 }
 
+#[derive(Clone, Debug)]
+struct CatalogPackagePriceCircuit {
+    prices: PackagePriceCircuit,
+}
+
+#[derive(Clone, Debug)]
+struct CatalogPackagePriceConfig {
+    core: PackagePriceConfig,
+    catalog_selector: Selector,
+    catalogs: [TableColumn; 2],
+}
+
+impl Circuit<Fr> for CatalogPackagePriceCircuit {
+    type Config = CatalogPackagePriceConfig;
+    type FloorPlanner = SimpleFloorPlanner;
+
+    fn without_witnesses(&self) -> Self {
+        Self {
+            prices: self.prices.without_witnesses(),
+        }
+    }
+
+    fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+        let core = PackagePriceCircuit::configure(meta);
+        let catalog_selector = meta.complex_selector();
+        let catalogs = array::from_fn(|_| meta.lookup_table_column());
+        // Separate lookups impose independent price lists, not a paired table relation.
+        for (column, table, default) in [
+            (core.unit_prices[1], catalogs[0], 10),
+            (core.unit_prices[2], catalogs[1], 20),
+        ] {
+            meta.lookup(|meta| {
+                let q = meta.query_selector(catalog_selector);
+                let price = meta.query_advice(column, Rotation::cur());
+                let default = Expression::Constant(Fr::from(default));
+                vec![(q * (price - default.clone()) + default, table)]
+            });
+        }
+        CatalogPackagePriceConfig {
+            core,
+            catalog_selector,
+            catalogs,
+        }
+    }
+
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fr>,
+    ) -> Result<(), Error> {
+        layouter.assign_table(
+            || "public unit-price catalogs",
+            |mut table| {
+                for (row, price) in (10..=90).step_by(10).enumerate() {
+                    table.assign_cell(
+                        || "Y price",
+                        config.catalogs[0],
+                        row,
+                        || Value::known(Fr::from(price)),
+                    )?;
+                }
+                // Equal table-column heights; duplicates do not add allowed prices.
+                for (row, price) in [20, 40, 60].into_iter().cycle().take(9).enumerate() {
+                    table.assign_cell(
+                        || "Z price",
+                        config.catalogs[1],
+                        row,
+                        || Value::known(Fr::from(price)),
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+        layouter.assign_region(
+            || "private catalog prices and public package prices",
+            |mut region| {
+                config.core.first_package.enable(&mut region, 0)?;
+                config.core.second_package.enable(&mut region, 1)?;
+                config.catalog_selector.enable(&mut region, 0)?;
+                for (column, price) in config.core.unit_prices.into_iter().zip([
+                    self.prices.x,
+                    self.prices.y,
+                    self.prices.z,
+                ]) {
+                    region.assign_advice(
+                        || "private unit price",
+                        column,
+                        0,
+                        || Value::known(Fr::from(price)),
+                    )?;
+                }
+                Ok(())
+            },
+        )
+    }
+}
+
+const RESIDUE_BUCKET_MODULI: [u64; 3] = [3, 5, 7];
+const RESIDUE_BUCKET_BOUND: u64 = 105;
+
+#[derive(Clone, Debug)]
+struct ResidueBucketsCircuit<const PUBLISHED: usize> {
+    secret: u64,
+    quotients: [u64; 3],
+    remainders: [u64; 3],
+}
+
+impl<const PUBLISHED: usize> ResidueBucketsCircuit<PUBLISHED> {
+    fn new(secret: u64) -> Self {
+        Self {
+            secret,
+            quotients: RESIDUE_BUCKET_MODULI.map(|modulus| secret / modulus),
+            remainders: RESIDUE_BUCKET_MODULI.map(|modulus| secret % modulus),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResidueBucketsConfig {
+    secret: Column<Advice>,
+    quotients: [Column<Advice>; 3],
+    remainders: [Column<Advice>; 3],
+    public: Column<Instance>,
+    selector: Selector,
+    tables: [TableColumn; 7],
+}
+
+impl<const PUBLISHED: usize> Circuit<Fr> for ResidueBucketsCircuit<PUBLISHED> {
+    type Config = ResidueBucketsConfig;
+    type FloorPlanner = SimpleFloorPlanner;
+
+    fn without_witnesses(&self) -> Self {
+        Self::new(0)
+    }
+
+    fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+        assert!(PUBLISHED <= RESIDUE_BUCKET_MODULI.len());
+        let secret = meta.advice_column();
+        let quotients = array::from_fn(|_| meta.advice_column());
+        let remainders = array::from_fn(|_| meta.advice_column());
+        let public = meta.instance_column();
+        meta.enable_equality(public);
+        for column in remainders {
+            meta.enable_equality(column);
+        }
+        let selector = meta.complex_selector();
+        let tables = array::from_fn(|_| meta.lookup_table_column());
+        for (index, modulus) in RESIDUE_BUCKET_MODULI.into_iter().enumerate() {
+            meta.create_gate("bounded quotient and remainder", |meta| {
+                let q = meta.query_selector(selector);
+                let x = meta.query_advice(secret, Rotation::cur());
+                let quotient = meta.query_advice(quotients[index], Rotation::cur());
+                let remainder = meta.query_advice(remainders[index], Rotation::cur());
+                vec![q * (x - Expression::Constant(Fr::from(modulus)) * quotient - remainder)]
+            });
+        }
+        let columns = [
+            secret,
+            quotients[0],
+            quotients[1],
+            quotients[2],
+            remainders[0],
+            remainders[1],
+            remainders[2],
+        ];
+        // Independent memberships, not tuples that correlate the seven table columns.
+        for (column, table) in columns.into_iter().zip(tables) {
+            meta.lookup(|meta| {
+                let q = meta.query_selector(selector);
+                let value = meta.query_advice(column, Rotation::cur());
+                vec![(q * value, table)]
+            });
+        }
+        ResidueBucketsConfig {
+            secret,
+            quotients,
+            remainders,
+            public,
+            selector,
+            tables,
+        }
+    }
+
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fr>,
+    ) -> Result<(), Error> {
+        layouter.assign_table(
+            || "bounded integer division ranges",
+            |mut table| {
+                for row in 0..RESIDUE_BUCKET_BOUND {
+                    let values = [
+                        row,
+                        row % (RESIDUE_BUCKET_BOUND / 3),
+                        row % (RESIDUE_BUCKET_BOUND / 5),
+                        row % (RESIDUE_BUCKET_BOUND / 7),
+                        row % 3,
+                        row % 5,
+                        row % 7,
+                    ];
+                    // Repeated entries give all columns equal height without changing their sets.
+                    for (column, value) in config.tables.into_iter().zip(values) {
+                        table.assign_cell(
+                            || "allowed integer value",
+                            column,
+                            row as usize,
+                            || Value::known(Fr::from(value)),
+                        )?;
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        let remainder_cells = layouter.assign_region(
+            || "private input and bounded divisions",
+            |mut region| {
+                config.selector.enable(&mut region, 0)?;
+                region.assign_advice(
+                    || "private input x",
+                    config.secret,
+                    0,
+                    || Value::known(Fr::from(self.secret)),
+                )?;
+                for (column, value) in config.quotients.into_iter().zip(self.quotients) {
+                    region.assign_advice(
+                        || "private quotient",
+                        column,
+                        0,
+                        || Value::known(Fr::from(value)),
+                    )?;
+                }
+                let mut cells = Vec::new();
+                for (column, value) in config.remainders.into_iter().zip(self.remainders) {
+                    cells.push(region.assign_advice(
+                        || "remainder, published only when selected",
+                        column,
+                        0,
+                        || Value::known(Fr::from(value)),
+                    )?);
+                }
+                Ok(cells)
+            },
+        )?;
+        for (row, cell) in remainder_cells.iter().take(PUBLISHED).enumerate() {
+            layouter.constrain_instance(cell.cell(), config.public, row)?;
+        }
+        Ok(())
+    }
+}
+
 fn analyzer_input_without_public_inputs() -> AnalyzerInput {
     AnalyzerInput {
         verification_method: VerificationMethod::None,
@@ -1151,6 +1409,52 @@ fn demo_independent_validation_detects_a_wrong_recovered_bit() {
 }
 
 #[test]
+fn demo_independent_validation_can_use_a_separate_timeout() {
+    let circuit = PrivateAmountBitsCircuit::<4>::new(13);
+    let input = analyzer_input_with_public_amount(13);
+    let report = analyze_private_recoverability::<Fr, _, _>(
+        &circuit,
+        4,
+        &input,
+        bit_targets::<4>(),
+        PrivacyAnalysisOptions {
+            solver_timeout_ms: Some(2_000),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let inherited =
+        validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &report).unwrap();
+    assert_eq!(inherited.solver_timeout_ms, Some(2_000));
+    assert_eq!(inherited.status, RecoveryValidationStatus::VerifiedDomains);
+    let longer = validate_private_recovery_report_with_timeout::<Fr, _>(
+        &circuit,
+        4,
+        &input,
+        &report,
+        Some(30_000),
+    )
+    .unwrap();
+    assert_eq!(longer.solver_timeout_ms, Some(30_000));
+    assert_eq!(longer.status, inherited.status);
+    assert_eq!(longer.domain_queries, inherited.domain_queries);
+    assert_eq!(report.options.solver_timeout_ms, Some(2_000));
+    for (before, after) in inherited.cells.iter().zip(&longer.cells) {
+        assert_eq!(before.cell, after.cell);
+        assert_eq!(before.status, after.status);
+        assert_eq!(before.counterexample, after.counterexample);
+    }
+    assert!(validate_private_recovery_report_with_timeout::<Fr, _>(
+        &circuit,
+        4,
+        &input,
+        &report,
+        Some(0),
+    )
+    .is_err());
+}
+
+#[test]
 fn demo_package_prices_recover_one_private_unit_price() {
     let circuit = PackagePriceCircuit {
         x: 100,
@@ -1234,7 +1538,7 @@ fn demo_package_prices_recover_one_private_unit_price() {
         assert!(cell.domain.is_none());
     }
 
-    // Current local rules do not isolate x in this rank-deficient linear system.
+    // Az elimináció a teljes tanú egyértelműsége nélkül is elkülöníti x értékét.
     let propagated = analyze_private_recoverability::<Fr, _, _>(
         &alternate,
         4,
@@ -1246,14 +1550,17 @@ fn demo_package_prices_recover_one_private_unit_price() {
         },
     )
     .unwrap();
-    assert_eq!(propagated.status, PrivacyAnalysisStatus::QueryLimitReached);
+    assert_eq!(propagated.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(propagated.semantic_queries, 0);
-    assert_eq!(propagated.summary.exact_values, 0);
+    assert_eq!(propagated.summary.exact_values, 1);
     assert_eq!(
         propagated.cells[0].uniqueness,
-        PrivateCellUniqueness::Unknown
+        PrivateCellUniqueness::Unique
     );
-    assert!(propagated.cells[0].domain.is_none());
+    assert_eq!(
+        propagated.cells[0].domain,
+        Some(UcpValueDomain::exact(100.into()))
+    );
 
     let recovered_again = analyze_private_recoverability::<Fr, _, _>(
         &alternate,
@@ -1269,7 +1576,7 @@ fn demo_package_prices_recover_one_private_unit_price() {
         recovered_again.cells[0].uniqueness,
         PrivateCellUniqueness::Unique
     );
-    assert!(recovered_again.semantic_queries > 0);
+    assert_eq!(recovered_again.semantic_queries, 0);
 
     let validation =
         validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &report).unwrap();
@@ -1279,6 +1586,474 @@ fn demo_package_prices_recover_one_private_unit_price() {
     );
     assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
     assert_eq!(validation.domain_queries, 1);
+}
+
+#[test]
+fn demo_package_price_catalogs_recover_x_and_restrict_y() {
+    let circuit = CatalogPackagePriceCircuit {
+        prices: PackagePriceCircuit {
+            x: 100,
+            y: 40,
+            z: 60,
+        },
+    };
+    let instances = || vec![vec![Fr::from(300), Fr::from(500)]];
+    // Every remaining Y candidate has a full satisfying witness under the same observations.
+    for (y, z) in [(40, 60), (60, 40), (80, 20)] {
+        let witness = CatalogPackagePriceCircuit {
+            prices: PackagePriceCircuit { x: 100, y, z },
+        };
+        zcash_halo2_proofs::dev::MockProver::run(5, &witness, instances())
+            .unwrap()
+            .assert_satisfied();
+    }
+    // The first two witnesses satisfy their package equations but violate one catalog each.
+    for (prices, public) in [
+        (
+            PackagePriceCircuit {
+                x: 100,
+                y: 15,
+                z: 20,
+            },
+            [235, 370],
+        ),
+        (
+            PackagePriceCircuit {
+                x: 100,
+                y: 50,
+                z: 50,
+            },
+            [300, 500],
+        ),
+        (
+            PackagePriceCircuit {
+                x: 101,
+                y: 40,
+                z: 60,
+            },
+            [300, 500],
+        ),
+        (circuit.prices.clone(), [301, 500]),
+        (circuit.prices.clone(), [300, 501]),
+    ] {
+        assert!(zcash_halo2_proofs::dev::MockProver::run(
+            5,
+            &CatalogPackagePriceCircuit { prices },
+            vec![public.into_iter().map(Fr::from).collect()],
+        )
+        .unwrap()
+        .verify()
+        .is_err());
+    }
+
+    let input = AnalyzerInput {
+        verification_method: VerificationMethod::Specific,
+        verification_input: VerificationInput::new(
+            [("I-0-0".into(), 300), ("I-0-1".into(), 500)],
+            1,
+        ),
+        lookup_method: LookupMethod::InlineConstraints,
+    };
+    let targets = [CellId::advice(0, 0), CellId::advice(1, 0)];
+    let options = PrivacyAnalysisOptions {
+        max_semantic_queries: 16,
+        solver_timeout_ms: Some(2_000),
+        domain_refinement: super::privacy_domain::PrivacyDomainRefinementOptions {
+            max_solver_checks: 64,
+            max_candidates_per_cell: 16,
+        },
+        ..Default::default()
+    };
+    println!(
+        "Public packages: A=300, B=500; Y catalog={:?}; Z catalog={:?}",
+        [10, 20, 30, 40, 50, 60, 70, 80, 90],
+        [20, 40, 60]
+    );
+    let propagated = analyze_private_recoverability::<Fr, _, _>(
+        &circuit,
+        5,
+        &input,
+        targets.clone(),
+        PrivacyAnalysisOptions {
+            max_semantic_queries: 0,
+            domain_refinement: Default::default(),
+            ..options
+        },
+    )
+    .unwrap();
+    print_privacy_demo(
+        "Catalog package prices: propagation-only recovery:",
+        &propagated,
+    );
+    // Catalog domains enable stronger UCP deductions than the unrestricted merchant example.
+    assert_eq!(propagated.status, PrivacyAnalysisStatus::QueryLimitReached);
+    assert_eq!(propagated.semantic_queries, 0);
+    assert_eq!(propagated.domain_refinement_statistics.solver_checks, 0);
+    assert_eq!(propagated.domain_discovery_statistics.solver_checks, 0);
+    assert_eq!(
+        propagated.cells[0].domain,
+        Some(UcpValueDomain::exact(100.into()))
+    );
+    assert_eq!(
+        propagated.cells[0].uniqueness,
+        PrivateCellUniqueness::Unique
+    );
+    assert_eq!(
+        propagated.cells[1].domain,
+        UcpValueDomain::finite_set([40, 60, 80].map(num_bigint::BigInt::from))
+    );
+    assert_eq!(
+        propagated.cells[1].uniqueness,
+        PrivateCellUniqueness::Unknown
+    );
+    assert!(!propagated.cells[1].domain_is_complete);
+
+    let report =
+        analyze_private_recoverability::<Fr, _, _>(&circuit, 5, &input, targets.clone(), options)
+            .unwrap();
+    print_privacy_demo(
+        "Catalog package prices: recover x=100 and narrow Y from nine prices to {40,60,80}:",
+        &report,
+    );
+    assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+    assert_eq!(report.summary.exact_values, 1);
+    assert_eq!(report.summary.finite_domains, 1);
+    assert_eq!(report.summary.unique_cells, 1);
+    assert_eq!(report.summary.non_unique_cells, 1);
+    assert!(report.domain_refinement_statistics.solver_checks > 0);
+    let [x, y] = report.cells.as_slice() else {
+        panic!("Expected exactly the selected private prices x and y");
+    };
+    assert_eq!(x.cell, targets[0]);
+    assert_eq!(x.domain, Some(UcpValueDomain::exact(100.into())));
+    assert_eq!(x.uniqueness, PrivateCellUniqueness::Unique);
+    assert!(x.domain_is_complete);
+    assert!(x.baseline_domain.is_none());
+    assert_eq!(y.cell, targets[1]);
+    assert_eq!(
+        y.baseline_domain,
+        UcpValueDomain::finite_set((10..=90).step_by(10).map(num_bigint::BigInt::from))
+    );
+    assert_eq!(
+        y.domain,
+        UcpValueDomain::finite_set([40, 60, 80].map(num_bigint::BigInt::from))
+    );
+    assert_eq!(y.uniqueness, PrivateCellUniqueness::NonUnique);
+    assert!(y.domain_refined_from_baseline);
+    assert!(y.domain_is_complete);
+
+    let alternate = CatalogPackagePriceCircuit {
+        prices: PackagePriceCircuit {
+            x: 100,
+            y: 80,
+            z: 20,
+        },
+    };
+    let recovered_again =
+        analyze_private_recoverability::<Fr, _, _>(&alternate, 5, &input, targets, options)
+            .unwrap();
+    assert_eq!(recovered_again.status, report.status);
+    for (first, second) in report.cells.iter().zip(&recovered_again.cells) {
+        assert_eq!(first.cell, second.cell);
+        assert_eq!(first.domain, second.domain);
+        assert_eq!(first.uniqueness, second.uniqueness);
+        assert_eq!(first.domain_is_complete, second.domain_is_complete);
+    }
+
+    let validation =
+        validate_private_recovery_report::<Fr, _>(&circuit, 5, &input, &report).unwrap();
+    print_validation_demo(
+        "Independent check of the exact price and covering domain:",
+        &validation,
+    );
+    assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
+    assert_eq!(validation.domain_queries, 2);
+
+    let mut false_report = report;
+    false_report.cells[1].domain =
+        UcpValueDomain::finite_set([40, 60].map(num_bigint::BigInt::from));
+    let refuted =
+        validate_private_recovery_report::<Fr, _>(&circuit, 5, &input, &false_report).unwrap();
+    assert_eq!(refuted.status, RecoveryValidationStatus::Refuted);
+    assert_eq!(refuted.cells[1].counterexample, Some(80.into()));
+}
+
+#[test]
+fn demo_residue_buckets_combine_partial_domains_into_exact_recovery() {
+    fn check<const PUBLISHED: usize>(validation_timeout_ms: Option<u64>) -> PrivacyAnalysisStatus {
+        let circuit = ResidueBucketsCircuit::<PUBLISHED>::new(68);
+        let observations = [2_u64, 3, 5];
+        let instances = || {
+            vec![observations[..PUBLISHED]
+                .iter()
+                .copied()
+                .map(Fr::from)
+                .collect()]
+        };
+        // This bounded enumeration is the test oracle, never an analyzer premise.
+        let expected: Vec<_> = (0..RESIDUE_BUCKET_BOUND)
+            .filter(|value| {
+                RESIDUE_BUCKET_MODULI
+                    .iter()
+                    .zip(observations)
+                    .take(PUBLISHED)
+                    .all(|(modulus, remainder)| value % modulus == remainder)
+            })
+            .collect();
+        assert_eq!(expected.len(), [105, 35, 7, 1][PUBLISHED]);
+        for value in 0..RESIDUE_BUCKET_BOUND {
+            let accepted = zcash_halo2_proofs::dev::MockProver::run(
+                7,
+                &ResidueBucketsCircuit::<PUBLISHED>::new(value),
+                instances(),
+            )
+            .unwrap()
+            .verify()
+            .is_ok();
+            assert_eq!(accepted, expected.contains(&value));
+        }
+        for row in 0..PUBLISHED {
+            let mut wrong = instances();
+            wrong[0][row] = Fr::from((observations[row] + 1) % RESIDUE_BUCKET_MODULI[row]);
+            assert!(zcash_halo2_proofs::dev::MockProver::run(7, &circuit, wrong)
+                .unwrap()
+                .verify()
+                .is_err());
+        }
+        if PUBLISHED == 0 {
+            let mut bad_remainder = circuit.clone();
+            // Preserve x=3q+r, but violate r<3 while keeping the quotient in range.
+            bad_remainder.quotients[0] -= 1;
+            bad_remainder.remainders[0] += 3;
+            assert!(
+                zcash_halo2_proofs::dev::MockProver::run(7, &bad_remainder, instances())
+                    .unwrap()
+                    .verify()
+                    .is_err()
+            );
+            assert!(zcash_halo2_proofs::dev::MockProver::run(
+                7,
+                &ResidueBucketsCircuit::<PUBLISHED>::new(105),
+                instances(),
+            )
+            .unwrap()
+            .verify()
+            .is_err());
+        }
+
+        let input = AnalyzerInput {
+            verification_method: if PUBLISHED == 0 {
+                VerificationMethod::None
+            } else {
+                VerificationMethod::Specific
+            },
+            verification_input: VerificationInput::new(
+                observations
+                    .iter()
+                    .take(PUBLISHED)
+                    .enumerate()
+                    .map(|(row, value)| (format!("I-0-{row}"), *value)),
+                1,
+            ),
+            lookup_method: LookupMethod::InlineConstraints,
+        };
+        let target = CellId::advice(0, 0);
+        let expected_domain =
+            UcpValueDomain::finite_set(expected.iter().copied().map(num_bigint::BigInt::from))
+                .unwrap();
+        let propagation_options = PrivacyAnalysisOptions {
+            max_semantic_queries: 0,
+            solver_timeout_ms: Some(2_000),
+            ..Default::default()
+        };
+        let propagate = |witness: &ResidueBucketsCircuit<PUBLISHED>| {
+            let analyzable =
+                crate::circuit_analyzer::analyzable::Analyzable::<Fr>::config_and_synthesize(
+                    witness, 7,
+                )
+                .unwrap();
+            let problem = super::extractor::extract_ucp_problem(&analyzable);
+            let mut values = problem.initial_value_facts.clone();
+            for (row, value) in observations.iter().take(PUBLISHED).enumerate() {
+                values.mark_known(CellId::instance(0, row as i32), (*value).into());
+            }
+            problem.analyze_with_values(problem.initial_facts.clone(), values)
+        };
+        // MockProver establishes fixture satisfiability; this kernel check is not an API report.
+        let propagated = propagate(&circuit);
+        println!(
+            "CRT buckets: {PUBLISHED} public remainders; UCP kernel: {}",
+            short_demo_domain(propagated.value_facts.domain(&target))
+        );
+        assert_eq!(
+            propagated.value_facts.domain(&target),
+            Some(&expected_domain)
+        );
+        assert_eq!(propagated.facts.is_unique(&target), PUBLISHED == 3);
+        if let Some(other) = expected.iter().copied().find(|value| *value != 68) {
+            let alternate = propagate(&ResidueBucketsCircuit::<PUBLISHED>::new(other));
+            assert_eq!(
+                alternate.value_facts.domain(&target),
+                propagated.value_facts.domain(&target)
+            );
+            assert_eq!(
+                alternate.facts.is_unique(&target),
+                propagated.facts.is_unique(&target)
+            );
+        }
+
+        let options = PrivacyAnalysisOptions {
+            max_semantic_queries: 8,
+            search: super::privacy::PrivacySearchOptions {
+                max_bridge_queries: 0,
+                max_retries_per_target: 0,
+                retry_solver_timeout_ms: None,
+                ..Default::default()
+            },
+            domain_refinement: super::privacy_domain::PrivacyDomainRefinementOptions {
+                // The no-publication control need not re-enumerate the entire known input range.
+                max_solver_checks: if PUBLISHED == 0 { 0 } else { 64 },
+                max_candidates_per_cell: RESIDUE_BUCKET_BOUND as usize,
+            },
+            ..propagation_options
+        };
+        let report = analyze_private_recoverability::<Fr, _, _>(
+            &circuit,
+            7,
+            &input,
+            [target.clone()],
+            options,
+        )
+        .unwrap();
+        print_privacy_demo(
+            &format!(
+                "CRT buckets: {PUBLISHED} public remainders, expected {} feasible inputs:",
+                expected.len()
+            ),
+            &report,
+        );
+        let status = report.status;
+        if report.ucp_result.is_none() {
+            assert_eq!(status, PrivacyAnalysisStatus::SolverUnknown);
+            assert!(report.cells.iter().all(|cell| {
+                cell.domain.is_none() && cell.uniqueness == PrivateCellUniqueness::Unknown
+            }));
+            println!("CRT buckets: {PUBLISHED} public remainders; initial SAT incomplete");
+            return status;
+        }
+        assert_ne!(status, PrivacyAnalysisStatus::Inconsistent);
+        assert_eq!(report.cells.len(), 1);
+        assert_eq!(report.cells[0].cell, target);
+        assert_eq!(report.cells[0].domain.as_ref(), Some(&expected_domain));
+        assert_eq!(
+            report.cells[0].baseline_domain,
+            UcpValueDomain::finite_set((0..RESIDUE_BUCKET_BOUND).map(num_bigint::BigInt::from))
+        );
+        if PUBLISHED == 3 {
+            assert_eq!(status, PrivacyAnalysisStatus::Analyzed);
+            assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::Unique);
+            assert!(report.cells[0].domain_is_complete);
+            assert_eq!(report.semantic_queries, 0);
+        } else {
+            assert_ne!(report.cells[0].uniqueness, PrivateCellUniqueness::Unique);
+            if report.cells[0].domain_is_complete {
+                assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::NonUnique);
+            }
+        }
+
+        match validate_private_recovery_report_with_timeout::<Fr, _>(
+            &circuit,
+            7,
+            &input,
+            &report,
+            validation_timeout_ms,
+        ) {
+            Ok(validation) => {
+                print_validation_demo("Fresh check of the CRT covering domain:", &validation);
+                assert_eq!(validation.status, RecoveryValidationStatus::VerifiedDomains);
+                assert_eq!(validation.domain_queries, 1);
+                assert_eq!(
+                    validation.solver_timeout_ms,
+                    validation_timeout_ms.or(report.options.solver_timeout_ms)
+                );
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<crate::smt_solver::smt_parser::UnknownSolverResult>()
+                    .is_some() =>
+            {
+                println!(
+                    "CRT buckets: {PUBLISHED} public remainders; validation incomplete: {error:#}"
+                );
+            }
+            Err(error) => panic!("CRT validation failed: {error:#}"),
+        }
+
+        if PUBLISHED >= 2 {
+            let mut false_report = report;
+            false_report.cells[0].domain = if PUBLISHED == 3 {
+                Some(UcpValueDomain::exact(67.into()))
+            } else {
+                UcpValueDomain::finite_set(
+                    expected
+                        .iter()
+                        .copied()
+                        .filter(|value| *value != 68)
+                        .map(num_bigint::BigInt::from),
+                )
+            };
+            match validate_private_recovery_report_with_timeout::<Fr, _>(
+                &circuit,
+                7,
+                &input,
+                &false_report,
+                validation_timeout_ms,
+            ) {
+                Ok(refuted) => {
+                    print_validation_demo(
+                        "Fresh check of an intentionally false CRT domain:",
+                        &refuted,
+                    );
+                    assert_eq!(refuted.status, RecoveryValidationStatus::Refuted);
+                    assert_eq!(refuted.cells[0].counterexample, Some(68.into()));
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::smt_solver::smt_parser::UnknownSolverResult>()
+                        .is_some() =>
+                {
+                    println!("CRT buckets: false-domain check incomplete: {error:#}");
+                }
+                Err(error) => panic!("CRT false-domain check failed: {error:#}"),
+            }
+        }
+        status
+    }
+
+    let validation_timeout_ms = std::env::var_os("UCP_CRT_VALIDATION_TIMEOUT_MS").map(|value| {
+        let value = value
+            .to_str()
+            .expect("CRT validation timeout must be valid text")
+            .parse::<u64>()
+            .expect("CRT validation timeout must be a positive integer in milliseconds");
+        assert!(
+            value > 0,
+            "CRT validation timeout must be greater than zero"
+        );
+        value
+    });
+    println!(
+        "CRT timeouts: recovery=2000 ms/invocation; validation={} ms/invocation",
+        validation_timeout_ms.unwrap_or(2_000)
+    );
+    let statuses = [
+        check::<0>(validation_timeout_ms),
+        check::<1>(validation_timeout_ms),
+        check::<2>(validation_timeout_ms),
+        check::<3>(validation_timeout_ms),
+    ];
+    println!("CRT bounded API statuses for 0/1/2/3 public remainders: {statuses:?}");
+    assert_eq!(statuses[3], PrivacyAnalysisStatus::Analyzed);
 }
 
 //Mindket publikacio kulon-kulon tobb ervenyes titkot enged: nincs Exact teny.
@@ -1336,7 +2111,10 @@ fn demo_linear_masking_reused_mask_leaks_secret_through_composition() {
         PrivacyAnalysisOptions::default(),
     )
     .unwrap();
-    print_privacy_demo("\nReused mask: a=100, b=142; a=s+r, b=2s+r -> s=b-a, r=2a-b", &report);
+    print_privacy_demo(
+        "\nReused mask: a=100, b=142; a=s+r, b=2s+r -> s=b-a, r=2a-b",
+        &report,
+    );
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(report.summary.exact_values, 2);
     assert_eq!(report.summary.unique_cells, 2);
@@ -1777,6 +2555,7 @@ mod output_tests {
                     query_attempts: 0,
                     uniqueness: PrivateCellUniqueness::Unique,
                     domain: Some(UcpValueDomain::exact(value.into())),
+                    domain_is_complete: true,
                     baseline_domain: None,
                     domain_refined_from_baseline: true,
                     recovery_limitation: None,
@@ -1797,6 +2576,7 @@ mod output_tests {
             domain_refinement_statistics: Default::default(),
             domain_discovery_statistics: Default::default(),
             satisfiability_checks: 1,
+            satisfiability_evidence: None,
             elapsed: Duration::from_millis(6),
             options: PrivacyAnalysisOptions::default(),
             ucp_result: None,
@@ -1888,6 +2668,7 @@ mod output_tests {
             domain_queries: 1,
             solver_checks: 2,
             subset_checks: 1,
+            solver_timeout_ms: Some(2_000),
             elapsed: Duration::from_millis(16),
         };
         let text = short_validation_report(&report);

@@ -29,6 +29,7 @@ fn measure<C: Circuit<Fr>>(
         let options = PrivacyAnalysisOptions {
             max_semantic_queries: 8,
             solver_timeout_ms: Some(2_000),
+            initial_sat_timeout_ms: None,
             search: super::privacy::PrivacySearchOptions {
                 retry_solver_timeout_ms: None,
                 ..Default::default()

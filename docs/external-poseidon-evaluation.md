@@ -8,7 +8,7 @@ pinned to the analyzer-compatible revision `7fc5e14d53c19cc4e09f0af2ed4b87440e1b
 The contiguous circuit/spec excerpt is unchanged, uses the imported Pow5Chip,
 and keeps 8 full rounds, 56 partial rounds, width 3, rate 2 and a two-word message.
 There is no reduced-round or polynomial surrogate. Source/excerpt hashes and the
-MIT notice are recorded in `ucp/external_fixtures/README.md`.
+MIT notice are recorded in `ucp/tests/external/fixtures/README.md`.
 
 This extends the evaluation to a cryptographic circuit, but does not establish
 compatibility with a production application. It comes from the same external

@@ -2,10 +2,18 @@
 
 ## Workflow
 
+UCP now also preserves supported finite lookup tuple correlations and performs
+bounded conditional filtering of finite radix domains. See
+[Relational UCP Propagation](ucp-relational-propagation.md) for premises and
+effort limits. Earlier invocation measurements below predate these stronger
+rules and are not measurements of the new propagation engine.
+
 `recover_private_inputs` in `privacy.rs` selects a cell and an operation together,
 instead of exhausting refinement, then discovery, then uniqueness queries.
-`privacy_search.rs` contains the cross-operation heuristic, internal strategy
-selection, and shared feasible samples. There are only two top-level operations:
+`privacy_search.rs` contains the attempt/retry state, action shortlisting,
+cross-operation heuristic, internal strategy selection, and shared feasible
+samples. `privacy_report.rs` contains report types, summary and formatting,
+re-exported through the existing `privacy` API. There are only two top-level operations:
 `Refine` and `Discover`. Existing public options still apply: candidate enumeration
 and domain discovery remain disabled by default, but bounded exact-only recovery
 is available through the internal fast-probe strategy.
@@ -48,6 +56,35 @@ invokes `check_sat` before initializing recovery knowledge or search. It records
 the actual initial-check count on both diagnostic and recovery reports, including
 any SAT-hint fallback. No public API rename is required.
 
+`PrivacyAnalysisOptions::initial_sat_timeout_ms` optionally overrides the timeout
+only for the initial SAT stage, including its hint and original-context fallback
+invocations. `None` preserves the analyzer's normal timeout. The driver restores
+that timeout before constructing search snapshots or running recovery, including
+on diagnostic exits. Reports retain both options; neither is a whole-run deadline.
+
+For callers that have an actual circuit witness,
+`analyze_private_recoverability_with_witness` uses the same preparation and recovery
+driver, but first runs `MockProver` with the supplied public observations. Only a
+successful `run` **and** full `verify` establish existence. The checker discards the
+prover and its private assignments; it transfers no witness values into K, Delta,
+E, W, SMT assertions or scheduler simulations. Missing instance rows are padded
+only for this witness check, not added to the analysis premises. A satisfying
+completion of those unobserved rows is sufficient to prove existence under the
+original, weaker observations.
+
+A failed or unavailable witness check is not UNSAT: it falls back to the existing
+SMT SAT path. Reports identify successful witness evidence as
+`SatisfiabilityEvidence::VerifiedWitness`, with zero initial SMT checks; solver-based
+existence is `Smt`. Inconsistent or inconclusive initial contexts carry no
+satisfiability evidence. The ordinary `analyze_private_recoverability` entry point
+remains SMT-based, and independent domain validation still checks its original SMT
+context. The witness route additionally requires `F: Ord`, as required by the
+backend's MockProver, without narrowing the existing public API's field bound.
+
+Both routes assume faithful extraction/SMT encoding and a stable circuit shape,
+fixed values and selectors between synthesis and witness verification. MockProver
+checks the Halo2 constraints, not the correctness of the separate SMT translation.
+
 | Paper Procedure | Rust Function Or Method | File |
 | --- | --- | --- |
 | `RecoverPrivateInputs` | `recover_private_inputs` | [privacy.rs](../korrekt/src/circuit_analyzer/ucp/privacy.rs) |
@@ -55,18 +92,18 @@ any SAT-hint fallback. No public API rename is required.
 | `CheckSAT` | `check_sat` | privacy.rs |
 | `DiagnosticReport` | `diagnostic_report` | privacy.rs |
 | `InitializeKnowledge` | `initialize_knowledge` | privacy.rs |
-| `InitializeSearch` | `RecoverySearchState::initialize_search` | privacy.rs |
+| `InitializeSearch` | `RecoverySearchState::initialize_search` | privacy_search.rs |
 | `PropagateToFixpoint` | `propagate_to_fixpoint` | privacy.rs |
-| `ObserveProgress` | `RecoverySearchState::observe_progress` | privacy.rs |
+| `ObserveProgress` | `RecoverySearchState::observe_progress` | privacy_search.rs |
 | `EstablishedExactFacts` | `established_exact_facts` | privacy.rs |
-| `ShortlistActions` | `shortlist_actions` | privacy.rs |
+| `ShortlistActions` | `shortlist_actions` | privacy_search.rs |
 | `ChooseAction` | `choose_action` | [privacy_search.rs](../korrekt/src/circuit_analyzer/ucp/privacy_search.rs) |
 | `RefineDomain` | `RecoveryOperations::refine_domain` | privacy.rs |
 | `DiscoverDomain` | `RecoveryOperations::discover_domain` | privacy.rs |
 | `RememberFeasibleSamples` | `RecoveryEvidence::remember_feasible_samples` | privacy_search.rs |
 | `MergeEstablishedResults` | `merge_established_results` | privacy.rs |
 | `FactsChanged` | `facts_changed` | privacy.rs |
-| `RecoveryReport` | `recovery_report` | privacy.rs |
+| `RecoveryReport` | `recovery_report` | [privacy_report.rs](../korrekt/src/circuit_analyzer/ucp/privacy_report.rs) |
 
 The paper still abstracts over argument lists and bookkeeping. The driver dispatches
 only to `RecoveryOperations::refine_domain` or `discover_domain`. Each method owns
@@ -125,7 +162,7 @@ useful work; the ordering is neither globally optimal nor complete.
 
 `integrate_fast_probe` combines an eligible probe proposal with the domain-action
 shortlist; it never adds a third operation. Probe eligibility still uses the
-bounded attempt/retry planner in `privacy.rs`.
+bounded attempt/retry planner in `privacy_search.rs`.
 
 For refinement, a cached pair of distinct feasible values rules out uniqueness,
 so no fast probe is proposed. Otherwise, if candidate refinement is available,
@@ -167,6 +204,38 @@ approximation, whereas Delta is a covering outer approximation. An absent domain
 does not imply confidentiality. Exact facts E are established singleton claims,
 not merely singleton sample sets in W.
 
+`UcpValueFacts::domain_is_complete(cell)` exposes a context-scoped completeness
+certificate. Under the already verified satisfiable premises, singleton covering
+domains are complete automatically. Multi-value domains become complete only
+when normalized full-context feasible samples cover every recorded candidate.
+Uniqueness in K, a few samples, an UNKNOWN result, or a truncated enumeration
+cannot set the certificate. False means unproved completeness, not necessarily
+an actually incomplete projection. Field aliases are deduplicated and a sample
+outside the recorded covering domain is an error.
+
+The driver checks completeness after merging samples/results and after propagation,
+so even domains completed by a different operation or a later UCP deduction are
+recognized. Metadata-only completion does not restart propagation or advance the
+knowledge generation. A newly explicit exact value obtained by field-alias
+canonicalization does restart propagation. Complete cells are excluded from
+refinement, fast probes, and optional bridge selection. UCP skips narrowing a
+complete target while retaining its domain as an operand for other deductions;
+the central domain-update method also prevents further narrowing.
+
+Completeness is not transferred to derived finite domains merely because their
+operands are complete: independently feasible marginals do not certify all joint
+combinations. Conditional scheduling simulations use
+`for_hypothetical_reasoning()`, which copies covering values without multi-value
+completeness certificates. No hypothetical result is merged into the real state.
+Runs with different public observations build fresh knowledge and sample caches.
+
+`PrivateCellReport.domain_is_complete`, verbose/compact reports, and per-cell
+profile exports expose the result. Fresh report validation still checks covering
+claims against the original context and never trusts this flag to skip proof
+queries; it does not independently recheck every feasible domain member.
+The current search policy is `refine-discover-complete-domain-v4`. Earlier
+measurement files are historical results, not measurements of this policy.
+
 The immutable original SMT snapshot and concrete public observations remain the
 reference. Full searches may reuse already established exact values as redundant
 equalities, as before. Coverage checks, literal subset proofs, and independent
@@ -188,8 +257,14 @@ existing soundness conditions; regression tests are not a formal correctness pro
   `bridge_domain_checks` is a subset of the domain totals, not an additional cost.
 
 All totals remain monotone. Propagation progress does not reset them. Semantic
-and discovery retry rules remain distinct. Refinement still makes at most one
-bounded attempt per cell; it is not a fully resumable candidate enumerator.
+and discovery retry rules remain distinct. Partial refinement can resume once
+per global K/Delta knowledge generation, preserving feasible candidates, proven
+exclusions, and reusable original-context coverage. Fresh refinements precede
+retries, and older attempts precede recent ones. Complete domains are not retried;
+new samples alone do not reopen a partial refinement. Each continuation spends
+the same remaining hard refinement allowance. The refinement policy metadata is
+`progress-gated-resumable-domain-refinement-v3`; the earlier measurement files
+remain historical data from before this change.
 The original final-report status conventions are retained: `Analyzed` alone does
 not certify that every domain search is complete. Inspect per-cell evidence.
 

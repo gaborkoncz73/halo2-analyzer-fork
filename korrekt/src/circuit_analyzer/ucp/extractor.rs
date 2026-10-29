@@ -1,7 +1,21 @@
+//! A Halo2-struktúrából összeállítja az UCP bemenetét: egyenletek, cellák és kezdeti tények.
+//! A lookupokat külön modulban gyűjti ki, majd az eredményüket a teljes problémához kapcsolja.
+
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+#[path = "lookup_extractor.rs"]
+mod lookup_extraction;
+#[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
+use super::value::MAX_FINITE_DOMAIN_SIZE;
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+pub use lookup_extraction::{extract_lookup_expression_domains, extract_lookup_value_facts};
+#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
+use lookup_extraction::{extract_lookup_relations, lookup_values_from_domains};
+
 use super::{
     cell::{CellId, CellKind},
     expr::{UcpExpr, UcpScalar},
     facts::UcpFacts,
+    lookup::UcpLookup,
     value::{UcpValueDomain, UcpValueFacts},
 };
 
@@ -9,10 +23,7 @@ use super::{
 use super::{
     facts::initial_facts_from_expressions,
     plonkish::{expression_to_ucp_expr_with_fixed_values, field_to_bigint, query_row},
-    value::{
-        infer_domains_from_expression_domain_with_modulus, normalize_field_value,
-        MAX_FINITE_DOMAIN_SIZE,
-    },
+    value::normalize_field_value,
 };
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use crate::circuit_analyzer::{
@@ -26,34 +37,51 @@ use std::collections::BTreeSet;
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 use std::collections::HashSet;
 
-//Egy teljes UCP bemenet: constraint expressionök, kezdeti K, outputok, witnessek és field modulus
+// Egy UCP-bemenetben fogja össze a kifejezéseket, kezdeti tényeket, cellákat és testmodulust.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpProblem {
     pub expressions: Vec<UcpExpr>,
-    /// Necessary finite lookup projections; tuple correlations remain in the original SMT model.
+    /// A szükséges véges lookup-vetületeket tárolja, a teljes relációként túl nagy táblákhoz is.
     pub expression_domains: Vec<(UcpExpr, UcpValueDomain)>,
+    pub lookups: Vec<UcpLookup>,
     pub initial_facts: UcpFacts,
-    //A régi név kompatibilitás miatt marad: ugyanaz, mint az output_cells
+    // Az output_cells másolatát tartalmazza; a target_cells elérési utat kompatibilitásból biztosítja.
     pub target_cells: Vec<CellId>,
-    //O halmaz: azok az output/target cellák, amelyek constrained voltát végül bizonyítani akarjuk
+    // Az O halmazban a bizonyítandóan egyértelmű kimeneti célcellákat tárolja.
     pub output_cells: Vec<CellId>,
-    //W halmaz: a constraint rendszerben szereplő witness/advice cellák
+    // A W halmazban a kényszerrendszerben szereplő advice cellákat tárolja.
     pub witness_cells: Vec<CellId>,
-    //Delta kezdeti része: lookup/range table domainekből tanult értékhalmazok
+    // A kezdeti Deltában a lookup-táblákból kinyert értékhalmazokat tárolja.
     pub initial_value_facts: UcpValueFacts,
     pub field_modulus: BigInt,
 }
 
 impl UcpProblem {
-    /// Keep lookup memberships in every propagation round, including SMT value feedback.
+    pub(crate) fn simulate_with_values(
+        &self,
+        facts: UcpFacts,
+        values: UcpValueFacts,
+    ) -> super::engine::UcpResult {
+        super::engine::simulate_expressions_with_relations_and_modulus(
+            &self.expressions,
+            &self.expression_domains,
+            &self.lookups,
+            facts,
+            values,
+            &self.field_modulus,
+        )
+    }
+
+    /// Minden propagációs körben megtartja a lookup-tagságokat, az SMT-értékek visszacsatolásakor is.
     pub fn analyze_with_values(
         &self,
         facts: UcpFacts,
         values: UcpValueFacts,
     ) -> super::engine::UcpResult {
-        super::engine::analyze_expressions_with_domains_and_modulus(
+        super::engine::analyze_expressions_with_relations_and_modulus(
             &self.expressions,
             &self.expression_domains,
+            &self.lookups,
             facts,
             values,
             &self.field_modulus,
@@ -62,13 +90,13 @@ impl UcpProblem {
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Analyzable circuitből UCP problem létrehozása targetek nélkül
+// Az Analyzable kapcsolásból külön célcellák nélkül állít elő UCP-problémát.
 pub fn extract_ucp_problem<F: AnalyzableField>(analyzable: &Analyzable<F>) -> UcpProblem {
     extract_ucp_problem_with_targets(analyzable, [])
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Analyzable circuitből UCP problem létrehozása megadott target cellákkal
+// Az Analyzable kapcsolásból a megadott célcellákkal állít elő UCP-problémát.
 pub fn extract_ucp_problem_with_targets<F, I>(
     analyzable: &Analyzable<F>,
     target_cells: I,
@@ -78,28 +106,34 @@ where
     I: IntoIterator<Item = CellId>,
 {
     let expressions = extract_ucp_expressions(analyzable);
-    //Az expressionökben szereplő instance/fixed cellákból indul a K halmaz
+    // A kifejezések instance és fixed celláiból inicializálja K-t.
     let expression_domains = extract_lookup_expression_domains(analyzable);
+    let lookups = extract_lookup_relations(analyzable);
     let mut initial_facts = initial_facts_from_expressions(&expressions);
     for (expr, _) in &expression_domains {
         for cell in initial_facts_from_expressions(std::slice::from_ref(expr)).unique_cells() {
             initial_facts.mark_unique(cell.clone());
         }
     }
-    //O: a caller által megadott output/target cellák
+    // Az O halmazt a hívó által megadott kimeneti célcellákból állítja össze.
     let output_cells = dedup_cells_preserving_order(target_cells);
-    //W: a circuitben assignolt és/vagy constraintben hivatkozott advice cellák
+    // A W halmazba felveszi a hozzárendelt vagy kényszerben hivatkozott advice cellákat.
     let mut witnesses: BTreeSet<_> = witness_cells_from_analyzable(analyzable, &expressions)
         .into_iter()
         .collect();
     for (expr, _) in &expression_domains {
         collect_witness_cells(expr, &mut witnesses);
     }
+    for lookup in &lookups {
+        for expr in lookup.inputs() {
+            collect_witness_cells(expr, &mut witnesses);
+        }
+    }
     let witness_cells = witnesses.into_iter().collect();
-    //Delta: lookup táblákból biztonságosan kinyerhető finite domainek
+    // A lookup-táblákból biztonságosan kinyerhető véges domaineket bejegyzi Deltába.
     let modulus = field_modulus::<F>();
     let mut initial_value_facts = lookup_values_from_domains(&expression_domains, &modulus);
-    //Copy constraints retain fixed-cell references; only assigned fixed values are public constants.
+    // A másolási egyenletek fixed celláira csak ténylegesen hozzárendelt értékből jegyez be nyilvános konstanst.
     for cell in initial_facts.unique_cells() {
         if cell.kind != CellKind::Fixed {
             continue;
@@ -122,6 +156,7 @@ where
     UcpProblem {
         expressions,
         expression_domains,
+        lookups,
         initial_facts,
         target_cells: output_cells.clone(),
         output_cells,
@@ -129,102 +164,6 @@ where
         initial_value_facts,
         field_modulus: modulus,
     }
-}
-
-#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Lookup argumentekből kezdeti Delta domaineket tanul.
-//A table oldal konkrét assigned fixed/table értékek véges halmaza.
-//Az input lehet sima advice cella vagy egyszerű lineáris expression, például x + 1 vagy 2*x.
-pub fn extract_lookup_value_facts<F: AnalyzableField>(analyzable: &Analyzable<F>) -> UcpValueFacts {
-    lookup_values_from_domains(
-        &extract_lookup_expression_domains(analyzable),
-        &field_modulus::<F>(),
-    )
-}
-
-#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-fn lookup_values_from_domains(
-    domains: &[(UcpExpr, UcpValueDomain)],
-    modulus: &BigInt,
-) -> UcpValueFacts {
-    let mut values = UcpValueFacts::new();
-    for (expr, domain) in domains {
-        for (cell, domain) in
-            infer_domains_from_expression_domain_with_modulus(expr, domain, &values, modulus)
-        {
-            if cell.kind == CellKind::Advice {
-                values.mark_domain(cell, domain);
-            }
-        }
-    }
-    values
-}
-
-#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Retain e in Omega even when its operands have no domains during extraction.
-pub fn extract_lookup_expression_domains<F: AnalyzableField>(
-    analyzable: &Analyzable<F>,
-) -> Vec<(UcpExpr, UcpValueDomain)> {
-    let mut domains = Vec::new();
-
-    //A table-oldal csak a fixed oszloptól függ, ezért circuitenként egyszer
-    //képezzük a domaint. Korábban ugyanez minden régió minden sorában újra
-    //bejárta a teljes (2^k méretű) fixed oszlopot.
-    let lookup_inputs_and_domains = analyzable
-        .cs
-        .lookups
-        .iter()
-        .flat_map(|lookup| {
-            lookup
-                .input_expressions
-                .iter()
-                .zip(lookup.table_expressions.iter())
-        })
-        .filter_map(|(input_expr, table_expr)| {
-            lookup_table_domain(table_expr, &analyzable.fixed).map(|domain| (input_expr, domain))
-        })
-        .collect::<Vec<_>>();
-
-    if lookup_inputs_and_domains.is_empty() {
-        return domains;
-    }
-
-    for region in &analyzable.regions {
-        if !region_has_advice_cell(region) {
-            continue;
-        }
-
-        let Some((region_begin, region_end)) = region.rows else {
-            continue;
-        };
-
-        for absolute_row in region_begin..=region_end {
-            let row = i32::try_from(absolute_row - region_begin)
-                .expect("UCP local row does not fit into i32");
-
-            for (input_expr, domain) in &lookup_inputs_and_domains {
-                //A selectorral lenullázott lookup input ezen a soron nem ad
-                //doméninformációt egy witness celláról, ezért nem építünk belőle UCP fát.
-                if fixed_only_expression_value(input_expr, region_begin, row, &analyzable.fixed)
-                    .is_some_and(|value| bool::from(value.is_zero()))
-                {
-                    continue;
-                }
-
-                let mut input = expression_to_ucp_expr_with_fixed_values(
-                    input_expr,
-                    region_begin,
-                    row,
-                    &analyzable.fixed,
-                );
-
-                wrap_query_rows(&mut input, analyzable.k);
-                domains.push((input, domain.clone()));
-            }
-        }
-    }
-
-    domains
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
@@ -251,45 +190,7 @@ fn region_has_advice_cell(region: &Region) -> bool {
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-fn lookup_table_domain<F: AnalyzableField>(
-    expr: &Expression<F>,
-    fixed_values: &[Vec<CellValue<F>>],
-) -> Option<UcpValueDomain> {
-    let Expression::Fixed(query) = expr else {
-        return None;
-    };
-
-    //A Halo2 table expression normál esetben Rotation::cur(); ettől eltérő fixed expressiont
-    //nem kezelünk range-domain táblaként.
-    if query.rotation != Rotation::cur() {
-        return None;
-    }
-
-    let column_values = fixed_values.get(query.column_index)?;
-    let mut domain_values = BTreeSet::new();
-
-    for value in column_values {
-        match value {
-            CellValue::Assigned(value) => {
-                domain_values.insert(field_to_bigint(value));
-                //Never retain a truncated table projection; large domains stay SMT-only.
-                if domain_values.len() > MAX_FINITE_DOMAIN_SIZE {
-                    return None;
-                }
-            }
-            //Lookup table domainhez csak ténylegesen assignolt table értékeket veszünk fel.
-            //Az Unassigned itt nem bizonyított table entry, ezért nem tanulunk belőle nullát.
-            CellValue::Unassigned => {}
-            //Poison nem valódi table érték; ilyenkor inkább semmit nem tanulunk.
-            CellValue::Poison(_) => return None,
-        }
-    }
-
-    UcpValueDomain::finite_set(domain_values)
-}
-
-#[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Analyzable circuitből és expressionökből kigyűjti a W halmazt
+// Az Analyzable kapcsolásból és a kifejezésekből kigyűjti a W halmazt.
 pub fn witness_cells_from_analyzable<F: AnalyzableField>(
     analyzable: &Analyzable<F>,
     expressions: &[UcpExpr],
@@ -357,7 +258,7 @@ fn assigned_advice_cell_id(column: &Column<Any>, row: usize) -> Option<CellId> {
     }
 }
 
-//Expression listából kigyűjti a W halmaz expressionökben hivatkozott részét
+// A kifejezésekből kigyűjti a W halmazban hivatkozott cellákat.
 pub fn witness_cells_from_expressions(expressions: &[UcpExpr]) -> Vec<CellId> {
     let mut cells = BTreeSet::new();
 
@@ -401,7 +302,7 @@ where
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//A circuit mezőjének p modulusát adja vissza BigInt-ként
+// BigInt alakban visszaadja a kapcsolás testének p modulusát.
 pub fn field_modulus<F: AnalyzableField>() -> BigInt {
     parse_field_modulus(F::MODULUS)
 }
@@ -416,23 +317,23 @@ fn parse_field_modulus(raw_modulus: &str) -> BigInt {
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Kiszed minden UCP zero-equation expressiont a gate-ekből és copy constraint-ekből
+// A kapukból és a másolási kényszerekből kigyűjti a nullával egyenlő UCP-kifejezéseket.
 pub fn extract_ucp_expressions<F: AnalyzableField>(analyzable: &Analyzable<F>) -> Vec<UcpExpr> {
     let mut expressions = Vec::new();
 
-    //Gates constrain usable rows globally, independently of region/selector metadata.
+    // A kapukat minden használható soron vizsgálja, a régió- és szelektormetaadatoktól függetlenül.
     let region_begin = 0;
     for absolute_row in analyzable.usable_rows.clone() {
         let row = i32::try_from(absolute_row).expect("UCP absolute row does not fit into i32");
-        //Minden gate minden polynomial constraintjét UCP expressionné alakítjuk
+        // Minden kapu összes polinomiális kényszerét UCP-kifejezéssé alakítja.
         for gate in &analyzable.cs.gates {
             for poly in &gate.polys {
-                // Selector compression replaces selectors with fixed-only
-                // polynomials. Most gate polynomials are therefore exactly zero on
-                // this row. Detect those before constructing the (often large) UCP
-                // tree. This is semantics-preserving: only an equation whose left
-                // hand side evaluates to the field zero without consulting witness
-                // or instance cells is omitted.
+                // A szelektortömörítés után a kapuk fixed oszlopoktól függő polinomokat tartalmaznak.
+                // Ezek közül sok az adott soron azonosan nulla. Ezt a teljes UCP-fa
+                // felépítése előtt ellenőrzi, hogy elkerülje a szükségtelen munkát.
+                // Csak azt az egyenletet hagyja ki, amelynek bal oldaláról
+                // advice és instance értékek felhasználása nélkül
+                // megállapítja, hogy a testben nulla.
                 if fixed_only_expression_value(poly, region_begin, row, &analyzable.fixed)
                     .is_some_and(|value| bool::from(value.is_zero()))
                 {
@@ -453,7 +354,7 @@ pub fn extract_ucp_expressions<F: AnalyzableField>(analyzable: &Analyzable<F>) -
         }
     }
 
-    //A permutation/copy constraint-ekből is zero-equation expressionöket készítünk
+    // A permutációs és másolási kényszerekből is nullával egyenlő kifejezéseket képez.
     expressions.extend(extract_copy_constraint_expressions(&analyzable.permutation));
 
     expressions
@@ -479,8 +380,8 @@ fn wrap_query_rows(expr: &mut UcpExpr, k: u32) {
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Kiértékel egy expressiont, ha kizárólag konstans/fixed értékektől függ.
-//Advice, instance vagy challenge jelenlétében None az eredmény.
+// A kifejezést akkor értékeli ki, ha kizárólag konstansoktól és ismert fixed értékektől függ.
+// Advice, instance vagy ismeretlen kihívásérték esetén nem ad konkrét értéket.
 fn fixed_only_expression_value<F: AnalyzableField>(
     expr: &Expression<F>,
     region_begin: usize,
@@ -489,8 +390,8 @@ fn fixed_only_expression_value<F: AnalyzableField>(
 ) -> Option<F> {
     match expr {
         Expression::Constant(value) => Some(*value),
-        // A config_and_synthesize selector-compressziója után selector nem marad,
-        // de ha mégis nyers expression érkezne, nem feltételezünk róla értéket.
+        // A config_and_synthesize szelektortömörítése után nem vár nyers szelektorhivatkozást;
+        // ha mégis ilyet talál, nem feltételez róla konkrét értéket.
         Expression::Selector(_) => None,
         Expression::Fixed(query) => {
             let column = fixed_values.get(query.column_index)?;
@@ -512,8 +413,8 @@ fn fixed_only_expression_value<F: AnalyzableField>(
                 + fixed_only_expression_value(right, region_begin, row, fixed_values)?,
         ),
         Expression::Product(left, right) => {
-            // Evaluate each side independently so a known zero selector factor can
-            // short-circuit even when the other side contains witness cells.
+            // A tényezőket külön értékeli ki, így ismert nullatényező esetén
+            // az advice cellákat tartalmazó másik tényező ismerete nélkül is nullát ad.
             let left_value = fixed_only_expression_value(left, region_begin, row, fixed_values);
             if left_value
                 .as_ref()
@@ -550,22 +451,22 @@ fn fixed_only_expression_value<F: AnalyzableField>(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Copy/permutation constraint-ekből A - B = 0 alakú UCP expressionöket készít
+// A másolási és permutációs kényszerekből A - B = 0 alakú UCP-egyenleteket képez.
 fn extract_copy_constraint_expressions(
     permutation: &permutation::keygen::Assembly,
 ) -> Vec<UcpExpr> {
     let mut expressions = Vec::new();
-    //Ugyanazt az élt ne vegyük fel többször
+    // Az azonos irányfüggetlen éleket csak egyszer veszi fel.
     let mut seen_edges = HashSet::new();
 
-    //Bejárjuk a permutation mappingben szereplő oszlopokat és sorokat
+    // Bejárja a permutációs leképezés oszlopait és sorait.
     for col in 0..permutation.mapping.len() {
         for row in 0..permutation.mapping[col].len() {
-            //A mapping minden cellánál közvetlenül a cycle következő elemét adja.
-            //Ezért elég cellánként ezt az egy élt feldolgozni. A korábbi teljes
-            //cycle-bejárás minden cycle-tagból újraindult, ami O(L^2) munkát végzett.
+            // A leképezésből cellánként a ciklus következő tagját olvassa ki.
+            // Ezt az egy élt dolgozza fel, így nem járja be újra
+            // a teljes ciklust minden egyes tagból.
             let (right_col, right_row) = permutation.mapping[col][row];
-            // Cycle sizes are maintained at representatives, not at every member.
+            // A ciklusméretet nem tekinti minden tagnál hitelesnek, mert azt a reprezentáns tárolja.
             if (right_col, right_row) == (col, row) {
                 continue;
             }
@@ -576,15 +477,15 @@ fn extract_copy_constraint_expressions(
                 continue;
             };
 
-            //Az egyenlőség irányfüggetlen; a kanonikus él a kétcellás cycle
-            //A->B és B->A alakját is csak egyszer tartja meg.
+            // Az egyenlőséget irányfüggetlenül kanonizálja, így a kétcellás ciklus
+            // A->B és B->A élét ugyanannak a kapcsolatnak tekinti.
             let edge = if left <= right {
                 (left.clone(), right.clone())
             } else {
                 (right.clone(), left.clone())
             };
 
-            //left == right constraint UCP-ben: left - right = 0
+            // A left == right feltételből left - right = 0 UCP-kifejezést készít.
             if left != right && seen_edges.insert(edge) {
                 expressions.push(UcpExpr::add(
                     UcpExpr::var(left),
@@ -598,7 +499,7 @@ fn extract_copy_constraint_expressions(
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Permutation oszlop/sor pozícióból UCP CellId-t készít
+// A permutáció oszlop- és sorpozíciójából UCP-cellaazonosítót készít.
 fn permutation_cell_id(
     permutation: &permutation::keygen::Assembly,
     col: usize,
@@ -609,7 +510,7 @@ fn permutation_cell_id(
 
     #[cfg(feature = "use_zcash_halo2_proofs")]
     {
-        //Zcash halo2-ben az Any variánsok nem hordoznak plusz adatot
+        // A Zcash Halo2 adat nélküli Any-változatait alakítja cellatípussá.
         match column.column_type() {
             Any::Advice => Some(CellId::advice(column.index, row)),
             Any::Fixed => Some(CellId::fixed(column.index, row)),
@@ -623,7 +524,7 @@ fn permutation_cell_id(
         feature = "use_scroll_halo2_proofs"
     ))]
     {
-        //Más halo2 forkokban az Advice variáns hordozhat plusz adatot
+        // A többi támogatott Halo2-változat adathordozó Advice-változatát is kezeli.
         match column.column_type() {
             Any::Advice(_) => Some(CellId::advice(column.index, row)),
             Any::Fixed => Some(CellId::fixed(column.index, row)),
@@ -651,7 +552,7 @@ mod tests {
     use std::collections::HashMap;
     use std::marker::PhantomData;
 
-    //Teszt circuit egy aktív selectoros assignment gate-hez
+    // A teszt egy szelektorral aktivált értékadási kaput állít elő.
     #[derive(Clone, Debug)]
     struct ExtractorConfig {
         advice: Column<Advice>,
@@ -663,7 +564,7 @@ mod tests {
         _marker: PhantomData<Fr>,
     }
 
-    //Teszt circuit copy constraint ellenőrzéséhez
+    // A teszt másolási kényszert tartalmazó kapcsolást állít elő.
     #[derive(Clone, Debug)]
     struct CopyConfig {
         advice: Column<Advice>,
@@ -675,7 +576,7 @@ mod tests {
         _marker: PhantomData<Fr>,
     }
 
-    //Két selectoros teszt circuit, ahol csak a második gate aktív
+    // A teszt két szelektor közül csak a másodikhoz tartozó kaput aktiválja.
     #[derive(Clone, Debug)]
     struct CompressedSelectorConfig {
         advice_a: Column<Advice>,
@@ -688,7 +589,7 @@ mod tests {
         _marker: PhantomData<Fr>,
     }
 
-    //Lookup/range-check teszt circuit: selector * advice szerepel egy 0..3 lookup táblában
+    // A teszt a selector * advice bemenetet egy 0..3 értékű lookup-táblához köti.
     #[derive(Clone, Debug)]
     struct LookupRangeConfig {
         advice: Column<Advice>,
@@ -701,7 +602,7 @@ mod tests {
         _marker: PhantomData<Fr>,
     }
 
-    //Lookup/range-check teszt circuit, ahol a lookup input egy skálázott advice expression: 2*x
+    // A teszt skálázott advice kifejezést, 2*x-et használ lookup-bemenetként.
     #[derive(Clone, Debug)]
     struct ScaledLookupRangeConfig {
         advice: Column<Advice>,
@@ -727,7 +628,7 @@ mod tests {
             let instance = meta.instance_column();
             let selector = meta.selector();
 
-            //Constraint: selector * (advice + public - 5) = 0
+            // A teszt a selector * (advice + public - 5) = 0 kényszert állítja elő.
             meta.create_gate("extractor selected assignment", |meta| {
                 let selector = meta.query_selector(selector);
                 let advice = meta.query_advice(advice, Rotation::cur());
@@ -747,7 +648,7 @@ mod tests {
             layouter.assign_region(
                 || "extractor row",
                 |mut region| {
-                    //A gate csak ezen a soron aktív
+                    // A kaput csak ezen a soron aktiválja.
                     config.selector.enable(&mut region, 0)?;
                     region.assign_advice(
                         || "advice",
@@ -773,7 +674,7 @@ mod tests {
             let advice = meta.advice_column();
             let instance = meta.instance_column();
 
-            //Equality engedélyezése kell a copy/permutation constraintekhez
+            // Engedélyezi az egyenlőségi kapcsolatokat a másolási kényszerekhez.
             meta.enable_equality(advice);
             meta.enable_equality(instance);
 
@@ -785,7 +686,7 @@ mod tests {
             config: Self::Config,
             mut layouter: impl Layouter<Fr>,
         ) -> Result<(), Error> {
-            //Advice cellát hozzárendeljük egy instance cellához
+            // Az advice cellát másolási kényszerrel instance cellához köti.
             let advice_cell = layouter.assign_region(
                 || "copy row",
                 |mut region| {
@@ -848,7 +749,7 @@ mod tests {
             layouter.assign_region(
                 || "compressed selector row",
                 |mut region| {
-                    //Csak a második selector aktív ezen a soron
+                    // Csak a második szelektort aktiválja ezen a soron.
                     config.selector_b.enable(&mut region, 0)?;
                     region.assign_advice(
                         || "inactive advice",
@@ -995,7 +896,7 @@ mod tests {
         }
     }
 
-    //Azt ellenőrzi, hogy Analyzable circuitből UCP problem készül és UCP lefut rajta
+    // A teszt ellenőrzi az Analyzable kapcsolásból előállított UCP-probléma elemzését.
     #[test]
     fn extracts_problem_from_analyzable_and_runs_ucp() {
         use zcash_halo2_proofs::dev::MockProver;
@@ -1030,7 +931,7 @@ mod tests {
         assert!(result.all_expressions_unique());
     }
 
-    //Azt ellenőrzi, hogy copy constraintből UCP egyenlet készül, és abból advice érték tanulható
+    // A teszt ellenőrzi az advice értékének kikövetkeztetését egy másolási egyenletből.
     #[test]
     fn copy_cycles_include_members_without_representative_size_metadata() {
         for reverse in [false, true] {
@@ -1051,7 +952,7 @@ mod tests {
                 .copy(advice.into(), rows[2], instance.into(), 0)
                 .unwrap();
             let expressions = extract_copy_constraint_expressions(&permutation);
-            // Four distinct edges in a four-member cycle, even though some sizes remain 1.
+            // A négytagú ciklus mind a négy élét feldolgozza akkor is, ha egyes tárolt méretek 1 értékűek.
             assert_eq!(expressions.len(), 4);
             assert!(permutation
                 .mapping
@@ -1094,8 +995,8 @@ mod tests {
         let target = CellId::advice(0, 0);
         let copy_expressions = extract_copy_constraint_expressions(&analyzable.permutation);
 
-        //A kétcellás permutation cycle ugyanazt az irányfüggetlen
-        //egyenlőséget csak egyszer reprezentálja.
+        // A kétcellás permutációs ciklusban az irányfüggetlen
+        // egyenlőséget csak egyszer veszi fel.
         assert_eq!(copy_expressions.len(), 1);
 
         let problem = extract_ucp_problem_with_targets(&analyzable, [target.clone()]);
@@ -1120,7 +1021,7 @@ mod tests {
         );
     }
 
-    //Azt ellenőrzi, hogy kompresszált selector fixed értéknél csak az aktív gate-ből tanulunk
+    // A teszt ellenőrzi, hogy tömörített szelektor mellett csak az aktív kapuból következtet.
     #[test]
     fn extracts_compressed_selectors_using_actual_fixed_values() {
         use zcash_halo2_proofs::dev::MockProver;
@@ -1139,7 +1040,7 @@ mod tests {
             [inactive_advice.clone(), active_advice.clone()],
         );
 
-        //A két globális gate közül ezen a soron csak a második selector aktív.
+        // A két globális kapu közül ezen a soron csak a másodikat aktiválja.
         assert_eq!(problem.expressions.len(), 1);
 
         assert_eq!(
@@ -1160,7 +1061,7 @@ mod tests {
         assert!(result.facts.is_unique(&active_advice));
     }
 
-    //Azt ellenőrzi, hogy lookup táblából finite Delta domain készül a range-checkelt advice cellára
+    // A teszt ellenőrzi, hogy a lookup-táblából véges domaint rendel a korlátozott advice cellához.
     #[test]
     fn extracts_lookup_table_domain_for_active_range_checked_advice() {
         use zcash_halo2_proofs::dev::MockProver;
@@ -1196,7 +1097,7 @@ mod tests {
         assert!(!result.facts.is_unique(&target));
     }
 
-    //Azt ellenőrzi, hogy lookup input expressionből is tanulunk domaint: 2*x in {0,2,4} => x in {0,1,2}
+    // A teszt ellenőrzi a 2*x in {0,2,4} feltételből az x in {0,1,2} domain visszavetítését.
     #[test]
     fn extracts_lookup_domain_from_scaled_input_expression() {
         use zcash_halo2_proofs::dev::MockProver;
@@ -1218,7 +1119,7 @@ mod tests {
         );
     }
 
-    //Azt ellenőrzi, hogy poisonos lookup table-ből nem tanulunk túl szűk Delta domaint
+    // A teszt ellenőrzi, hogy érvénytelen táblabejegyzésből nem tanul túl szűk domaint.
     #[test]
     fn lookup_table_domain_does_not_learn_from_poisoned_table() {
         use zcash_halo2_proofs::dev::MockProver;

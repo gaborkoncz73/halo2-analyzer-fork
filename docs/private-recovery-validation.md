@@ -63,8 +63,14 @@ remain `NoDomainClaim`; if no domains exist, the overall result is `NoDomainClai
 not a privacy guarantee. An inconsistent context is reported as `Inconsistent`.
 Unknown subset attempts fall back to the full circuit; a full-check unknown is
 an error, never a successful validation. Execution/encoding failures remain errors.
-Fresh validation inherits the recovery report's effective per-check solver budget;
-see [bounded recovery](bounded-private-recovery.md).
+By default, fresh validation inherits the recovery report's effective per-check
+solver budget. `validate_private_recovery_report_with_timeout` accepts an explicit
+positive timeout override without modifying the recovery report or its claims.
+`None` inherits the recovery timeout, then the analyzer environment fallback.
+The validation report records the effective `solver_timeout_ms`. This is a
+per-invocation limit, not a total validation deadline. A larger allowance still
+does not guarantee a conclusive result; unknown remains an error.
+See [bounded recovery](bounded-private-recovery.md).
 
 The validation pass deliberately does not certify `Unique`/`NonUnique` labels for
 cells lacking concrete domains, refinement relative to the baseline, practical
@@ -89,6 +95,22 @@ let validation = validate_private_recovery_report::<Fr, _>(
 )?;
 println!("{validation}");
 ```
+
+For a separate, longer validation allowance:
+
+```rust
+let validation = validate_private_recovery_report_with_timeout::<Fr, _>(
+    &circuit,
+    k,
+    &analyzer_input,
+    &report,
+    Some(30_000),
+)?;
+```
+
+The bounded CRT demo also accepts `UCP_CRT_VALIDATION_TIMEOUT_MS=30000` to use
+this override for its fresh checks while retaining the 2000 ms recovery limit.
+Record the two budgets and stage timings separately in measurements.
 
 From the workspace root, run the illustrative positive and negative cases with:
 

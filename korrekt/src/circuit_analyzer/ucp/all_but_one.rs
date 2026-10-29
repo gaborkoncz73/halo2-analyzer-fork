@@ -1,9 +1,9 @@
 // Ez a modul a cikk All-But-One-0 szabályát valósítja meg.
-// A szabály több zero equationt egyszerre néz:
+// A szabály több nullával egyenlő kifejezést vizsgál együtt:
 //   sum(y_i) = e
 //   y_i * (x - i) = 0 minden i-re 0..n között
-// Ha x és e már unique, és a rootok pontosan 0..n, akkor minden y_i unique.
-// Ha x és e konkrét értéke is ismert, akkor konkrét y_i értékeket is tudunk tanulni.
+// Ha x és e egyértelmű, és a gyökök pontosan 0..n értékűek, minden y_i egyértelmű.
+// Ha x és e konkrét értéke is ismert, a megfelelő y_i értékeket is kiszámítja.
 use super::{
     cell::CellId,
     expr::{UcpExpr, UcpScalar},
@@ -15,17 +15,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AllButOneInference {
-    //Az a cella, amiről a szabály kimondta, hogy unique
+    // Az a cella, amelynek egyértelműségét a szabály igazolja.
     pub cell: CellId,
-    //Ha nemcsak unique, hanem konkrét értéke is ismert, akkor itt adjuk vissza
+    // Ha a konkrét értéket is kiszámítja, ebben a mezőben adja vissza.
     pub value: Option<BigInt>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProductConstraint {
-    //A y_i változó a y_i * (x - root) = 0 alakból
+    // A y_i cellát azonosítja a y_i * (x - root) = 0 alakban.
     y: CellId,
-    //Az a unique változó, ami kiválasztja, melyik y_i lehet nem nulla
+    // Az egyértelmű x cellát azonosítja, amely kiválasztja a nemnulla y_i tagot.
     x: CellId,
     //Az az érték, ahol az adott y_i nem kényszerül nullára
     root: BigInt,
@@ -47,7 +47,7 @@ struct LinearExpr {
     terms: BTreeMap<CellId, BigInt>,
 }
 
-//Végigfuttatja az All-But-One-0 szabályt az összes már kinyert UCP expressionön
+// Az All-But-One-0 szabályt alkalmazza a kinyert UCP-kifejezésekre.
 pub fn infer_all_but_one_zero(
     expressions: &[UcpExpr],
     facts: &UcpFacts,
@@ -74,25 +74,25 @@ fn infer_all_but_one_with_optional_modulus(
     values: &UcpValueFacts,
     modulus: Option<&BigInt>,
 ) -> Vec<AllButOneInference> {
-    //Külön kigyűjtjük a y_i * (x - root_i) = 0 típusú constraint-eket
+    // Külön kigyűjti a y_i * (x - root_i) = 0 alakú kényszereket.
     let product_constraints = collect_product_constraints(expressions, facts, modulus);
-    //Külön kigyűjtjük a sum(y_i) = e típusú constraint-eket
+    // Külön kigyűjti a sum(y_i) = e alakú kényszereket.
     let sum_constraints = collect_sum_constraints(expressions, facts, values, modulus);
     let mut inferences = BTreeMap::new();
 
     for sum in sum_constraints {
-        //The roots 0..n must remain distinct in the actual field.
+        // Ellenőrzi, hogy a 0..n gyökök a tényleges testben is különböznek.
         if modulus.is_some_and(|modulus| BigInt::from(sum.y_cells.len()) > *modulus) {
             continue;
         }
         for (x, products_by_y) in &product_constraints {
-            //Csak akkor illeszkedik a szabály, ha minden y_i-hez pontosan egy root tartozik,
-            //és ezek a rootok pontosan a cikk szerinti 0..n értékek
+            // Csak akkor alkalmazza a szabályt, ha minden y_i-hez pontosan egy gyök tartozik,
+            // és a gyökök együtt pontosan a szabályban szereplő 0..n értékeket adják.
             let Some(root_by_y) = roots_for_sum(&sum, products_by_y) else {
                 continue;
             };
 
-            //Ha x konkrét értéke ismert, akkor azt is meg tudjuk mondani, melyik y_i lesz e és melyik 0
+            // Ismert x esetén meghatározza, melyik y_i kapja e értékét, a többit nullának veszi.
             let x_value = values.known_value(x).cloned();
 
             for (cell, root) in root_by_y {
@@ -111,7 +111,7 @@ fn infer_all_but_one_with_optional_modulus(
                     }
                 });
 
-                //BTreeMap-et használunk, hogy determinisztikus sorrendben kapjuk vissza az eredményeket
+                // BTreeMap használatával determinisztikus sorrendben adja vissza az eredményeket.
                 inferences.entry(cell.clone()).or_insert(value);
             }
         }
@@ -128,7 +128,7 @@ fn collect_product_constraints(
     facts: &UcpFacts,
     modulus: Option<&BigInt>,
 ) -> HashMap<CellId, HashMap<CellId, BTreeSet<BigInt>>> {
-    //Felépítés: x -> y_i -> {rootok}
+    // Az x -> y_i -> {gyökök} kapcsolatok szerint csoportosítja a szorzatkényszereket.
     let mut constraints: HashMap<CellId, HashMap<CellId, BTreeSet<BigInt>>> = HashMap::new();
 
     for expr in expressions {
@@ -136,7 +136,7 @@ fn collect_product_constraints(
             continue;
         };
 
-        //A szabályhoz x-nek már unique-nak kell lennie
+        // Csak akkor fogadja el a mintát, ha x egyértelműsége már igazolt.
         if !facts.is_unique(&product.x) {
             continue;
         }
@@ -158,7 +158,7 @@ fn collect_sum_constraints(
     values: &UcpValueFacts,
     modulus: Option<&BigInt>,
 ) -> Vec<SumConstraint> {
-    //Minden expressiont megpróbálunk összeg-constraintként értelmezni
+    // Minden kifejezést megpróbál összegkényszerként értelmezni.
     expressions
         .iter()
         .filter_map(|expr| parse_sum_constraint(expr, facts, values, modulus))
@@ -173,15 +173,15 @@ fn roots_for_sum(
     let mut roots = BTreeSet::new();
 
     for y in &sum.y_cells {
-        //Minden y_i-hez kell tartoznia product constraintnek
+        // Minden y_i-hez megköveteli a megfelelő szorzatkényszert.
         let product_roots = products_by_y.get(y)?;
-        //És pontosan egy rootja lehet, különben nem tiszta one-hot szerkezet
+        // Pontosan egy gyököt fogad el, hogy a kiválasztási szerkezet egyértelmű legyen.
         if product_roots.len() != 1 {
             return None;
         }
 
         let root = product_roots.iter().next()?.clone();
-        //A rootoknak különbözniük kell, mert különben két y_i ugyanarra az x értékre nyílna ki
+        // Különböző gyököket követel meg, így két y_i nem maradhat szabad ugyanannál az x-nél.
         if !roots.insert(root.clone()) {
             return None;
         }
@@ -189,8 +189,8 @@ fn roots_for_sum(
         root_by_y.insert(y.clone(), root);
     }
 
-    //A képen lévő szabály nem tetszőleges különböző rootokra szól,
-    //hanem konkrétan i = 0..n értékekre.
+    // A szabályt nem tetszőleges különböző gyökökre alkalmazza,
+    // hanem kifejezetten a 0..n indexekből álló gyökhalmazra.
     let expected_roots: BTreeSet<BigInt> = (0..sum.y_cells.len()).map(BigInt::from).collect();
     if roots != expected_roots {
         return None;
@@ -200,13 +200,13 @@ fn roots_for_sum(
 }
 
 fn parse_product_constraint(expr: &UcpExpr, modulus: Option<&BigInt>) -> Option<ProductConstraint> {
-    //A termékből kidobjuk a nem érdemi konstans szorzókat, és két tényleges faktort várunk
+    // Elhagyja az igazoltan nemnulla konstans tényezőket, majd két érdemi tényezőt keres.
     let factors = meaningful_product_factors(expr, modulus);
     if factors.len() != 2 {
         return None;
     }
 
-    //A két faktor sorrendje mindegy: y * (x-root) és (x-root) * y is jó
+    // A y * (x-root) és (x-root) * y sorrendet egyaránt felismeri.
     parse_product_pair(factors[0], factors[1], modulus)
         .or_else(|| parse_product_pair(factors[1], factors[0], modulus))
 }
@@ -216,9 +216,9 @@ fn parse_product_pair(
     root_expr: &UcpExpr,
     modulus: Option<&BigInt>,
 ) -> Option<ProductConstraint> {
-    //Az egyik oldalnak egy sima y változónak kell lennie
+    // Az egyik tényezőben egyszerű y változót keres.
     let y = parse_plain_var(y_expr, modulus)?;
-    //A másik oldalnak x - root vagy root - x alakúnak kell lennie
+    // A másik tényezőben x - root vagy root - x alakot keres.
     let (x, root) = parse_root_factor(root_expr)?;
 
     Some(ProductConstraint { y, x, root })
@@ -230,13 +230,13 @@ fn parse_sum_constraint(
     values: &UcpValueFacts,
     modulus: Option<&BigInt>,
 ) -> Option<SumConstraint> {
-    //Az expressiont lineáris zero equationként próbáljuk olvasni
+    // A kifejezést lineáris, nullával egyenlő kényszerként értelmezi.
     let linear = linearize_zero_equation(expr, values, modulus)?;
     if linear.terms.len() < 2 {
         return None;
     }
 
-    //Ebben a szabályban csak +1 és -1 együtthatós összegeket kezelünk
+    // Csak +1 és -1 együtthatós összegeket fogad el ehhez a mintához.
     if linear
         .terms
         .values()
@@ -245,7 +245,7 @@ fn parse_sum_constraint(
         return None;
     }
 
-    //Szétválasztjuk a bal/jobb oldalon lévő tagokat az előjelük alapján
+    // Előjel szerint szétválasztja a bal és jobb oldalra kerülő tagokat.
     let positive: Vec<CellId> = linear
         .terms
         .iter()
@@ -279,7 +279,7 @@ fn sum_from_signed_terms(
     facts: &UcpFacts,
     values: &UcpValueFacts,
 ) -> Option<SumConstraint> {
-    //sum(y_i) + c = 0 alak: itt e egy konstansként jön ki
+    // A sum(y_i) + c = 0 alaknál e értékét konstansból számítja.
     if positive.len() >= 2 && negative.is_empty() {
         return Some(SumConstraint {
             y_cells: positive,
@@ -287,7 +287,7 @@ fn sum_from_signed_terms(
         });
     }
 
-    //-sum(y_i) + c = 0 alak: ugyanaz előjelcserével
+    // A -sum(y_i) + c = 0 alakot előjelcserével kezeli.
     if negative.len() >= 2 && positive.is_empty() {
         return Some(SumConstraint {
             y_cells: negative,
@@ -295,7 +295,7 @@ fn sum_from_signed_terms(
         });
     }
 
-    //sum(y_i) - e + c = 0 alak: e-nek unique-nak kell lennie
+    // A sum(y_i) - e + c = 0 alaknál megköveteli e egyértelműségét.
     if positive.len() >= 2 && negative.len() == 1 {
         let e = &negative[0];
         if !facts.is_unique(e) {
@@ -312,7 +312,7 @@ fn sum_from_signed_terms(
         });
     }
 
-    //e - sum(y_i) + c = 0 alak: ez az előző tükörképe
+    // Az e - sum(y_i) + c = 0 alakot az ellenkező oldalra rendezett összegként kezeli.
     if negative.len() >= 2 && positive.len() == 1 {
         let e = &positive[0];
         if !facts.is_unique(e) {
@@ -344,30 +344,30 @@ fn collect_meaningful_product_factors<'a>(
     modulus: Option<&BigInt>,
 ) {
     match expr {
-        //A többszörös szorzást kilapítjuk faktorlistává
+        // A többszörös szorzást tényezőlistává lapítja.
         UcpExpr::Mul(left, right) => {
             collect_meaningful_product_factors(left, factors, modulus);
             collect_meaningful_product_factors(right, factors, modulus);
         }
-        //A mínusz előjel nem változtatja meg, hogy melyik faktor érdemi
+        // Az előjelváltást elhagyja, mert nem változtatja meg a nullhelyeket.
         UcpExpr::Neg(inner) => collect_meaningful_product_factors(inner, factors, modulus),
-        //Nem nulla skálázás mellett ugyanaz a faktorstruktúra marad
+        // Nemnulla skálázásnál megtartja a belső tényezőszerkezetet.
         UcpExpr::Scale(inner, scalar) if scalar.is_non_zero_with_modulus(modulus) => {
             collect_meaningful_product_factors(inner, factors, modulus)
         }
-        //Nem nulla konstans szorzót elhagyhatunk a mintázat felismeréséhez
+        // Az igazoltan nemnulla konstans tényezőt elhagyja a mintafelismerésből.
         UcpExpr::Const(scalar) if scalar.is_non_zero_with_modulus(modulus) => {}
-        //Retain zero factors: discarding one would turn a tautology into a constraint.
-        //Minden más valódi faktor marad
+        // Megtartja a nullatényezőt: elhagyásával azonosságból hamis korlátozást képezne.
+        // Minden más érdemi tényezőt megtart.
         _ => factors.push(expr),
     }
 }
 
 fn parse_plain_var(expr: &UcpExpr, modulus: Option<&BigInt>) -> Option<CellId> {
     match expr {
-        //Sima változó
+        // Az egyszerű változó azonosítóját adja vissza.
         UcpExpr::Var(cell) => Some(cell.clone()),
-        //Előjel és nem nulla skálázás mellett is ugyanazt a változót nézzük
+        // Előjelváltás vagy nemnulla skálázás mellett a belső változót azonosítja.
         UcpExpr::Neg(inner) => parse_plain_var(inner, modulus),
         UcpExpr::Scale(inner, scalar) if scalar.is_non_zero_with_modulus(modulus) => {
             parse_plain_var(inner, modulus)
@@ -377,19 +377,19 @@ fn parse_plain_var(expr: &UcpExpr, modulus: Option<&BigInt>) -> Option<CellId> {
 }
 
 fn parse_root_factor(expr: &UcpExpr) -> Option<(CellId, BigInt)> {
-    //x - c vagy c - x alakot keresünk lineáris formában
+    // Lineáris alakban x - c vagy c - x tényezőt keres.
     let linear = linearize_symbolic(expr)?;
     if linear.terms.len() != 1 {
         return None;
     }
 
     let (cell, coefficient) = linear.terms.into_iter().next().unwrap();
-    //Csak x-c / c-x alakot engedünk, ezért az együttható csak +1 vagy -1 lehet
+    // Csak +1 vagy -1 együtthatót fogad el az x-c és c-x mintához.
     if coefficient != BigInt::from(1) && coefficient != BigInt::from(-1) {
         return None;
     }
 
-    //Megoldjuk a lineáris faktort nullára: coefficient * x + constant = 0
+    // A coefficient * x + constant = 0 egyenletből kiszámítja a gyököt.
     let numerator = -linear.constant;
     if &numerator % &coefficient != BigInt::from(0) {
         return None;
@@ -407,12 +407,12 @@ fn linearize_symbolic(expr: &UcpExpr) -> Option<LinearExpr> {
     match expr {
         //Egy cella lineárisan 1 * cell
         UcpExpr::Var(cell) => Some(LinearExpr::term(cell.clone(), BigInt::from(1))),
-        //Ismeretlen konstansból nem tudunk pontos lineáris alakot csinálni
+        // Ismeretlen értékű konstansból nem készít pontos lineáris alakot.
         UcpExpr::Const(_) => None,
         UcpExpr::Neg(inner) => {
             linearize_symbolic(inner).map(|linear| linear.scale(BigInt::from(-1)))
         }
-        //Lineáris tagok összeadhatók
+        // A lineáris tagokat összeadja.
         UcpExpr::Add(left, right) => {
             Some(linearize_symbolic(left)?.add(linearize_symbolic(right)?))
         }
@@ -431,7 +431,7 @@ fn linearize_symbolic(expr: &UcpExpr) -> Option<LinearExpr> {
             UcpScalar::Known(scale) => {
                 Some(linearize_symbolic(inner)?.scale(bounded_value(scale.clone())?))
             }
-            //Ismeretlen vagy csak nonzero skálával nem tudunk pontos konstans szorzót számolni
+            // Absztrakt nemnulla vagy ismeretlen skála esetén nem állít elő pontos együtthatót.
             UcpScalar::NonZero | UcpScalar::Unknown => None,
         },
     }
@@ -439,7 +439,7 @@ fn linearize_symbolic(expr: &UcpExpr) -> Option<LinearExpr> {
 
 fn constant_expr_value(expr: &UcpExpr) -> Option<BigInt> {
     match expr {
-        //Változót tartalmazó expression nem tiszta konstans
+        // Változót tartalmazó kifejezést nem fogad el tiszta konstansként.
         UcpExpr::Var(_) => None,
         UcpExpr::Const(scalar) => bounded_value(scalar.as_known()?),
         UcpExpr::Neg(inner) => bounded_value(-constant_expr_value(inner)?),
@@ -462,13 +462,13 @@ fn linearize_zero_equation(
     values: &UcpValueFacts,
     modulus: Option<&BigInt>,
 ) -> Option<LinearExpr> {
-    //Ha az expression valójában csak egy érdemi faktort tartalmaz, azt külön lineárisítjuk
+    // Egyetlen érdemi tényezőt tartalmazó szorzatnál azt a tényezőt linearizálja.
     let factors = meaningful_product_factors(expr, modulus);
     if factors.len() == 1 {
         return linearize(factors[0], values);
     }
 
-    //Egyébként az egész zero equationt próbáljuk lineáris alakra hozni
+    // Egyébként a teljes nullával egyenlő kifejezést próbálja linearizálni.
     linearize(expr, values)
 }
 
@@ -500,7 +500,7 @@ fn linearize(expr: &UcpExpr, values: &UcpValueFacts) -> Option<LinearExpr> {
             UcpScalar::Known(scale) => {
                 Some(linearize(inner, values)?.scale(bounded_value(scale.clone())?))
             }
-            //Pontos lineáris alakhoz itt konkrét skála kellene
+            //Pontos lineáris alakot csak konkrét skálával készít.
             UcpScalar::NonZero | UcpScalar::Unknown => None,
         },
     }
@@ -551,7 +551,7 @@ impl LinearExpr {
 mod tests {
     use super::*;
 
-    //Segédfüggvény y * (x - root) alakú product equation építéséhez
+    // A teszt y * (x - root) alakú szorzatkényszert állít elő.
     fn product(y: &CellId, x: &CellId, root: i64) -> UcpExpr {
         UcpExpr::mul(
             UcpExpr::var(y.clone()),
@@ -559,7 +559,7 @@ mod tests {
         )
     }
 
-    //Ellenőrzi, hogy a one-hot mintából konkrét értékek nélkül is unique-k lesznek a y_i-k
+    // A teszt ellenőrzi, hogy a kiválasztási minta konkrét értékek nélkül is igazolja y_i egyértelműségét.
     #[test]
     fn infers_all_outputs_unique_from_one_hot_pattern() {
         let x = CellId::instance(0, 0);
@@ -603,7 +603,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy ismert x és e esetén a konkrét y_i értékeket is továbbvisszük
+    // A teszt ellenőrzi, hogy ismert x és e esetén a rendszer a konkrét y_i értékeket is visszaadja.
     #[test]
     fn carries_exact_values_when_x_and_e_are_known() {
         let x = CellId::instance(0, 0);
@@ -649,7 +649,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy nem következtetünk, ha az összeg jobb oldala nem unique
+    // A teszt ellenőrzi, hogy a rendszer nem következtet, ha az összeg jobb oldala nem egyértelmű.
     #[test]
     fn does_not_fire_when_sum_target_is_not_unique() {
         let x = CellId::instance(0, 0);
@@ -673,7 +673,7 @@ mod tests {
         assert!(infer_all_but_one_zero(&expressions, &facts, &values).is_empty());
     }
 
-    //Ellenőrzi, hogy duplikált rootoknál nem alkalmazzuk tévesen a szabályt
+    // A teszt ellenőrzi, hogy ismétlődő gyökökre nem alkalmazza a szabályt.
     #[test]
     fn does_not_fire_when_roots_are_duplicated() {
         let x = CellId::instance(0, 0);
@@ -694,7 +694,7 @@ mod tests {
         assert!(infer_all_but_one_zero(&expressions, &facts, &values).is_empty());
     }
 
-    //Ellenőrzi, hogy különböző, de nem 0..n rootokra nem alkalmazzuk a cikk konkrét szabályát
+    // A teszt ellenőrzi, hogy a 0..n halmaztól eltérő gyökökre nem alkalmazza a szabályt.
     #[test]
     fn does_not_fire_when_roots_are_distinct_but_not_zero_to_n() {
         let x = CellId::instance(0, 0);

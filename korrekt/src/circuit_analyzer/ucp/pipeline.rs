@@ -1,12 +1,12 @@
 #![cfg(not(feature = "use_pse_v1_halo2_proofs"))]
 
-// Ez a modul köti össze a lightweight UCP-t a meglévő SMT alapú Analyzerrel.
-// A pipeline menete a cikkhez hasonló:
-//   1. UCP fut a circuitből kinyert constraint expressionökön.
-//   2. Ha minden target/output unique, akkor SMT nélkül kész vagyunk.
-//   3. Ha marad unresolved target vagy advice cella, akkor egy cellára rákérdezünk SMT-vel.
-//   4. Ha az SMT unique-nak bizonyítja, hozzáadjuk K-hoz, és újra futtatjuk az UCP-t.
-// Így az SMT-nek kevesebb változót kell szabadon kezelnie, az UCP pedig új információból tovább tud propagálni.
+// Ez a modul az UCP-következtetést a meglévő SMT-alapú Analyzer rendszerhez kapcsolja.
+// A vezérlés a cikkhez hasonló lépéseket követ:
+//    1. UCP-t futtat a kapcsolásból kinyert kifejezéseken.
+//    2. Ha minden célcella egyértelmű, további egyértelműségi SMT-vizsgálat nélkül eredményt ad.
+//    3. Ha marad vizsgálandó cél- vagy advice cella, kiválaszt egyet SMT-lekérdezésre.
+//    4. Az újonnan igazolt egyértelműséget K-ba jegyzi, majd újra futtatja az UCP-t.
+// Az SMT-től kapott új tényekkel további következtetéseket végez, az igazolt tényeket pedig átadja az SMT-nek.
 use super::{
     cell::CellId,
     choose_var::choose_query_cell,
@@ -29,36 +29,36 @@ use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum UcpAnalyzerPipelineStatus {
-    //Minden targetet tisztán UCP bizonyított unique-nak
+    // Minden célcella egyértelműségét tisztán UCP-vel igazolja.
     VerifiedByUcp,
-    //SMT is kellett, de végül minden target unique lett
+    // SMT-vizsgálatot is végez, és végül minden célcella egyértelműségét igazolja.
     VerifiedBySmt,
-    //SMT bizonyította, hogy egy target nem unique
+    // SMT-vel igazolja legalább egy célcella nemegyértelműségét.
     RefutedBySmt,
-    //Nem sikerült dönteni: se UCP, se SMT query sorozat nem adott végső választ
+    // Sem UCP-vel, sem a végrehajtott SMT-lekérdezésekkel nem jut végső döntésre.
     Unknown,
 }
 
 #[derive(Debug)]
 pub struct UcpAnalyzerPipelineOutput {
-    //A teljes pipeline magas szintű eredménye
+    // A teljes elemzési folyamat eredményét tartalmazza.
     pub status: UcpAnalyzerPipelineStatus,
-    //Az utolsó UCP fixpoint futás eredménye
+    // Az utolsó UCP-fixpontszámítás eredményét tárolja.
     pub ucp_result: UcpResult,
-    //A target cellák ellenőrzési összefoglalója
+    // A célcellák ellenőrzésének összefoglalóját tárolja.
     pub target_check: UcpTargetCheck,
-    //Analyzer-kompatibilis output, hogy a régi API-val is együtt tudjon élni
+    // Az eredményt az Analyzer felületével kompatibilis alakban is elérhetővé teszi.
     pub analyzer_output: AnalyzerOutput,
-    //Igaz, ha legalább egyszer ténylegesen SMT-hez kellett fordulni
+    // Azt jelzi, hogy a futás indított-e SMT-vizsgálatot.
     pub used_smt: bool,
-    //Hány egycellás semantic query futott
+    // A végrehajtott egycellás szemantikai próbákat számolja.
     pub semantic_queries: usize,
-    //Azok a cellák, amelyeket SMT bizonyított unique-nak és bekerültek K-ba
+    // Az SMT-vel igazolt és K-ba felvett cellákat tárolja.
     pub smt_learned_cells: Vec<CellId>,
 }
 
 #[cfg(not(feature = "use_pse_v1_halo2_proofs"))]
-//Teljes UCP + SMT pipeline underconstrained ellenőrzéshez
+// Az alulkényszerezettség vizsgálatához összekapcsolja az UCP- és SMT-következtetést.
 pub fn analyze_underconstrained_with_ucp<F, ConcreteCircuit, I>(
     circuit: &ConcreteCircuit,
     k: u32,
@@ -73,9 +73,9 @@ where
     analyze_underconstrained_with_ucp_internal(circuit, k, analyzer_input, target_cells, false)
 }
 
-/// Attempts concrete values even after all targets have been proved unique.
-/// Recovery is bounded and may remain incomplete; inspect `ucp_result.value_facts`
-/// for exact values. The returned status continues to describe target uniqueness.
+/// A konkrét értékek visszaállítását minden célcella egyértelműségének igazolása után is megpróbálja.
+/// A visszaállítást korlátozza; a konkrét értékeket a ucp_result.value_facts mezőben adja vissza.
+/// A visszaadott fő státusz továbbra is a célcellák egyértelműségét minősíti.
 pub fn analyze_underconstrained_with_ucp_and_value_recovery<F, ConcreteCircuit, I>(
     circuit: &ConcreteCircuit,
     k: u32,
@@ -102,18 +102,18 @@ where
     ConcreteCircuit: Circuit<F>,
     I: IntoIterator<Item = CellId>,
 {
-    //A célcellák azok az outputok/targetek, amelyek unique voltát végül bizonyítani akarjuk
+    // Kijelöli a kimeneti célcellákat, amelyek egyértelműségét igazolni próbálja.
     analyzer_input.verification_input.validate_public_values()?;
     let target_cells: Vec<CellId> = target_cells.into_iter().collect();
-    //Először létrehozzuk az analyzable circuitet, ebből tudunk gate-eket, régiókat és copy constraint-eket kinyerni
+    // Előállítja az Analyzable kapcsolást a kapuk, régiók és másolási kényszerek kigyűjtéséhez.
     let analyzable =
         crate::circuit_analyzer::analyzable::Analyzable::config_and_synthesize(circuit, k)
             .context("Failed to build analyzable circuit for UCP!")?;
-    //A circuitből UCP problem lesz: expressionök, kezdeti K, O outputok és W witnessek
+    // A kapcsolásból UCP-problémát készít: kifejezéseket, kezdeti K-t, O célokat és W advice cellákat.
     let problem = extract_ucp_problem_with_targets(&analyzable, target_cells);
-    //Kezdeti K: instance/fixed cellák, plusz később SMT által tanult unique cellák
+    // K-t az instance és fixed cellákkal inicializálja; az SMT-tényeket később adja hozzá.
     let mut facts = problem.initial_facts.clone();
-    //Kezdeti Delta: lookup/range table domainek, plusz analyzer inputból ismert public instance értékek
+    // Deltát a lookup-domainekkel és a megadott publikus instance értékekkel inicializálja.
     let mut value_facts = problem.initial_value_facts.clone();
     if analyzer_input.verification_method == VerificationMethod::Specific {
         for (name, value) in &analyzer_input.verification_input.instance_cells {
@@ -124,19 +124,19 @@ where
             }
         }
     }
-    //Gyors membership check ahhoz, hogy egy SMT által refutált cella target-e
+    // Halmazban tárolja a célcellákat, hogy gyorsan eldöntse, célhoz tartozik-e az ellenpélda.
     let target_set: HashSet<CellId> = problem.output_cells.iter().cloned().collect();
-    //Ezekre már rákérdeztünk SMT-vel, ne pörgessük újra ugyanazt
+    // Megjegyzi a már lekérdezett cellákat, hogy ne ismételje ugyanazt a próbát.
     let mut queried_cells = HashSet::new();
     let mut smt_learned_cells = Vec::new();
     let mut semantic_queries = 0;
-    //Az Analyzer drága inicializálását csak akkor végezzük el, ha UCP önmagában nem elég
+    // Az Analyzer költséges inicializálását az első szükséges SMT-vizsgálatig halasztja.
     let mut analyzer = None;
 
     loop {
-        //UCP fixpoint futtatása az aktuális K és Delta mellett
+        // Az aktuális K és Delta alapján UCP-fixpontot számít.
         let ucp_result = problem.analyze_with_values(facts.clone(), value_facts.clone());
-        //Megnézzük, hogy a targetek bekerültek-e a végső K halmazba
+        // Ellenőrzi, hogy minden célcella bekerült-e a végső K-ba.
         let target_check = ucp_result.check_targets(&problem.output_cells);
         let recovery_cell = if recover_target_values && target_check.all_targets_unique() {
             problem
@@ -151,7 +151,7 @@ where
             None
         };
 
-        //Ha minden target unique, akkor kész vagyunk; lehet tiszta UCP vagy SMT-vel támogatott siker
+        // Minden célcella egyértelműségénél elkészíti a tisztán UCP-s vagy SMT-vel támogatott eredményt.
         if target_check.all_targets_unique() && recovery_cell.is_none() {
             let used_smt = semantic_queries > 0;
             return Ok(UcpAnalyzerPipelineOutput {
@@ -171,8 +171,8 @@ where
             });
         }
 
-        //Ha maradt unresolved output/witness, kiválasztunk egyet SMT query-re:
-        //V = (O unio W) \ K', a cikk Algorithm 1 lépése szerint
+        // A még vizsgálandó kimeneti és advice cellák közül választ SMT-lekérdezésre:
+        // a cikk algoritmusának megfelelő V = (O unio W) \ K' halmazt használja.
         let Some(query_cell) = recovery_cell.or_else(|| {
             choose_query_cell(
                 &problem.expressions,
@@ -184,7 +184,7 @@ where
                 &queried_cells,
             )
         }) else {
-            //Nincs több értelmes cella, amit kérdezhetnénk, ezért a pipeline nem tud dönteni
+            // Ha nincs több lekérdezhető cella, bizonytalan eredménnyel zárja a folyamatot.
             return Ok(UcpAnalyzerPipelineOutput {
                 status: UcpAnalyzerPipelineStatus::Unknown,
                 ucp_result,
@@ -198,7 +198,7 @@ where
             });
         };
 
-        //SMT Analyzer csak itt épül fel először, ha tényleg szükség van rá
+        // Az SMT-analyzert az első ténylegesen szükséges vizsgálatnál építi fel.
         if analyzer.is_none() {
             analyzer = Some(
                 Analyzer::<F>::new(
@@ -213,32 +213,32 @@ where
         let analyzer = analyzer
             .as_mut()
             .expect("analyzer was initialized above before semantic query");
-        //Az UCP által már unique-nak bizonyított advice cellákat fixként átadjuk az SMT-nek
+        // Az UCP-vel igazoltan egyértelmű advice cellákat rögzítettként átadja az SMT-nek.
         analyzer.set_ucp_unique_cells(ucp_result.facts.unique_cells().iter().cloned());
-        //A cikk QUERY(Delta, C, K', v) lépésének megfelelően a domain információt is átadjuk
+        // A cikk QUERY(Delta,C,K',v) lépésének megfelelően a domainadatokat is átadja.
         analyzer.set_ucp_value_facts(&ucp_result.value_facts);
         semantic_queries += 1;
 
-        //Egyetlen cellára kérdezünk rá: unique-e az aktuális constraint rendszer mellett?
+        // Egy cella egyértelműségét vizsgálja az aktuális kényszerrendszer mellett.
         let query_output = analyzer
             .query_ucp_cell_uniqueness_with_value(analyzer_input, &query_cell)
             .with_context(|| format!("Failed to query SMT uniqueness for {}", query_cell))?;
         match query_output.result {
             SemanticQueryResult::ProvenUnique => {
-                //SMT tanult egy új unique cellát: frissítjük K-t, majd új UCP kör indul
+                // Az SMT új egyértelműségi tényét K-ba jegyzi, majd új UCP-kört indít.
                 value_facts = ucp_result.value_facts.clone();
                 facts = ucp_result.facts;
                 if let Some(value) = query_output.value {
                     value_facts.mark_known(query_cell.clone(), value);
                 }
-                //Ertekkorlat vagy ismeretlen public miatt a visszaallitas eredmenytelen is lehet.
+                // Értékméretkorlát vagy ismeretlen publikus érték esetén nem feltétlenül állít vissza konkrét értéket.
                 queried_cells.insert(query_cell.clone());
                 if facts.mark_unique(query_cell.clone()) {
                     smt_learned_cells.push(query_cell);
                 }
             }
             SemanticQueryResult::NotUnique => {
-                //Ha ez target volt, akkor tényleges underconstrained hibát találtunk
+                // Célcellára kapott ellenpéldánál alulkényszerezettséget jelez.
                 if target_set.contains(&query_cell) {
                     return Ok(UcpAnalyzerPipelineOutput {
                         status: UcpAnalyzerPipelineStatus::RefutedBySmt,
@@ -252,13 +252,13 @@ where
                         smt_learned_cells,
                     });
                 }
-                //Nem target advice cella nem lett unique; megjegyezzük, hogy erre már ne kérdezzünk rá
+                // A nemegyértelmű köztes advice cellát megjegyzi, és nem kérdezi le újra.
                 queried_cells.insert(query_cell);
                 value_facts = ucp_result.value_facts.clone();
                 facts = ucp_result.facts;
             }
             SemanticQueryResult::Overconstrained => {
-                //Az SMT oldalon overconstrained jelzés jött, ezt nem UCP döntésként kezeljük
+                // Az SMT következetlenségi jelzését külön kezeli, nem UCP-döntésként jelenti.
                 return Ok(UcpAnalyzerPipelineOutput {
                     status: UcpAnalyzerPipelineStatus::Unknown,
                     ucp_result,
@@ -272,7 +272,7 @@ where
                 });
             }
             SemanticQueryResult::Unknown => {
-                //SMT sem döntötte el ezt a cellát, ezért később mást próbálunk
+                // Bizonytalan SMT-eredménynél más cellával folytatja a keresést.
                 queried_cells.insert(query_cell);
                 value_facts = ucp_result.value_facts.clone();
                 facts = ucp_result.facts;
@@ -291,26 +291,26 @@ mod tests {
     use num_bigint::BigInt;
     use std::{collections::HashMap, marker::PhantomData};
 
-    //Egyszerű selectoros circuit, amit az UCP önmagában meg tud oldani
+    // A teszt egyszerű, szelektorral vezérelt, tisztán UCP-vel megoldható kapcsolást állít elő.
     #[derive(Clone, Debug)]
     struct PipelineConfig {
         advice: Column<Advice>,
         selector: Selector,
     }
 
-    //A pipeline teszt circuit példánya
+    // A teszt a kapcsolás privát értékeit tárolja ebben a példányban.
     #[derive(Clone, Debug, Default)]
     struct PipelineCircuit {
         _marker: PhantomData<Fr>,
     }
 
-    //Olyan circuit config, ahol UCP önmagában nem látja be a target uniqueness-t
+    // A teszt olyan konfigurációt készít, amelynek célcelláját az alap UCP nem határozza meg.
     #[derive(Clone, Debug)]
     struct SmtOnlyConfig {
         advice: Column<Advice>,
     }
 
-    //Ezt a példát SMT query fogja unique-nak bizonyítani
+    // A teszt az egyértelműségi tényt SMT-vizsgálattal állapítja meg.
     #[derive(Clone, Debug, Default)]
     struct SmtOnlyCircuit {
         _marker: PhantomData<Fr>,
@@ -378,7 +378,7 @@ mod tests {
     #[derive(Clone, Debug, Default)]
     struct LargeLinearCircuit;
 
-    //Paratlan hosszu kor: x_i+x_(i+1)=2 minden i-re, az egyetlen megoldas mindenhol 1.
+    // A teszt páratlan hosszú x_i+x_(i+1)=2 ciklust készít, amelynek egyetlen megoldása mindenhol 1.
     impl Circuit<Fr> for LargeLinearCircuit {
         type Config = LargeLinearConfig;
         type FloorPlanner = SimpleFloorPlanner;
@@ -388,7 +388,8 @@ mod tests {
         }
 
         fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
-            let cells: Vec<_> = (0..65).map(|_| meta.advice_column()).collect();
+            // A 129 cellás ciklus meghaladja a domainelimináció 128 oszlopos keretét is.
+            let cells: Vec<_> = (0..129).map(|_| meta.advice_column()).collect();
             let selector = meta.selector();
             meta.create_gate("large coupled linear ring", |meta| {
                 let selected = meta.query_selector(selector);
@@ -451,7 +452,7 @@ mod tests {
             let instance = meta.instance_column();
             let selector = meta.selector();
 
-            //A gate: advice + public - 5 = 0, selectorrel aktiválva
+            // A teszt szelektorral aktiválja az advice + public - 5 = 0 kaput.
             meta.create_gate("pipeline selected assignment", |meta| {
                 let selector = meta.query_selector(selector);
                 let advice = meta.query_advice(advice, Rotation::cur());
@@ -471,9 +472,9 @@ mod tests {
             layouter.assign_region(
                 || "pipeline row",
                 |mut region| {
-                    //Bekapcsoljuk a gate-et az adott sorban
+                    // Aktiválja a kaput az adott soron.
                     config.selector.enable(&mut region, 0)?;
-                    //A witness érték public=2 mellett 3, így 3+2-5=0
+                    // A teszt public=2 mellett 3 értéket rendel az advice cellához, így a kényszer teljesül.
                     region.assign_advice(
                         || "advice",
                         config.advice,
@@ -497,7 +498,7 @@ mod tests {
         fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
             let advice = meta.advice_column();
 
-            //A polynomial (x-1)^2 = 0 alakú, amit az SMT tud egyértelműsíteni x=1-re
+            // A teszt (x-1)^2 = 0 polinomot készít, amelyből az SMT x=1-et igazol.
             meta.create_gate("expanded repeated root", |meta| {
                 let x = meta.query_advice(advice, Rotation::cur());
 
@@ -518,7 +519,7 @@ mod tests {
             layouter.assign_region(
                 || "smt only row",
                 |mut region| {
-                    //A witness érték a gyök: x = 1
+                    // A teszt az x=1 gyököt rendeli a cellához.
                     region.assign_advice(|| "x", config.advice, 0, || Value::known(Fr::from(1)))?;
                     Ok(())
                 },
@@ -555,7 +556,7 @@ mod tests {
         }
     }
 
-    //Ellenőrzi, hogy ha UCP már bizonyítja a targetet, akkor SMT nem indul el
+    // A teszt ellenőrzi, hogy tisztán UCP-vel igazolt céloknál nem indít SMT-vizsgálatot.
     #[test]
     fn verifies_targets_with_ucp_before_smt() {
         let circuit = PipelineCircuit::default();
@@ -586,7 +587,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi, hogy az Analyzer megkapja az UCP által unique advice cellákat fix változóként
+    // A teszt ellenőrzi az igazolt advice-egyértelműség átadását rögzített változóként.
     #[test]
     fn analyzer_accepts_ucp_unique_cells_as_smt_fixed_variables() {
         let circuit = PipelineCircuit::default();
@@ -614,7 +615,7 @@ mod tests {
         assert!(!analyzer.ucp_unique_variables().contains("F-0-0"));
     }
 
-    //Ellenőrzi, hogy a Delta exact domain tényleges SMT assertionként bekerül a semantic query-be
+    // A teszt ellenőrzi, hogy az egyelemű Delta-domaint SMT-állításként is átadja.
     #[test]
     fn analyzer_uses_ucp_exact_value_domains_in_semantic_query() {
         let circuit = DomainOnlyCircuit::default();
@@ -658,7 +659,7 @@ mod tests {
         );
     }
 
-    //Ellenőrzi a teljes ciklust: UCP nem elég, SMT tanul egy cellát, majd az bekerül K-ba
+    // A teszt a teljes UCP -> SMT -> K-frissítés visszacsatolást ellenőrzi.
     #[test]
     fn learns_target_from_smt_query_and_updates_k() {
         let circuit = SmtOnlyCircuit::default();
@@ -693,7 +694,7 @@ mod tests {
         );
     }
 
-    //K tagsag mellett is valoban ellenorizzuk a konkret erteket, nem rogzitjuk a modell K ertekeit.
+    // A teszt K-tagság mellett is ellenőrzi a konkrét értéket, és nem feltételezi a modell többi értékét.
     #[test]
     fn recovers_value_of_cell_already_in_k() {
         let input = no_public_input();
@@ -766,7 +767,7 @@ mod tests {
         assert_eq!(output.result, SemanticQueryResult::ProvenUnique);
         assert_eq!(output.value, None);
 
-        //Mindket public ertek rogzitve: a solver erteke a kenyszerekbol jon, nem a synthesize witnessbol.
+        // A teszt rögzíti mindkét publikus értéket; az SMT a kényszerekből, nem a privát értékadásból következtet.
         input
             .verification_input
             .instance_cells
@@ -827,7 +828,7 @@ mod tests {
         assert_eq!(output.value, None);
     }
 
-    //A gyors ut K-val kesz; a recovery ut egy SMT ertekbol mind a 65 Delta erteket megtanulja.
+    // A teszt visszaállítási útja egy SMT-értékből mind a 65 Delta-értéket megtanulja.
     #[test]
     fn value_recovery_continues_after_targets_are_unique() {
         let input = no_public_input();
@@ -853,7 +854,7 @@ mod tests {
         assert_eq!(recovered.status, UcpAnalyzerPipelineStatus::VerifiedBySmt);
         assert_eq!(recovered.semantic_queries, 1);
         assert!(recovered.smt_learned_cells.is_empty());
-        for column in 0..65 {
+        for column in 0..129 {
             assert_eq!(
                 recovered
                     .ucp_result

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 pub(super) mod halo2_book {
     //Import-name adaptation only; the included upstream file is byte-for-byte unchanged.
     use zcash_halo2_proofs as halo2_proofs;
-    include!("external_fixtures/halo2_simple_example.rs");
+    include!("fixtures/halo2_simple_example.rs");
 
     type Fr = halo2_proofs::pasta::Fp;
 
