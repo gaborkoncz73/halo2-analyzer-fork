@@ -93,9 +93,10 @@ pub struct PrivateCellReport {
     /// A domain összes elemének megvalósíthatóságát igazolta az eredeti kielégíthető kontextusban.
     /// A független domainvalidátor csak a lefedést ellenőrzi, ezt a teljességi állítást nem.
     pub domain_is_complete: bool,
-    /// Konkrét publikus megfigyelés nélkül kikövetkeztetett, szerkezeti korlátokat is tartalmazó domaint tárol.
+    /// Csak a külön kért szerkezeti kontroll domainjét tárolja; a kontroll hiányát a riport külön jelzi.
     pub baseline_domain: Option<UcpValueDomain>,
-    /// Az UCP-alapállapothoz mért szűkülést jelzi; azt SMT-következtetés is okozhatja.
+    /// Csak elvégzett szerkezeti kontroll mellett jelzi az ahhoz mért szűkülést; különben false.
+    /// A szűkülést SMT-következtetés is okozhatja.
     /// Ebből nem állapít meg mért entrópiaveszteséget vagy kizárólag publikus adat okozta szivárgást.
     /// A publikus függést az analyze_public_observation_effect külön eredeti SMT-kontrollja vizsgálja.
     pub domain_refined_from_baseline: bool,
@@ -131,6 +132,7 @@ pub struct PrivacyAnalysisSummary {
     pub unique_cells: usize,
     pub non_unique_cells: usize,
     pub unresolved_uniqueness: usize,
+    /// Az opcionális baseline-hoz mért szűküléseket számolja; kontroll nélkül nulla, nem minősíti a visszaállítást.
     pub refined_domains: usize,
 }
 
@@ -158,6 +160,9 @@ pub struct PrivacyAnalysisReport {
     pub elapsed: Duration,
     /// A tényleges beállításokat a feloldott solveridőkerettel együtt tárolja az ismételhető mérésekhez.
     pub options: PrivacyAnalysisOptions,
+    /// Csak akkor igaz, ha a publikus értékek nélküli opcionális UCP-kontroll ténylegesen lefutott.
+    /// False esetén a baseline_domain hiánya és a szűkülési számláló nem összehasonlítási eredmény.
+    pub structural_baseline_computed: bool,
     /// Következetlen kényszerrendszerhez nem jelent kikövetkeztetett tényeket.
     pub ucp_result: Option<UcpResult>,
 }
@@ -203,6 +208,7 @@ pub(super) fn recovery_report(
         status,
         cells,
         summary,
+        structural_baseline_computed: false,
         public_values,
         semantic_queries: search_statistics.target_queries + search_statistics.bridge_queries,
         search_statistics,
@@ -220,6 +226,11 @@ impl fmt::Display for PrivacyAnalysisReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Privacy analysis: {:?}", self.status)?;
         writeln!(f, "SMT domain export: {}", PRIVACY_SMT_DOMAIN_POLICY)?;
+        writeln!(
+            f,
+            "Structural baseline computed: {}",
+            self.structural_baseline_computed
+        )?;
         let sat_policy =
             if self.satisfiability_evidence == Some(SatisfiabilityEvidence::VerifiedWitness) {
                 PRIVACY_WITNESS_SAT_POLICY

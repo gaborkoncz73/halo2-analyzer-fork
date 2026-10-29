@@ -117,6 +117,13 @@ A numerikus méret és a lánccellák száma nem kriptográfiai biztonsági bits
 
 ## Futtatás És Mérés
 
+A normál visszaállítás első UCP-futása már a publikus értékekkel indul.
+A publikus értékek nélküli szerkezeti baseline nem kötelező előkészítés:
+csak `PrivacyAnalysisOptions { compute_structural_baseline: true, ..Default::default() }`
+esetén, a keresés után fut le. Ez külön riportkontroll, nem új keresési premissza.
+A `structural_baseline_computed=false` jelzésnél a baseline-mezők üresek;
+a nulla baseline-szűkülési számláló nem jelent sikertelen visszaállítást.
+
 ~~~bash
 cargo test --offline -p korrekt --lib settlement_audit_ -- --nocapture --test-threads=1
 ~~~

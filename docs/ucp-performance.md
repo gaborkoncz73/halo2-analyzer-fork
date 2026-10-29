@@ -2,7 +2,7 @@
 
 Az alábbi cache-mérések a korábbi, még sikertelen visszaállítás történetét
 rögzítik. Az új lineáris/intervallumos következtetés már **16 konkrét célértéket**
-visszaállít ugyanazon circuitből. A végső teljes ellenőrzött futás **66,11 s,
+visszaállít ugyanazon circuitből. A jelenlegi teljes ellenőrzött futás **10,52 s,
 8 SMT-hívás, `Analyzed`** eredményt adott; a végső újramérés és az általános
 szabály leírása a [relációs következtetés dokumentációjában](ucp-relational-propagation.md)
 és a [számlapélda útmutatójában](../korrekt/src/circuit_analyzer/ucp/thesis_examples/README.md)
@@ -11,21 +11,34 @@ következtetési képességet jellemzik.
 
 ## Jelenlegi Visszaállítás
 
-| Mutató | Csak cache-gyorsítás után | Új lineáris/domain-következtetéssel |
-| --- | ---: | ---: |
-| Teljes kombinált futás | 236,08 s | 66,11 s |
-| Tényleges SMT-hívás | 63 | 8 |
-| Pontos célérték | 0 | 16 |
-| Nem egyelemű lefedő cél-domain | 12 | 3 |
-| Teljesnek tanúsított cél-domain | 0 | 17 |
-| Riport | `QueryLimitReached` | `Analyzed` |
+| Mutató | Csak cache-gyorsítás után | Új következtetés, kötelező baseline | Publikus értékekkel induló visszaállítás |
+| --- | ---: | ---: | ---: |
+| Teljes kombinált futás | 236,08 s | 66,11 s | 10,52 s |
+| Tényleges SMT-hívás | 63 | 8 | 8 |
+| Pontos célérték | 0 | 16 | 16 |
+| Nem egyelemű lefedő cél-domain | 12 | 3 | 3 |
+| Teljesnek tanúsított cél-domain | 0 | 17 | 17 |
+| Riport | `QueryLimitReached` | `Analyzed` | `Analyzed` |
 
-A jelenlegi önálló, solver nélküli UCP-futás **4,22 s** alatt ugyanazt a
-16 pontos célértéket állította elő. A teljes kombinált futás nem azonos ezzel:
-a publikus értékek nélküli szerkezeti alapállapotot is kiszámítja, majd a
-fennmaradó három többértékű cél SMT-vizsgálatát is végzi. A profilban a két
-normál UCP-futás együtt 59,69 s, a solverfolyamatok együtt 6,14 s időt adtak.
-A szerkezeti alapállapot feltételes propagációja továbbra is jelentős költség.
+Az önálló, solver nélküli UCP-futás korábbi mérése **4,22 s** alatt ugyanazt a
+16 pontos célértéket állította elő. A teljes kombinált futás most szintén rögtön
+a publikus értékekkel indítja a visszaállítás propagációját. Az aktuális profil
+**egy normál UCP-futást, 4,08 s UCP-időt és 6,15 s solveridőt** mutatott;
+nem futott külön szerkezeti kontroll. A kezdeti létezést továbbra is a tényleges
+tanú MockProver-ellenőrzése igazolta, privát értékek átvétele nélkül.
+
+A korábbi 66,11 s-os futásban a két normál UCP-futás együtt 59,69 s volt.
+A drága, publikus értékek nélküli baseline nem szükséges a visszaállítás
+előfeltételeként. Most csak `compute_structural_baseline: true` esetén,
+a keresés után fut le, külön `privacy.structural_baseline` profilfázisként.
+A riport `structural_baseline_computed` mezője külön jelzi, hogy ez a kontroll
+ténylegesen elkészült-e. Az opcionális kontroll idejét a teljes API-idő tartalmazza.
+
+A végső megerősítő futás **10,46 s**, benne **4,06 s UCP** és **6,14 s solveridő**
+volt. Az `INVOICE_BASELINE computed=false` sor és az egyetlen normál UCP-hívás
+igazolta a kötelező baseline hiányát. Az eredmény továbbra is `Analyzed`,
+16 pontos célérték, 3 többértékű domain és 8 solverhívás. Ez megerősítő
+fejlesztési ismétlés, nem statisztikai sebességmérés.
 
 A négy mennyiség `(37,29,25,33)`, a részösszeg `191600`. A kupon `{2,3}`, a
 beszállítói vetületek `{4,10,16,22,28,34}` és `{3,9,15,21,27,33}` maradnak.
@@ -36,9 +49,13 @@ teljességi jelölést pusztán a referencia ismerete miatt.
 
 Ezek egyszeri fejlesztési futások, változatlan circuit és keresési keretek
 mellett. A javulás nem általános solvergyorsulási garancia: erősebb UCP
-szolgáltat több tényt a keresésnek. A teljes könyvtári regresszió **476 sikeres,
-0 hibás és 10 szándékosan kihagyott teszt**, 173,47 s alatt. A külön bekapcsolt
-teljes számlamérés és az összes target fordításellenőrzése is sikeres.
+szolgáltat több tényt a keresésnek; az utolsó módosítás a kötelező baseline-t
+teszi opcionálissá, nem a keresési kereteket szűkíti. A korábbi, baseline-os
+verzió könyvtári regressziója 476 sikeres, 0 hibás és 10 kihagyott teszt volt,
+173,47 s alatt. Az aktuális célzott privacy-regresszió 63 sikeres tesztet
+tartalmaz, az új teljes számlamérés is sikeres. A baseline-t opcionálissá tevő
+verzió teljes regressziója **479 sikeres, 0 hibás és 10 szándékosan kihagyott
+teszt**, 164,51 s alatt; az összes target fordításellenőrzése is sikeres.
 
 ## Mérés
 
@@ -52,10 +69,10 @@ A fázisidők **befoglaló idők**, ezért összeadásuk hibás: például a
 `ucp.equation_domains` és `ucp.consistency` is benne van.
 A `smt.process` a tényleges solverfolyamat felügyelt idejét méri, nem az összes
 SMT-előkészítés és eredményfeldolgozás költségét.
-A `ucp.propagation` hívásszáma a szerkezeti alapállapot számítását is tartalmazza;
+A `ucp.propagation` hívásszáma a külön kért szerkezeti kontrollt is tartalmazza;
 a riport `propagation_runs` mezője csak a visszaállítási fázisokat számolja.
-Ezért a tanúellenőrzéses számlamérésben a profil két normál futást, a riport
-egy visszaállítási propagációt mutat, ellentmondás nélkül.
+Ezért a régi számlamérésben két normál futás és egy riportált propagáció
+szerepelt. A jelenlegi, baseline nélküli tanúellenőrzéses mérésben mindkettő egy.
 
 A számlapélda fixponttesztje és hosszú mérése automatikusan kiírja a profilt:
 

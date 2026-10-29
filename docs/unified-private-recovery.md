@@ -34,6 +34,30 @@ After the mandatory satisfiability check and initial UCP fixpoint:
 5. Repeat until no permitted action remains. Report limits and partial evidence;
    failure to recover a value is not evidence of confidentiality.
 
+`initialize_knowledge` only copies extracted constants/domains and inserts the
+concrete public observations. It does not run UCP without those observations.
+The first recovery propagation therefore starts from public values directly.
+The SMT guard may independently use public-value UCP hints for its initial SAT
+check; the verified-witness route needs no such solver hint.
+
+The optional `PrivacyAnalysisOptions::compute_structural_baseline` defaults to
+`false`. When enabled, a separate UCP run without concrete public values occurs
+**after** recovery, solely for report comparisons. It does not seed recovery or
+change solver exports, scheduling, or resource allowances. Reports expose
+`structural_baseline_computed`; when false, `baseline_domain=None` and
+`domain_refined_from_baseline=false` mean the comparison was not performed,
+not that no information was recovered. `summary.refined_domains` counts only
+these optional comparisons. Public-observation dependence remains a separate
+original-context SMT control, not a conclusion from baseline differences.
+The measurement suite's `Profile::Baseline` names a search configuration; it is
+not this optional unobserved structural analysis. Its recorded options distinguish
+the two, and per-cell exports include `structural_baseline_computed` explicitly.
+
+Fast-probe domain exports compare against `problem.initial_value_facts`, not
+an unobserved UCP fixpoint. Exact values and domains beyond those extracted
+inputs are exported; unchanged extracted memberships may be omitted as already
+encoded constraints. See [the export policy](selective-smt-domain-export.md).
+
 There is no `RecoveryAction::Unique` and no separate final uniqueness phase.
 `RecoveryStrategy::FastProbe` is an internal strategy of refinement or discovery.
 It can resolve a singleton projection in two solver invocations without testing

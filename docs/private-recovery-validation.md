@@ -73,7 +73,7 @@ does not guarantee a conclusive result; unknown remains an error.
 See [bounded recovery](bounded-private-recovery.md).
 
 The validation pass deliberately does not certify `Unique`/`NonUnique` labels for
-cells lacking concrete domains, refinement relative to the baseline, practical
+cells lacking concrete domains, refinement relative to an optional structural baseline, practical
 inversion hardness, entropy, or the zero-knowledge property. Changes to the circuit
 are checked against the newly supplied circuit; the report has no circuit fingerprint.
 

@@ -56,10 +56,12 @@ difference between a local harness and an unchanged external application.
 ## Compared Methods
 
 **UCP + SMT recovery:** the existing private recoverability API, including its
-initial SAT check, baseline domain analysis, fixed-point inference, and semantic
+initial SAT check, public-value initialization, fixed-point inference, and semantic
 queries when needed. The current [selective export policy](selective-smt-domain-export.md)
-omits unchanged structural finite domains from recovery query assertions, not
-from Delta or the report. Exact and new/refined domains remain exported. The TSV
+omits unchanged extracted finite domains from recovery query assertions, not
+from Delta or the report. Exact and domains beyond those extracted inputs remain exported.
+The optional `compute_structural_baseline` comparison defaults to false and,
+when explicitly enabled, runs after recovery and is included in API time. The TSV
 metadata records this policy so earlier full-export runs remain distinguishable.
 
 **SMT-only reference:** a fresh analyzer queries every selected cell directly,

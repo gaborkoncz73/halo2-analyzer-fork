@@ -49,7 +49,10 @@ pub(super) fn intrinsic_control_demo() -> (
         4,
         &input,
         discovery_demo_targets(),
-        recovery_options(),
+        PrivacyAnalysisOptions {
+            compute_structural_baseline: true,
+            ..recovery_options()
+        },
     )
     .unwrap();
     (circuit, input, report)

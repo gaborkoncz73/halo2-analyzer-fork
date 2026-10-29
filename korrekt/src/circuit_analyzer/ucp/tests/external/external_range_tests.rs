@@ -274,6 +274,7 @@ fn interior<const LOOKUP: bool>() {
             &input,
             range_private_inputs(circuit),
             PrivacyAnalysisOptions {
+                compute_structural_baseline: true,
                 solver_timeout_ms: Some(2_000),
                 ..Default::default()
             },
@@ -310,6 +311,7 @@ fn partial_refinement<const LOOKUP: bool>() {
         &input,
         range_private_inputs(&circuit),
         PrivacyAnalysisOptions {
+            compute_structural_baseline: true,
             max_semantic_queries: 0,
             solver_timeout_ms: Some(2_000),
             ..Default::default()

@@ -382,6 +382,7 @@ enum Profile {
 
 fn options(profile: Profile) -> PrivacyAnalysisOptions {
     PrivacyAnalysisOptions {
+        compute_structural_baseline: false,
         max_semantic_queries: if matches!(profile, Profile::FastProbe | Profile::Combined) {
             16
         } else {

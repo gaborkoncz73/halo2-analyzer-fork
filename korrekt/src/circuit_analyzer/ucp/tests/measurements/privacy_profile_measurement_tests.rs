@@ -71,6 +71,7 @@ const PROFILES: [Profile; 4] = [
 impl Profile {
     fn options(self, timeout_ms: u64) -> PrivacyAnalysisOptions {
         PrivacyAnalysisOptions {
+            compute_structural_baseline: false,
             max_semantic_queries: 32,
             solver_timeout_ms: Some(timeout_ms),
             initial_sat_timeout_ms: None,
@@ -761,6 +762,7 @@ fn write_cells(writer: &mut impl Write, cases: &[Measurements]) -> Result<()> {
             "observed_coverage",
             "unobserved_alternative",
             "control_limitation",
+            "structural_baseline_computed",
         ]
         .map(str::to_owned),
     )?;
@@ -798,6 +800,7 @@ fn write_cells(writer: &mut impl Write, cases: &[Measurements]) -> Result<()> {
                         effect.observed_domain_verified.to_string(),
                         format!("{:?}", effect.unobserved_counterexample),
                         format!("{:?}", effect.limitation),
+                        trial.recovery.structural_baseline_computed.to_string(),
                     ],
                 )?;
             }

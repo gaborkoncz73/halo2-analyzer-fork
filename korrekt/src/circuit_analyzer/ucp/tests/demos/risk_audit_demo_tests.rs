@@ -596,6 +596,7 @@ fn timeout_ms(default_ms: u64) -> u64 {
 
 fn options(seeded: bool, checks: usize, bridges: usize) -> PrivacyAnalysisOptions {
     PrivacyAnalysisOptions {
+        compute_structural_baseline: false,
         max_semantic_queries: 0,
         solver_timeout_ms: Some(timeout_ms(2_000)),
         initial_sat_timeout_ms: None,

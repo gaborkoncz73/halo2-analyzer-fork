@@ -27,6 +27,7 @@ fn measure<C: Circuit<Fr>>(
 ) {
     for profile in ["semantic", "refinement", "discovery", "combined"] {
         let options = PrivacyAnalysisOptions {
+            compute_structural_baseline: false,
             max_semantic_queries: 8,
             solver_timeout_ms: Some(2_000),
             initial_sat_timeout_ms: None,

@@ -66,6 +66,14 @@ It does not expose witness values to recovery. Reports distinguish `VerifiedWitn
 from `Smt` existence evidence; initial SMT checks are zero on the verified-witness
 route. Regression tests for this boundary live in `tests/privacy_witness_tests.rs`.
 
+Recovery initialization inserts public values before its first propagation.
+There is no mandatory unobserved UCP baseline. Set
+`PrivacyAnalysisOptions::compute_structural_baseline = true` only for an optional
+post-recovery comparison; `report.structural_baseline_computed` records whether
+it actually ran. Disabled comparisons leave baseline fields empty/false, not
+privacy verdicts. Solver-domain filtering uses extracted input domains, so it
+does not depend on that optional control.
+
 ## Entry Points And Pipelines
 
 | File | Role |

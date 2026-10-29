@@ -221,6 +221,7 @@ fn options(profile: Profile) -> PrivacyAnalysisOptions {
     assert!(timeout > 0);
     assert!(initial_sat_timeout > 0);
     PrivacyAnalysisOptions {
+        compute_structural_baseline: false,
         solver_timeout_ms: Some(timeout),
         initial_sat_timeout_ms: Some(initial_sat_timeout),
         max_semantic_queries: if matches!(profile, Profile::Fast | Profile::Combined) {
@@ -310,7 +311,16 @@ fn run(profile: Profile, witness: CartWitness) -> PrivacyAnalysisReport {
         Some(crate::circuit_analyzer::ucp::privacy::SatisfiabilityEvidence::VerifiedWitness)
     ));
     assert_eq!(report.satisfiability_checks, 0);
+    assert!(!report.structural_baseline_computed);
+    assert!(report
+        .cells
+        .iter()
+        .all(|cell| cell.baseline_domain.is_none() && !cell.domain_refined_from_baseline));
     println!("INVOICE_SAT evidence={:?}", report.satisfiability_evidence);
+    println!(
+        "INVOICE_BASELINE computed={}",
+        report.structural_baseline_computed
+    );
     println!("INVOICE_RESULT profile={profile:?} status={:?} exact={} domains={} complete={} smt_invocations={} sat_checks={} semantic_attempts={} refinement_checks={} discovery_checks={} propagation_runs={} elapsed_ms={:.3}",
         report.status, report.summary.exact_values, report.summary.finite_domains,
         report.cells.iter().filter(|c| c.domain_is_complete).count(), solver_calls,

@@ -553,10 +553,7 @@ fn refinement_priority_recovers_a_dependent_cell_before_spending_the_budget_on_a
     assert_eq!(report.search_statistics.propagation_runs, 2);
     assert_eq!(report.cells[0].domain, Some(candidates(&[0, 1, 2])));
     assert!(report.cells[0].domain_refinement.is_none());
-    assert_eq!(
-        report.cells[1].baseline_domain,
-        Some(candidates(&[3, 5, 7]))
-    );
+    assert_eq!(report.cells[1].baseline_domain, None);
     assert_eq!(report.cells[1].domain, Some(candidates(&[3, 7])));
     assert!(report.cells[1].domain_refinement.is_some());
     assert_eq!(report.cells[2].baseline_domain, None);
@@ -823,10 +820,7 @@ fn finite_refinement_preserves_full_lookup_tuple_correlations() {
         options(3),
     )
     .unwrap();
-    assert_eq!(
-        report.cells[0].baseline_domain,
-        Some(candidates(&[0, 1, 2, 3]))
-    );
+    assert_eq!(report.cells[0].baseline_domain, None);
     assert_eq!(report.cells[0].domain, Some(candidates(&[0, 1])));
     assert_eq!(
         report.cells[0].domain_refinement.as_ref().unwrap().status,

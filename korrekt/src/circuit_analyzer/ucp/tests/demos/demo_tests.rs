@@ -1325,7 +1325,8 @@ fn demo_privacy_report_separates_recovered_bits_from_ambiguous_secrets() {
     print_privacy_demo("Public amount=173 exposes all private bits:", &exposed);
     assert_eq!(exposed.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(exposed.summary.exact_values, N);
-    assert_eq!(exposed.summary.refined_domains, N);
+    assert_eq!(exposed.summary.refined_domains, 0);
+    assert!(!exposed.structural_baseline_computed);
     assert_eq!(exposed.semantic_queries, 0);
     for (index, cell) in exposed.cells.iter().enumerate() {
         let expected = num_bigint::BigInt::from((amount >> index) & 1);
@@ -1656,6 +1657,7 @@ fn demo_package_price_catalogs_recover_x_and_restrict_y() {
     };
     let targets = [CellId::advice(0, 0), CellId::advice(1, 0)];
     let options = PrivacyAnalysisOptions {
+        compute_structural_baseline: true,
         max_semantic_queries: 16,
         solver_timeout_ms: Some(2_000),
         domain_refinement: super::privacy_domain::PrivacyDomainRefinementOptions {
@@ -1945,10 +1947,8 @@ fn demo_residue_buckets_combine_partial_domains_into_exact_recovery() {
         assert_eq!(report.cells.len(), 1);
         assert_eq!(report.cells[0].cell, target);
         assert_eq!(report.cells[0].domain.as_ref(), Some(&expected_domain));
-        assert_eq!(
-            report.cells[0].baseline_domain,
-            UcpValueDomain::finite_set((0..RESIDUE_BUCKET_BOUND).map(num_bigint::BigInt::from))
-        );
+        assert!(!report.structural_baseline_computed);
+        assert!(report.cells[0].baseline_domain.is_none());
         if PUBLISHED == 3 {
             assert_eq!(status, PrivacyAnalysisStatus::Analyzed);
             assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::Unique);
@@ -2118,7 +2118,8 @@ fn demo_linear_masking_reused_mask_leaks_secret_through_composition() {
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(report.summary.exact_values, 2);
     assert_eq!(report.summary.unique_cells, 2);
-    assert_eq!(report.summary.refined_domains, 2);
+    assert_eq!(report.summary.refined_domains, 0);
+    assert!(!report.structural_baseline_computed);
     assert_eq!(report.semantic_queries, 0);
     for (cell, expected) in report.cells.iter().zip([42, 58]) {
         assert_eq!(cell.uniqueness, PrivateCellUniqueness::Unique);
@@ -2546,6 +2547,7 @@ mod output_tests {
 
     fn report() -> PrivacyAnalysisReport {
         PrivacyAnalysisReport {
+            structural_baseline_computed: true,
             status: PrivacyAnalysisStatus::Analyzed,
             cells: [42, 58]
                 .into_iter()
@@ -2578,7 +2580,10 @@ mod output_tests {
             satisfiability_checks: 1,
             satisfiability_evidence: None,
             elapsed: Duration::from_millis(6),
-            options: PrivacyAnalysisOptions::default(),
+            options: PrivacyAnalysisOptions {
+                compute_structural_baseline: true,
+                ..Default::default()
+            },
             ucp_result: None,
         }
     }

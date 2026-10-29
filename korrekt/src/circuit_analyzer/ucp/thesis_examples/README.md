@@ -7,9 +7,13 @@ A korábbi demonstrációkat és regressziós teszteket nem helyettesíti.
 **Aktuális eredmény:** az általános lineáris/intervallumos következtetéssel a
 számlapélda már sikeresen visszaállítható. Az önálló UCP a végső új mérésben
 4,22 másodperc alatt 16 konkrét célértéket és a három fennmaradó cél helyes
-véges vetületét állította elő. A teljes elemzés végső új futása 66,11 másodperc,
+véges vetületét állította elő. A teljes elemzés jelenlegi új futása 10,52 másodperc,
 8 SMT-hívás és `Analyzed` eredmény volt. Az alábbi korábbi timeoutos mérések
 fejlesztési előzmények; nem a jelenlegi következtetési képességet jellemzik.
+A teljes futás most egyetlen normál, publikus értékekkel indított UCP-elemzést
+végzett, 4,08 s alatt; a solverfolyamatok együtt 6,15 s időt használtak.
+A korábbi, 66,11 s-os futás kötelező szerkezeti baseline-t is számított.
+Ez a kontroll most alapértelmezetten kikapcsolt, ezért nem terheli a rendes keresést.
 
 A teljes elemzés a kupont és a két beszállítói részt helyesen `NonUnique`
 eredménnyel jelenti. Összesen 17 cél-domain teljesnek igazolt: a 16 singleton
@@ -23,7 +27,17 @@ eliminációt, a körbefordulás ellenőrzését és a teljes, korlátos sorvizs
 A circuit, a tanúkezelés és a keresési beállítások változatlanok maradtak.
 Az első új teljes próba 66,98 s volt; az ezt követő domainmásolási gyorsítás
 utáni 66,11 s nem külön statisztikai sebességmérés. A regressziós készlet
-476 sikeres, 0 hibás és 10 szándékosan kihagyott teszttel zárult.
+476 sikeres, 0 hibás és 10 szándékosan kihagyott teszttel zárult a baseline
+opcionálissá tétele előtt.
+
+Külön szerkezeti összehasonlításhoz a hívó
+`PrivacyAnalysisOptions { compute_structural_baseline: true, ..Default::default() }`
+beállítást adhat meg. A kontroll csak a keresés után fut, nem ad premisszát
+az SMT-nek vagy az UCP-nek. A normál riportban
+`structural_baseline_computed=false`, a baseline-domainek hiányoznak és a
+baseline-szűkülési számláló nulla; ez nem jelent hiányzó visszaállított értékeket.
+A jelenlegi verzió teljes könyvtári regressziója 479 sikeres, 0 hibás és
+10 szándékosan kihagyott teszt, 164,51 s alatt.
 
 ## Vállalati kosár és számla
 
@@ -167,6 +181,8 @@ A napló külön mutatja a tényleges SMT-folyamatindításokat, szemantikai
 próbákat, domainellenőrzéseket, UCP-futásokat, időt, domaineket és teljességet.
 Az `INVOICE_SAT evidence=Some(VerifiedWitness)` sor jelzi a tényleges tanúellenőrzést;
 ilyenkor `sat_checks=0`. Ez nem a SAT-előfeltétel ellenőrizetlen kihagyása.
+Az `INVOICE_BASELINE computed=false` sor jelzi a rendes, külön szerkezeti
+kontroll nélküli futást; a profilon egy normál `ucp.propagation` szerepel.
 Az időkorlátos/részleges eredmény is mérési eredmény, nem sikeres visszaállítás.
 A számlából következő matematikai egyértelműség nem garantálja, hogy a jelenlegi
 szabályok és keretek a teljes visszaállítást ténylegesen el is végzik.

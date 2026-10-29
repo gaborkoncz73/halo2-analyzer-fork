@@ -52,7 +52,7 @@ pub use report::{
     RecoveryLimitation, SatisfiabilityEvidence,
 };
 
-pub(crate) const PRIVACY_SMT_DOMAIN_POLICY: &str = "exact-and-new-or-refined-domains";
+pub(crate) const PRIVACY_SMT_DOMAIN_POLICY: &str = "exact-and-domains-beyond-extracted-inputs";
 pub(crate) const PRIVACY_SAT_HINT_POLICY: &str =
     "target-exact-ucp-hints-positive-only-original-fallback";
 pub(crate) const PRIVACY_WITNESS_SAT_POLICY: &str =
@@ -61,6 +61,9 @@ pub(crate) const PRIVACY_SEARCH_POLICY: &str = "refine-discover-complete-domain-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrivacyAnalysisOptions {
+    /// Kérésre, a visszaállítás után külön UCP-kontrollt futtat konkrét publikus értékek nélkül.
+    /// Az eredmény csak a baseline-riportot tölti ki; a keresést és az SMT-premisszákat nem módosítja.
+    pub compute_structural_baseline: bool,
     /// A szemantikai próbák összesített korlátját adja, köztes cellákkal és újrapróbálkozásokkal együtt; nem nullázódik.
     pub max_semantic_queries: usize,
     /// A CVC5 egy solverhívására ellenőrzési időkorlátot és felügyelt futásidőkeretet állít be.
@@ -80,6 +83,7 @@ pub struct PrivacyAnalysisOptions {
 impl Default for PrivacyAnalysisOptions {
     fn default() -> Self {
         Self {
+            compute_structural_baseline: false,
             max_semantic_queries: 256,
             solver_timeout_ms: None,
             initial_sat_timeout_ms: None,
@@ -515,18 +519,14 @@ fn original_context<F: AnalyzableField>(
 fn initialize_knowledge(
     problem: &UcpProblem,
     public_values: &[(CellId, BigInt)],
-) -> (UcpResult, UcpFacts, UcpValueFacts) {
-    // Szerkezeti UCP-alapállapotot számít; a publikus hatást külön SMT-kontrollal vizsgálja.
-    let baseline = problem.analyze_with_values(
-        problem.initial_facts.clone(),
-        problem.initial_value_facts.clone(),
-    );
-    let facts = baseline.facts.clone();
-    let mut values = baseline.value_facts.clone();
+) -> (UcpFacts, UcpValueFacts) {
+    // Az első propagáció már a kinyert domaineket és a konkrét publikus értékeket együtt kapja meg.
+    let facts = problem.initial_facts.clone();
+    let mut values = problem.initial_value_facts.clone();
     for (cell, value) in public_values {
         values.mark_known(cell.clone(), value.clone());
     }
-    (baseline, facts, values)
+    (facts, values)
 }
 
 fn propagate_to_fixpoint(
@@ -645,17 +645,21 @@ fn recover_private_inputs<F: AnalyzableField>(
     let mut domain_search = DomainRefinementState::new(options.domain_refinement);
     let mut discovery = DomainDiscoveryState::new(options.domain_discovery);
 
-    let (baseline, facts, values) = initialize_knowledge(&problem, &public_values);
+    let (facts, values) = initialize_knowledge(&problem, &public_values);
     let private_set: HashSet<_> = private_cells.iter().cloned().collect();
     let mut non_unique = HashSet::new();
     let mut limitations = BTreeMap::new();
     let mut search = RecoverySearchState::initialize_search(&facts, &values);
     let mut evidence = RecoveryEvidence::default();
     let mut exact_search_facts = PrivateSearchExactFacts::default();
+    // A kifejezésstátuszokat a ciklus első, kötelező propagációja tölti ki; előtte csak K-t és Deltát használja.
     let mut result = UcpResult {
         facts,
         value_facts: values,
-        ..baseline.clone()
+        checked_expressions: 0,
+        unique_expressions: 0,
+        unresolved_expressions: 0,
+        expression_results: Vec::new(),
     };
     let mut propagation_needed = true;
     let (status, result) = loop {
@@ -710,7 +714,7 @@ fn recover_private_inputs<F: AnalyzableField>(
                 exact_facts: &exact_search_facts,
                 modulus: &problem.field_modulus,
                 knowledge: &result,
-                baseline: &baseline,
+                smt_domain_reference: &problem.initial_value_facts,
                 options: &options,
                 search: &mut search,
                 private_set: &private_set,
@@ -749,11 +753,22 @@ fn recover_private_inputs<F: AnalyzableField>(
         "Recovered facts contradict original non-uniqueness witnesses"
     );
 
+    // A költséges szerkezeti összehasonlítást csak külön kérésre végzi el, és nem csatolja vissza a keresésbe.
+    let baseline = options.compute_structural_baseline.then(|| {
+        let _profile = super::profiling::scope("privacy.structural_baseline");
+        problem.analyze_with_values(
+            problem.initial_facts.clone(),
+            problem.initial_value_facts.clone(),
+        )
+    });
     let cells = private_cells
         .into_iter()
         .map(|cell| {
             let domain = result.value_facts.domain(&cell).cloned();
-            let baseline_domain = baseline.value_facts.domain(&cell).cloned();
+            let baseline_domain = baseline
+                .as_ref()
+                .and_then(|b| b.value_facts.domain(&cell))
+                .cloned();
             let uniqueness = if result.facts.is_unique(&cell) {
                 PrivateCellUniqueness::Unique
             } else if non_unique.contains(&cell) || result.value_facts.domain_is_complete(&cell) {
@@ -761,11 +776,12 @@ fn recover_private_inputs<F: AnalyzableField>(
             } else {
                 PrivateCellUniqueness::Unknown
             };
-            let refined = domain_refined(
-                baseline_domain.as_ref(),
-                domain.as_ref(),
-                &problem.field_modulus,
-            );
+            let refined = baseline.is_some()
+                && domain_refined(
+                    baseline_domain.as_ref(),
+                    domain.as_ref(),
+                    &problem.field_modulus,
+                );
             let recovery_limitation = if matches!(domain, Some(UcpValueDomain::Exact(_)))
                 || uniqueness == PrivateCellUniqueness::NonUnique
             {
@@ -804,6 +820,7 @@ fn recover_private_inputs<F: AnalyzableField>(
     });
     report.domain_refinement_statistics = domain_search.statistics;
     report.domain_discovery_statistics = discovery.statistics;
+    report.structural_baseline_computed = baseline.is_some();
     Ok(report)
 }
 
@@ -842,7 +859,7 @@ struct RecoveryOperations<'a, F: AnalyzableField, Q> {
     exact_facts: &'a PrivateSearchExactFacts,
     modulus: &'a BigInt,
     knowledge: &'a UcpResult,
-    baseline: &'a UcpResult,
+    smt_domain_reference: &'a UcpValueFacts,
     options: &'a PrivacyAnalysisOptions,
     search: &'a mut RecoverySearchState,
     private_set: &'a HashSet<CellId>,
@@ -981,7 +998,7 @@ where
             .set_ucp_unique_cells(self.knowledge.facts.unique_cells().iter().cloned());
         self.analyzer.set_ucp_value_facts(&smt_query_value_facts(
             &self.knowledge.value_facts,
-            &self.baseline.value_facts,
+            self.smt_domain_reference,
         ));
         self.search
             .record_query(cell, self.private_set.contains(cell), timeout_ms);
@@ -1057,10 +1074,11 @@ fn facts_changed((uniqueness_added, domain_changed): (bool, bool)) -> bool {
     uniqueness_added || domain_changed
 }
 
-fn smt_query_value_facts(current: &UcpValueFacts, baseline: &UcpValueFacts) -> UcpValueFacts {
+fn smt_query_value_facts(current: &UcpValueFacts, extracted: &UcpValueFacts) -> UcpValueFacts {
     let mut exported = UcpValueFacts::new();
     for (cell, domain) in current.domains() {
-        if domain.is_singleton() || baseline.domain(cell) != Some(domain) {
+        // A változatlanul átvett lookup-domaineket nem ismétli meg; ehhez nem futtat külön propagációt.
+        if domain.is_singleton() || extracted.domain(cell) != Some(domain) {
             exported.mark_domain(cell.clone(), domain.clone());
         }
     }
@@ -1313,8 +1331,7 @@ mod tests {
                 check_sat(&mut context).0.unwrap(),
                 Satisfiability::Satisfiable
             );
-            let (baseline, facts, values) =
-                initialize_knowledge(&context.problem, &context.public_values);
+            let (facts, values) = initialize_knowledge(&context.problem, &context.public_values);
             let mut search = RecoverySearchState::initialize_search(&facts, &values);
             let mut knowledge = propagate_to_fixpoint(&context.problem, facts, values, &mut search);
             let before = knowledge.clone();
@@ -1341,7 +1358,7 @@ mod tests {
                     exact_facts: &exact,
                     modulus: &context.problem.field_modulus,
                     knowledge: &knowledge,
-                    baseline: &baseline,
+                    smt_domain_reference: &context.problem.initial_value_facts,
                     options: &options,
                     search: &mut search,
                     private_set: &targets,
@@ -1513,6 +1530,7 @@ mod tests {
             &input(public),
             targets,
             PrivacyAnalysisOptions {
+                compute_structural_baseline: true,
                 max_semantic_queries: budget,
                 ..PrivacyAnalysisOptions::default()
             },
@@ -1544,7 +1562,123 @@ mod tests {
     }
 
     #[test]
-    fn skipped_structural_domain_remains_in_the_report_and_is_validated() {
+    fn initialization_supplies_public_values_without_running_propagation() {
+        let secret = CellId::advice(0, 0);
+        let context = prepare_privacy_analysis::<Fr, _, _>(
+            &ExampleCircuit::<LINEAR>::default(),
+            4,
+            &input(Some(100)),
+            [secret.clone()],
+        )
+        .unwrap();
+        let profile = super::super::profiling::ProfilingSession::start();
+        let (facts, values) = initialize_knowledge(&context.problem, &context.public_values);
+        assert!(profile.snapshot().measurements.is_empty());
+        assert_eq!(
+            values.known_value(&CellId::instance(0, 0)),
+            Some(&BigInt::from(100))
+        );
+        assert!(values.known_value(&secret).is_none());
+        let mut search = RecoverySearchState::initialize_search(&facts, &values);
+        let recovered = propagate_to_fixpoint(&context.problem, facts, values, &mut search);
+        assert_eq!(
+            recovered.value_facts.known_value(&secret),
+            Some(&BigInt::from(95))
+        );
+        assert_eq!(profile.snapshot().measurements["ucp.propagation"].calls, 1);
+    }
+
+    #[test]
+    fn optional_structural_baseline_runs_after_search_without_changing_recovery() {
+        let mut reports = Vec::new();
+        for enabled in [false, true] {
+            let circuit = ExampleCircuit::<CANDIDATES> {
+                secret: 1,
+                nonce: 1,
+            };
+            let public = input(Some(2));
+            let context =
+                prepare_privacy_analysis::<Fr, _, _>(&circuit, 4, &public, [CellId::advice(0, 0)])
+                    .unwrap();
+            let profile = super::super::profiling::ProfilingSession::start();
+            let report = recover_private_inputs(
+                context,
+                PrivacyAnalysisOptions {
+                    compute_structural_baseline: enabled,
+                    ..Default::default()
+                },
+                Instant::now(),
+                |context| check_sat_with_witness(context, &circuit, 4),
+                |analyzer, input, cell| {
+                    assert!(!profile
+                        .snapshot()
+                        .measurements
+                        .contains_key("privacy.structural_baseline"));
+                    analyzer.query_ucp_cell_uniqueness_with_value(input, cell)
+                },
+            )
+            .unwrap();
+            assert_eq!(report.structural_baseline_computed, enabled);
+            assert_eq!(
+                profile.snapshot().measurements["ucp.propagation"].calls,
+                1 + usize::from(enabled)
+            );
+            assert_eq!(
+                report.cells[0].domain,
+                UcpValueDomain::finite_set([1.into(), 2.into()])
+            );
+            assert_eq!(report.cells[0].domain_refined_from_baseline, enabled);
+            assert_eq!(
+                report.cells[0].baseline_domain,
+                if enabled {
+                    UcpValueDomain::finite_set([0.into(), 1.into(), 2.into()])
+                } else {
+                    None
+                }
+            );
+            reports.push(report);
+        }
+        assert_eq!(reports[0].ucp_result, reports[1].ucp_result);
+        assert_eq!(reports[0].search_statistics, reports[1].search_statistics);
+        assert_eq!(reports[0].semantic_queries, reports[1].semantic_queries);
+        assert_eq!(
+            reports[0].cells[0].uniqueness,
+            reports[1].cells[0].uniqueness
+        );
+    }
+
+    #[test]
+    fn structural_baseline_is_not_computed_when_initial_check_fails() {
+        let context = prepare_privacy_analysis::<Fr, _, _>(
+            &ExampleCircuit::<LINEAR>::default(),
+            4,
+            &input(Some(100)),
+            [CellId::advice(0, 0)],
+        )
+        .unwrap();
+        let profile = super::super::profiling::ProfilingSession::start();
+        let report = recover_private_inputs(
+            context,
+            PrivacyAnalysisOptions {
+                compute_structural_baseline: true,
+                ..Default::default()
+            },
+            Instant::now(),
+            |_| (Ok(Satisfiability::Unsatisfiable), 1),
+            |_, _, _| panic!("A sikertelen kezdeti ellenőrzés után nem kereshet"),
+        )
+        .unwrap();
+        assert_eq!(report.status, PrivacyAnalysisStatus::Inconsistent);
+        assert!(!report.structural_baseline_computed);
+        assert!(report
+            .cells
+            .iter()
+            .all(|c| c.baseline_domain.is_none() && !c.domain_refined_from_baseline));
+        assert!(profile.snapshot().measurements.is_empty());
+    }
+
+    #[test]
+    fn inferred_root_domain_is_exported_without_a_structural_baseline() {
         let secret = CellId::advice(0, 0);
         let circuit = ExampleCircuit::<BOOLEAN>::default();
         let input = input(None);
@@ -1558,10 +1692,8 @@ mod tests {
             check_sat,
             |analyzer, input, cell| {
                 calls += 1;
-                assert!(analyzer
-                    .ucp_value_domains()
-                    .iter()
-                    .all(|(_, domain)| domain.is_singleton()));
+                assert!(analyzer.ucp_value_domains().iter().any(|(_, domain)| domain
+                    == &UcpValueDomain::finite_set([0.into(), 1.into()]).unwrap()));
                 analyzer.query_ucp_cell_uniqueness_with_value(input, cell)
             },
         )
@@ -1570,7 +1702,8 @@ mod tests {
         assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::NonUnique);
         let boolean = UcpValueDomain::finite_set([0, 1].into_iter().map(BigInt::from));
         assert_eq!(report.cells[0].domain, boolean);
-        assert_eq!(report.cells[0].baseline_domain, boolean);
+        assert_eq!(report.cells[0].baseline_domain, None);
+        assert!(!report.structural_baseline_computed);
         assert!(!report.cells[0].domain_refined_from_baseline);
         assert_eq!(
             validate_private_recovery_report::<Fr, _>(&circuit, 4, &input, &report)
@@ -1603,6 +1736,7 @@ mod tests {
         )
         .unwrap();
         let options = PrivacyAnalysisOptions {
+            compute_structural_baseline: true,
             solver_timeout_ms: Some(2_000),
             ..Default::default()
         };
@@ -1629,10 +1763,9 @@ mod tests {
                 if full_export {
                     analyzer.set_ucp_value_facts(&full_values);
                 } else if total == 15 {
-                    assert!(analyzer
-                        .ucp_value_domains()
-                        .iter()
-                        .all(|(_, domain)| domain.is_singleton()));
+                    // A másoláson és kapukon át levezetett domaineket a nyers extrakció nem tartalmazza.
+                    assert!(analyzer.ucp_value_domains().iter().any(|(_, domain)| domain
+                        == &UcpValueDomain::finite_set((0..16).map(BigInt::from)).unwrap()));
                 } else {
                     let narrowed = UcpValueDomain::finite_set((1..16).map(BigInt::from)).unwrap();
                     assert!(analyzer
@@ -2157,7 +2290,10 @@ mod tests {
             4,
             &input(Some(3)),
             targets.clone(),
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions {
+                compute_structural_baseline: true,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(report.summary.exact_values, 2);
@@ -2412,7 +2548,8 @@ mod tests {
                 |_, _, _| panic!("Refinement must not consume semantic queries"),
             );
             assert_eq!(report.search_statistics.propagation_runs, 1);
-            assert_eq!(report.search_statistics.progress_rounds, 0);
+            // Az első, publikus adatokkal indított propagáció önmagában új szerkezeti domaineket tanul.
+            assert_eq!(report.search_statistics.progress_rounds, 1);
             assert_eq!(report.domain_refinement_statistics.attempted_cells, 2);
             assert_eq!(report.domain_refinement_statistics.solver_checks, checks);
             assert_eq!(report.semantic_queries, 0);
@@ -2621,7 +2758,7 @@ mod tests {
             targets.clone(),
         )
         .unwrap();
-        let (_, facts, mut values) = initialize_knowledge(&context.problem, &context.public_values);
+        let (facts, mut values) = initialize_knowledge(&context.problem, &context.public_values);
         values.mark_domain(
             target.clone(),
             UcpValueDomain::finite_set([0.into(), 1.into()]).unwrap(),
