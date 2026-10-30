@@ -10,6 +10,14 @@ Optional phase profiling and bounded, analysis-local caches are described in
 refinement benefits only while the problem, knowledge and targets are unchanged.
 Neither adds inference rules or weakens solver/probe limits.
 
+Recovery reports retain chronological `phases` and the actual `solver_invocations`.
+`report.phase_report()` renders the compact UCP/SMT sequence used by the demos;
+`phase_report_with_names` optionally supplies readable cell labels. The private
+`privacy_report.rs` child `privacy_trace.rs` records target-state changes and
+formats the timeline without modifying inference or scheduling. See
+[the phase-report guide](../../../../docs/private-recovery-phase-report.md).
+`UCP_DEMO_VERBOSE=1` retains detailed demo reports and invoice profiling.
+
 ## Recommended Reading Order
 
 Read the production sections first; leave inline test modules for a second pass.

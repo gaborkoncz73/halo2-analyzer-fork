@@ -86,6 +86,9 @@ fn short_demo_domain(domain: Option<&UcpValueDomain>) -> String {
 }
 
 fn short_privacy_report(report: &PrivacyAnalysisReport) -> String {
+    if !report.phases.is_empty() {
+        return report.phase_report();
+    }
     let summary = &report.summary;
     let mut lines = vec![format!(
         "Privacy: {:?}; cells: {}; exact: {}; finite domains: {}; unique: {}; non-unique: {}; unresolved: {}",
@@ -2547,6 +2550,8 @@ mod output_tests {
 
     fn report() -> PrivacyAnalysisReport {
         PrivacyAnalysisReport {
+            solver_invocations: 1,
+            phases: Vec::new(),
             structural_baseline_computed: true,
             status: PrivacyAnalysisStatus::Analyzed,
             cells: [42, 58]

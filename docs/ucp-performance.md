@@ -74,11 +74,12 @@ a riport `propagation_runs` mezője csak a visszaállítási fázisokat számolj
 Ezért a régi számlamérésben két normál futás és egy riportált propagáció
 szerepelt. A jelenlegi, baseline nélküli tanúellenőrzéses mérésben mindkettő egy.
 
-A számlapélda fixponttesztje és hosszú mérése automatikusan kiírja a profilt:
+A számlapélda alapértelmezetten a [tömör recovery-fázisokat](private-recovery-phase-report.md)
+írja ki. A fixpontteszt és a hosszú mérés részletes profilozását külön kapcsoló engedélyezi:
 
 ```bash
-cargo test --offline -p korrekt --lib thesis_invoice_ucp -- --nocapture --test-threads=1
-cargo test --offline -p korrekt --lib thesis_invoice_recovery_smoke -- --ignored --nocapture --test-threads=1
+UCP_DEMO_VERBOSE=1 cargo test --offline -p korrekt --lib thesis_invoice_ucp -- --nocapture --test-threads=1
+UCP_DEMO_VERBOSE=1 cargo test --offline -p korrekt --lib thesis_invoice_recovery_smoke -- --ignored --nocapture --test-threads=1
 ```
 
 ## Feltárt Ismétlések

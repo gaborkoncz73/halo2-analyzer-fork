@@ -64,10 +64,20 @@ alkalmazhatóságát konkrét értékek nélkül, a ténylegesen igazolt K-tény
 Egy eredményt több szabály is igazolhat; ez nem kizárólagos szabályattribúció.
 
 A szűkítési profil letiltja a szemantikai gyorspróbákat és a domainfelderítést.
-Az SMT-vel code in {3,7} lefedő halmazt állapít meg. Ezután az UCP felismeri,
-hogy code-5 biztosan nem nulla, tehát mask=0. Ebből amount=373 lesz,
-majd a bitek, a másolt cellák és az auditlánc értékei is visszaállnak.
-A mask=0 és amount=373 állítás nem szerepel eredeti kényszerként.
+Az ütemező a tényleges domainek és a várható haszon alapján választ cellát;
+nem kötelező először a tarifakódot vizsgálnia. Az aktuális ellenőrzött kis
+futásban először a legalsó összegbitet állítja vissza: három solverhívás
+(egy lefedés- és két jelöltellenőrzés) után bit0=1 lesz. Ettől a kilencbites
+összeg legfeljebb 256 jelöltje már explicit ábrázolható. Az UCP feltételes
+vizsgálata a többi kényszerrel együtt visszaállítja amount=373 és mask=0
+értékét, majd a további biteket, másolt cellákat és az auditláncot.
+
+A későbbi SMT-blokk a két díjkatalógust és a code in {3,7} domaint teszi
+teljessé. A kóddomain szűkülése még egy valódi UCP-futást indít, de ekkor
+már nem születik új célérték. Alternatív érvényes következtetési út a
+code in {3,7} után code-5 nemnullaságából mask=0 levezetése; a napló nem
+állítja ezt kizárólagos vagy kötelező futási sorrendnek. A mask=0 és
+amount=373 állítás egyik útnál sem szerepel eredeti kényszerként.
 
 Négy auditcél mellett a végső eredmény:
 
@@ -129,8 +139,13 @@ cargo test --offline -p korrekt --lib settlement_audit_ -- --nocapture --test-th
 ~~~
 
 A tesztek többször hívják az SMT-t, ezért nem pillanatnyi egységtesztek.
-A SETTLEMENT_BEGIN az induló profilt, a SETTLEMENT a mérőszámokat,
-a SETTLEMENT_VALUES a fő értékeket jelzi. A futtatás mindig soros legyen,
+Alapértelmezetten az időrendi `1. UCP`, `1. SMT`, `2. UCP`, ... blokkok
+jelennek meg: célszámokkal, új értékekkel és domainekkel, a tényleges
+solverhívások típusával és számával, valamint a korlátokkal. Új UCP-blokk csak
+tényleges új propagációnál jelenik meg. A [fázisnapló leírása](private-recovery-phase-report.md)
+részletezi a darabszámok és a megvalósítható minták jelentését.
+`UCP_DEMO_VERBOSE=1` mellett a régi `SETTLEMENT_BEGIN`, `SETTLEMENT` és
+`SETTLEMENT_VALUES` gépi sorok is megjelennek. A futtatás mindig soros legyen,
 mert az elemző jelenleg közös SMT-fájlokat használ.
 
 Az opcionális mérési mátrix:

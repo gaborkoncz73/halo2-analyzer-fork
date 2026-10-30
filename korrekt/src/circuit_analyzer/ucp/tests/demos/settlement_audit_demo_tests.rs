@@ -514,7 +514,12 @@ fn run<const BITS: usize, const LINKS: usize, const SEEDED: bool, const LEAK: bo
     circuit: &SettlementAudit<BITS, LINKS, SEEDED, LEAK>,
     profile: Profile,
 ) -> PrivacyAnalysisReport {
-    println!("SETTLEMENT_BEGIN profile={profile:?} bits={BITS} links={LINKS} seeded={SEEDED} leak={LEAK}");
+    let verbose = std::env::var("UCP_DEMO_VERBOSE").is_ok_and(|v| v == "1");
+    if verbose {
+        println!("SETTLEMENT_BEGIN profile={profile:?} bits={BITS} links={LINKS} seeded={SEEDED} leak={LEAK}");
+    } else {
+        println!("Settlement audit: {profile:?}; {BITS} bits, {LINKS} audit links");
+    }
     let before = invocation_count();
     let report = analyze_private_recoverability::<Fr, _, _>(
         circuit,
@@ -524,24 +529,28 @@ fn run<const BITS: usize, const LINKS: usize, const SEEDED: bool, const LEAK: bo
         options(profile),
     )
     .unwrap();
-    println!("SETTLEMENT profile={profile:?} bits={BITS} links={LINKS} seeded={SEEDED} leak={LEAK} status={:?} exact={} finite={} complete={} smt_invocations={} sat_checks={} semantic_attempts={} refinement_checks={} discovery_checks={} propagation_runs={} elapsed_ms={:.3}",
+    assert_eq!(invocation_count() - before, report.solver_invocations);
+    println!("{}", report.phase_report());
+    if verbose {
+        println!("SETTLEMENT profile={profile:?} bits={BITS} links={LINKS} seeded={SEEDED} leak={LEAK} status={:?} exact={} finite={} complete={} smt_invocations={} sat_checks={} semantic_attempts={} refinement_checks={} discovery_checks={} propagation_runs={} elapsed_ms={:.3}",
         report.status, report.summary.exact_values, report.summary.finite_domains,
         report.cells.iter().filter(|c| c.domain_is_complete).count(), invocation_count() - before,
         report.satisfiability_checks, report.semantic_queries, report.domain_refinement_statistics.solver_checks,
         report.domain_discovery_statistics.solver_checks, report.search_statistics.propagation_runs,
         report.elapsed.as_secs_f64() * 1000.0);
-    println!(
-        "SETTLEMENT_VALUES amount={:?} mask={:?} code={:?} fee={:?} final_audit={:?}",
-        cell(&report, CellId::advice(AMOUNT, 0)).domain,
-        cell(&report, CellId::advice(MASK, 0)).domain,
-        cell(&report, CellId::advice(CODE, 0)).domain,
-        cell(&report, CellId::advice(layout(BITS).fee, 0)).domain,
-        cell(
-            &report,
-            CellId::advice(layout(BITS).derived, (LINKS + 1) as i32)
-        )
-        .domain
-    );
+        println!(
+            "SETTLEMENT_VALUES amount={:?} mask={:?} code={:?} fee={:?} final_audit={:?}",
+            cell(&report, CellId::advice(AMOUNT, 0)).domain,
+            cell(&report, CellId::advice(MASK, 0)).domain,
+            cell(&report, CellId::advice(CODE, 0)).domain,
+            cell(&report, CellId::advice(layout(BITS).fee, 0)).domain,
+            cell(
+                &report,
+                CellId::advice(layout(BITS).derived, (LINKS + 1) as i32)
+            )
+            .domain
+        );
+    }
     report
 }
 

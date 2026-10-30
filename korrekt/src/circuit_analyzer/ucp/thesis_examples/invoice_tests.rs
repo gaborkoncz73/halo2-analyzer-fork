@@ -150,7 +150,8 @@ fn thesis_invoice_missing_observations_allow_different_carts() {
 
 #[test]
 fn thesis_invoice_ucp_fixpoint_is_sound_without_solver() {
-    let profiling = crate::circuit_analyzer::ucp::profiling::ProfilingSession::start();
+    let verbose = std::env::var("UCP_DEMO_VERBOSE").is_ok_and(|v| v == "1");
+    let profiling = verbose.then(crate::circuit_analyzer::ucp::profiling::ProfilingSession::start);
     let circuit = InvoiceAudit::<ALL>::new(CartWitness::default());
     let before = invocation_count();
     let analyzable = Analyzable::config_and_synthesize(&circuit, K).unwrap();
@@ -176,12 +177,14 @@ fn thesis_invoice_ucp_fixpoint_is_sound_without_solver() {
             assert_eq!(reference[&target].len(), 1, "{target}");
         }
         exact += usize::from(result.value_facts.known_value(&target).is_some());
-        println!(
-            "INVOICE_UCP_CELL name={} cell={target} domain={:?} unique={}",
-            target_name(&target),
-            result.value_facts.domain(&target),
-            result.facts.is_unique(&target)
-        );
+        if verbose {
+            println!(
+                "INVOICE_UCP_CELL name={} cell={target} domain={:?} unique={}",
+                target_name(&target),
+                result.value_facts.domain(&target),
+                result.facts.is_unique(&target)
+            );
+        }
     }
     // A referencia csak utólag ellenőriz: minden célvetületet az eredeti kényszerekből állít elő.
     for target in targets() {
@@ -192,14 +195,29 @@ fn thesis_invoice_ucp_fixpoint_is_sound_without_solver() {
         );
     }
     assert_eq!(exact, 16);
-    println!(
-        "INVOICE_UCP targets={} exact={exact} expressions={} lookups={} elapsed_ms={:.3}",
-        targets().len(),
-        problem.expressions.len(),
-        problem.lookups.len(),
-        elapsed.as_secs_f64() * 1000.0
-    );
-    print!("{}", profiling.snapshot());
+    if verbose {
+        println!(
+            "INVOICE_UCP targets={} exact={exact} expressions={} lookups={} elapsed_ms={:.3}",
+            targets().len(),
+            problem.expressions.len(),
+            problem.lookups.len(),
+            elapsed.as_secs_f64() * 1000.0
+        );
+        if let Some(profile) = profiling {
+            print!("{}", profile.snapshot());
+        }
+    } else {
+        let domains = targets()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    result.value_facts.domain(c),
+                    Some(UcpValueDomain::FiniteSet(_))
+                )
+            })
+            .count();
+        println!("1. UCP ({:.2} s)\n  Targets: {exact} exact values, {domains} domains.\n  SMT: 0 solver calls.",elapsed.as_secs_f64());
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -285,15 +303,20 @@ fn check_claims(report: &PrivacyAnalysisReport) {
 }
 
 fn run(profile: Profile, witness: CartWitness) -> PrivacyAnalysisReport {
-    let profiling = crate::circuit_analyzer::ucp::profiling::ProfilingSession::start();
+    let verbose = std::env::var("UCP_DEMO_VERBOSE").is_ok_and(|v| v == "1");
+    let profiling = verbose.then(crate::circuit_analyzer::ucp::profiling::ProfilingSession::start);
     let circuit = InvoiceAudit::<ALL>::new(witness);
     let before = invocation_count();
     let started = Instant::now();
-    println!(
-        "INVOICE_BEGIN profile={profile:?} timeout_ms={:?} initial_sat_timeout_ms={:?}",
-        options(profile).solver_timeout_ms,
-        options(profile).initial_sat_timeout_ms
-    );
+    if verbose {
+        println!(
+            "INVOICE_BEGIN profile={profile:?} timeout_ms={:?} initial_sat_timeout_ms={:?}",
+            options(profile).solver_timeout_ms,
+            options(profile).initial_sat_timeout_ms
+        );
+    } else {
+        println!("Invoice audit: {profile:?}");
+    }
     let report = analyze_private_recoverability_with_witness::<Fr, _, _>(
         &circuit,
         K,
@@ -305,7 +328,7 @@ fn run(profile: Profile, witness: CartWitness) -> PrivacyAnalysisReport {
     let elapsed = started.elapsed();
     let solver_calls = invocation_count() - before;
     check_claims(&report);
-    print!("{}", profiling.snapshot());
+    assert_eq!(solver_calls, report.solver_invocations);
     assert!(matches!(
         report.satisfiability_evidence,
         Some(crate::circuit_analyzer::ucp::privacy::SatisfiabilityEvidence::VerifiedWitness)
@@ -316,19 +339,31 @@ fn run(profile: Profile, witness: CartWitness) -> PrivacyAnalysisReport {
         .cells
         .iter()
         .all(|cell| cell.baseline_domain.is_none() && !cell.domain_refined_from_baseline));
-    println!("INVOICE_SAT evidence={:?}", report.satisfiability_evidence);
     println!(
-        "INVOICE_BASELINE computed={}",
-        report.structural_baseline_computed
+        "{}",
+        report.phase_report_with_names(|cell| report
+            .cells
+            .iter()
+            .any(|c| &c.cell == cell)
+            .then(|| target_name(cell).to_string()))
     );
-    println!("INVOICE_RESULT profile={profile:?} status={:?} exact={} domains={} complete={} smt_invocations={} sat_checks={} semantic_attempts={} refinement_checks={} discovery_checks={} propagation_runs={} elapsed_ms={:.3}",
+    if verbose {
+        if let Some(profile) = profiling {
+            print!("{}", profile.snapshot());
+        }
+        println!("INVOICE_SAT evidence={:?}", report.satisfiability_evidence);
+        println!(
+            "INVOICE_BASELINE computed={}",
+            report.structural_baseline_computed
+        );
+        println!("INVOICE_RESULT profile={profile:?} status={:?} exact={} domains={} complete={} smt_invocations={} sat_checks={} semantic_attempts={} refinement_checks={} discovery_checks={} propagation_runs={} elapsed_ms={:.3}",
         report.status, report.summary.exact_values, report.summary.finite_domains,
         report.cells.iter().filter(|c| c.domain_is_complete).count(), solver_calls,
         report.satisfiability_checks, report.semantic_queries, report.domain_refinement_statistics.solver_checks,
         report.domain_discovery_statistics.solver_checks, report.search_statistics.propagation_runs,
         elapsed.as_secs_f64() * 1000.0);
-    for cell in &report.cells {
-        println!(
+        for cell in &report.cells {
+            println!(
             "INVOICE_CELL name={} cell={} domain={:?} complete={} uniqueness={:?} limitation={:?}",
             target_name(&cell.cell),
             cell.cell,
@@ -337,6 +372,7 @@ fn run(profile: Profile, witness: CartWitness) -> PrivacyAnalysisReport {
             cell.uniqueness,
             cell.recovery_limitation
         );
+        }
     }
     report
 }

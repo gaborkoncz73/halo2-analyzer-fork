@@ -10,12 +10,10 @@ use std::{
 
 pub(crate) const WALLCLOCK_TIMEOUT_REASON: &str = "WALLCLOCK_TIMEOUT";
 
-#[cfg(test)]
 thread_local! {
     static INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
 pub(crate) fn invocation_count() -> usize {
     INVOCATIONS.with(|count| count.get())
 }
@@ -35,7 +33,6 @@ pub(crate) fn run(mut command: Command, budget: Option<Duration>) -> Result<Outp
     let _profile = crate::circuit_analyzer::ucp::profiling::scope("smt.process");
     let Some(budget) = budget else {
         let output = command.output().context("Failed to execute solver");
-        #[cfg(test)]
         if output.is_ok() {
             INVOCATIONS.with(|count| count.set(count.get() + 1));
         }
@@ -47,7 +44,6 @@ pub(crate) fn run(mut command: Command, budget: Option<Duration>) -> Result<Outp
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = Instant::now();
     let mut child = ManagedChild(command.spawn().context("Failed to start solver")?);
-    #[cfg(test)]
     INVOCATIONS.with(|count| count.set(count.get() + 1));
     let stdout = child
         .0

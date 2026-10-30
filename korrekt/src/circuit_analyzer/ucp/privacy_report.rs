@@ -22,6 +22,13 @@ use super::{
 use num_bigint::BigInt;
 use std::{fmt, time::Duration};
 
+#[path = "privacy_trace.rs"]
+pub(super) mod trace;
+pub use trace::{
+    RecoveryCellUpdate, RecoveryPhase, RecoveryPhaseCounts, RecoverySmtAction, RecoverySmtCalls,
+    RecoverySmtCheckKind, RecoverySmtStep, RecoverySmtStrategy,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrivacyAnalysisStatus {
     /// Minden kiválasztott cellához értéket talált vagy próbát végzett; a visszaállítás ettől még hiányos lehet.
@@ -155,6 +162,10 @@ pub struct PrivacyAnalysisReport {
     pub domain_discovery_statistics: PrivacyDomainDiscoveryStatistics,
     /// A kezdeti SMT-s solverhívásokat számolja; sikeres MockProver-ellenőrzésnél nulla.
     pub satisfiability_checks: usize,
+    /// A tényleges solverfolyamatokat számolja az elemzésben, a kezdeti ellenőrzést is beleértve.
+    pub solver_invocations: usize,
+    /// A tényleges recovery-sorrendet tárolja; a SAT-guard és az opcionális baseline nem recovery-fázis.
+    pub phases: Vec<RecoveryPhase>,
     /// A megoldás létezésének igazolását jelzi; a darabszám csak a kezdeti SMT-hívásokat számolja.
     pub satisfiability_evidence: Option<SatisfiabilityEvidence>,
     pub elapsed: Duration,
@@ -215,6 +226,8 @@ pub(super) fn recovery_report(
         domain_refinement_statistics: PrivacyDomainRefinementStatistics::default(),
         domain_discovery_statistics: PrivacyDomainDiscoveryStatistics::default(),
         satisfiability_checks: 1,
+        solver_invocations: 0,
+        phases: Vec::new(),
         satisfiability_evidence: None,
         elapsed,
         ucp_result,

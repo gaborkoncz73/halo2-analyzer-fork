@@ -46,10 +46,13 @@ use std::{
 #[path = "privacy_report.rs"]
 mod report;
 use report::recovery_report;
+use report::trace::{measure_check, record_smt_step, CellState, PhaseSnapshot};
 pub use report::{
     PrivacyAnalysisReport, PrivacyAnalysisStatus, PrivacyAnalysisSummary, PrivacySearchStatistics,
     PrivacySearchStopReason, PrivateCellReport, PrivateCellUniqueness, PrivateRecoveryStatus,
-    RecoveryLimitation, SatisfiabilityEvidence,
+    RecoveryCellUpdate, RecoveryLimitation, RecoveryPhase, RecoveryPhaseCounts, RecoverySmtAction,
+    RecoverySmtCalls, RecoverySmtCheckKind, RecoverySmtStep, RecoverySmtStrategy,
+    SatisfiabilityEvidence,
 };
 
 pub(crate) const PRIVACY_SMT_DOMAIN_POLICY: &str = "exact-and-domains-beyond-extracted-inputs";
@@ -595,6 +598,7 @@ fn recover_private_inputs<F: AnalyzableField>(
     check_sat: impl FnOnce(&mut PrivacyAnalysisContext<F>) -> (Result<Satisfiability>, usize),
     mut query: impl FnMut(&mut Analyzer<F>, &AnalyzerInput, &CellId) -> Result<SemanticQueryOutput>,
 ) -> Result<PrivacyAnalysisReport> {
+    let solver_start = crate::smt_solver::process::invocation_count();
     let recovery_timeout = context.analyzer.smt_timeout_ms();
     if let Some(timeout) = options.initial_sat_timeout_ms {
         context.analyzer.set_smt_timeout_ms(Some(timeout))?;
@@ -632,6 +636,7 @@ fn recover_private_inputs<F: AnalyzableField>(
             options,
         );
         report.satisfiability_checks = satisfiability_checks;
+        report.solver_invocations = crate::smt_solver::process::invocation_count() - solver_start;
         return Ok(report);
     }
 
@@ -662,14 +667,27 @@ fn recover_private_inputs<F: AnalyzableField>(
         expression_results: Vec::new(),
     };
     let mut propagation_needed = true;
+    let mut phases = Vec::new();
     let (status, result) = loop {
         // Az új megvalósítható minták önmagukban nem érvénytelenítik a propagációs fixpontot.
         if propagation_needed {
-            result = propagate_to_fixpoint(&problem, result.facts, result.value_facts, &mut search);
-            // A puszta teljességi jelölés nem indít új kört; az új konkrét értékre kanonizált domain igen.
-            while evidence.certify_complete_domains(&mut result, &problem.field_modulus)? {
+            loop {
+                let before = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
+                let phase_started = Instant::now();
                 result =
                     propagate_to_fixpoint(&problem, result.facts, result.value_facts, &mut search);
+                // A puszta teljességi jelölés nem indít új kört; az új konkrét értékre kanonizált domain igen.
+                let repeat =
+                    evidence.certify_complete_domains(&mut result, &problem.field_modulus)?;
+                let after = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
+                phases.push(RecoveryPhase::Ucp {
+                    elapsed: phase_started.elapsed(),
+                    counts: after.counts(),
+                    updates: before.updates(&after),
+                });
+                if !repeat {
+                    break;
+                }
             }
             search.observe_progress(&result, &problem.field_modulus);
             // E-t kizárólag az aktuális Delta igazolt pontos értékeiből állítja elő az SMT-kereséshez.
@@ -706,6 +724,28 @@ fn recover_private_inputs<F: AnalyzableField>(
             }
             break (status, result);
         };
+        let phase_started = Instant::now();
+        let cell = action.cell().clone();
+        let before = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
+        let before_cell = CellState::capture(&cell, &result, &non_unique);
+        let (operation, strategy) = match &action {
+            RecoveryAction::Refine(_, strategy) => (
+                RecoverySmtAction::Refine,
+                if *strategy == RecoveryStrategy::FastProbe {
+                    RecoverySmtStrategy::FastProbe
+                } else {
+                    RecoverySmtStrategy::Candidates
+                },
+            ),
+            RecoveryAction::Discover(_, strategy) => (
+                RecoverySmtAction::Discover,
+                if *strategy == RecoveryStrategy::FastProbe {
+                    RecoverySmtStrategy::FastProbe
+                } else {
+                    RecoverySmtStrategy::Enumeration
+                },
+            ),
+        };
         let recovered = {
             let mut operations = RecoveryOperations {
                 analyzer: &mut analyzer,
@@ -729,6 +769,24 @@ fn recover_private_inputs<F: AnalyzableField>(
                 }
             }
         }?;
+        let checks = recovered.checks.clone();
+        let limitation = recovered.limitation.clone().or_else(|| {
+            if strategy == RecoverySmtStrategy::FastProbe {
+                None
+            } else {
+                match operation {
+                    RecoverySmtAction::Refine => domain_search
+                        .cells
+                        .get(&cell)
+                        .and_then(|c| c.limitation.clone()),
+                    RecoverySmtAction::Discover => discovery
+                        .cells
+                        .get(&cell)
+                        .and_then(|c| c.limitation.clone()),
+                }
+            }
+        });
+        let prior_samples = evidence.samples(&cell);
         evidence.remember_feasible_samples(
             &recovered.cell,
             recovered.samples.iter().cloned(),
@@ -743,6 +801,36 @@ fn recover_private_inputs<F: AnalyzableField>(
         )?);
         propagation_needed |=
             evidence.certify_complete_domains(&mut result, &problem.field_modulus)?;
+        let after = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
+        let mut updates = before.updates(&after);
+        if !private_set.contains(&cell) {
+            if let Some(update) = before_cell.update(
+                cell.clone(),
+                &CellState::capture(&cell, &result, &non_unique),
+            ) {
+                updates.push(update);
+            }
+        }
+        record_smt_step(
+            &mut phases,
+            RecoverySmtStep {
+                cell: cell.clone(),
+                is_target: private_set.contains(&cell),
+                action: operation,
+                strategy,
+                checks,
+                elapsed: phase_started.elapsed(),
+                propagation_requested: propagation_needed,
+                feasible_samples: evidence
+                    .samples(&cell)
+                    .difference(&prior_samples)
+                    .cloned()
+                    .collect(),
+                updates,
+                limitation,
+            },
+            after.counts(),
+        );
     };
 
     ensure!(
@@ -821,11 +909,14 @@ fn recover_private_inputs<F: AnalyzableField>(
     report.domain_refinement_statistics = domain_search.statistics;
     report.domain_discovery_statistics = discovery.statistics;
     report.structural_baseline_computed = baseline.is_some();
+    report.phases = phases;
+    report.solver_invocations = crate::smt_solver::process::invocation_count() - solver_start;
     Ok(report)
 }
 
 #[derive(Debug)]
 struct RecoveryStepResult {
+    checks: Vec<RecoverySmtCalls>,
     cell: CellId,
     samples: Vec<BigInt>,
     domain: Option<UcpValueDomain>,
@@ -838,6 +929,7 @@ struct RecoveryStepResult {
 impl RecoveryStepResult {
     fn new(cell: &CellId) -> Self {
         Self {
+            checks: Vec::new(),
             cell: cell.clone(),
             samples: Vec::new(),
             domain: None,
@@ -888,6 +980,7 @@ where
         let original = self.original.context("Missing refinement snapshot")?;
         let samples = evidence.samples(cell);
         let mut learned = Vec::new();
+        let mut checks = Vec::new();
         let (cell, domain, proven_non_unique) = state
             .refine_domain(
                 cell,
@@ -895,22 +988,32 @@ where
                 self.modulus,
                 &samples,
                 |cell, domain, exclude| {
-                    let answer = if exclude {
-                        // A lefedést minden visszaállított állítástól függetlenül ellenőrzi.
-                        original.check_membership::<F>(
-                            cell,
-                            domain,
-                            true,
-                            self.options.solver_timeout_ms,
-                        )
-                    } else {
-                        original.check_candidate_with_exact_facts::<F>(
-                            cell,
-                            domain,
-                            self.options.solver_timeout_ms,
-                            self.exact_facts,
-                        )
-                    }?;
+                    let answer = measure_check(
+                        &mut checks,
+                        if exclude {
+                            RecoverySmtCheckKind::Coverage
+                        } else {
+                            RecoverySmtCheckKind::CandidateFeasibility
+                        },
+                        || {
+                            if exclude {
+                                // A lefedést minden visszaállított állítástól függetlenül ellenőrzi.
+                                original.check_membership::<F>(
+                                    cell,
+                                    domain,
+                                    true,
+                                    self.options.solver_timeout_ms,
+                                )
+                            } else {
+                                original.check_candidate_with_exact_facts::<F>(
+                                    cell,
+                                    domain,
+                                    self.options.solver_timeout_ms,
+                                    self.exact_facts,
+                                )
+                            }
+                        },
+                    )?;
                     if !exclude && answer == Satisfiability::Satisfiable {
                         if let Some(value) = domain.exact_value() {
                             learned.push(value.clone());
@@ -926,6 +1029,7 @@ where
             self.search.statistics.queries_without_progress += checks;
         }
         let mut recovered = RecoveryStepResult::new(&cell);
+        recovered.checks = checks;
         recovered.samples = learned;
         recovered.domain = Some(domain);
         recovered.non_unique = proven_non_unique;
@@ -946,33 +1050,52 @@ where
             return self.fast_probe(cell);
         }
         let original = self.original.context("Missing discovery snapshot")?;
+        let mut checks = Vec::new();
         let (cell, domain, proven_non_unique) = state
             .discover_domain(
                 cell,
                 self.modulus,
                 self.options.solver_timeout_ms,
                 |cell, blocked, timeout, probe| {
-                    if probe == DiscoveryProbe::SubsetExclusion
-                        && original.has_targeted_subset(cell)
-                    {
-                        match original.check_unseen_subset::<F>(cell, blocked, timeout) {
-                            Ok(Satisfiability::Unsatisfiable) => Ok(DiscoveryResponse::SubsetUnsat),
-                            Ok(Satisfiability::Satisfiable) => {
-                                Ok(DiscoveryResponse::SubsetFallback { unknown: false })
+                    let subset = probe == DiscoveryProbe::SubsetExclusion
+                        && original.has_targeted_subset(cell);
+                    measure_check(
+                        &mut checks,
+                        if subset {
+                            RecoverySmtCheckKind::SubsetExclusion
+                        } else {
+                            RecoverySmtCheckKind::Enumeration
+                        },
+                        || {
+                            if subset {
+                                match original.check_unseen_subset::<F>(cell, blocked, timeout) {
+                                    Ok(Satisfiability::Unsatisfiable) => {
+                                        Ok(DiscoveryResponse::SubsetUnsat)
+                                    }
+                                    Ok(Satisfiability::Satisfiable) => {
+                                        Ok(DiscoveryResponse::SubsetFallback { unknown: false })
+                                    }
+                                    Err(error)
+                                        if error
+                                            .downcast_ref::<UnknownSolverResult>()
+                                            .is_some() =>
+                                    {
+                                        Ok(DiscoveryResponse::SubsetFallback { unknown: true })
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            } else {
+                                full_discovery_response(
+                                    original.query_unseen_value_with_exact_facts::<F>(
+                                        cell,
+                                        blocked,
+                                        timeout,
+                                        self.exact_facts,
+                                    ),
+                                )
                             }
-                            Err(error) if error.downcast_ref::<UnknownSolverResult>().is_some() => {
-                                Ok(DiscoveryResponse::SubsetFallback { unknown: true })
-                            }
-                            Err(error) => Err(error),
-                        }
-                    } else {
-                        full_discovery_response(original.query_unseen_value_with_exact_facts::<F>(
-                            cell,
-                            blocked,
-                            timeout,
-                            self.exact_facts,
-                        ))
-                    }
+                        },
+                    )
                 },
             )?
             .context("Scheduled discovery became ineligible")?;
@@ -981,6 +1104,7 @@ where
             self.search.statistics.queries_without_progress += 1;
         }
         let mut recovered = RecoveryStepResult::new(&cell);
+        recovered.checks = checks;
         recovered.samples = state.cells[&cell].observed_values.iter().cloned().collect();
         recovered.domain = domain;
         recovered.non_unique = proven_non_unique;
@@ -1003,7 +1127,11 @@ where
         self.search
             .record_query(cell, self.private_set.contains(cell), timeout_ms);
         let mut recovered = RecoveryStepResult::new(cell);
-        let answer = match (self.query)(self.analyzer, self.analyzer_input, cell) {
+        let answer = match measure_check(
+            &mut recovered.checks,
+            RecoverySmtCheckKind::FastProbe,
+            || (self.query)(self.analyzer, self.analyzer_input, cell),
+        ) {
             Ok(answer) => answer,
             Err(error) => {
                 recovered.limitation = Some(limitation_from_solver_error(error)?);
@@ -1586,6 +1714,91 @@ mod tests {
             Some(&BigInt::from(95))
         );
         assert_eq!(profile.snapshot().measurements["ucp.propagation"].calls, 1);
+    }
+
+    #[test]
+    fn phase_trace_records_actual_smt_to_ucp_feedback_and_solver_calls() {
+        let circuit = ExampleCircuit::<SQUARED_DERIVED> {
+            secret: 1,
+            nonce: 1,
+        };
+        let before = crate::smt_solver::process::invocation_count();
+        let report = analyze_private_recoverability_with_witness::<Fr, _, _>(
+            &circuit,
+            4,
+            &input(None),
+            [CellId::advice(0, 0), CellId::advice(1, 0)],
+            PrivacyAnalysisOptions {
+                max_semantic_queries: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.summary.exact_values, 2);
+        let [RecoveryPhase::Ucp {
+            counts: initial, ..
+        }, RecoveryPhase::Smt { steps, .. }, RecoveryPhase::Ucp {
+            counts: final_counts,
+            updates,
+            ..
+        }] = report.phases.as_slice()
+        else {
+            panic!("A tényleges UCP/SMT/UCP sorrendet kell naplóznia");
+        };
+        assert_eq!(initial.exact_values, 0);
+        assert_eq!(final_counts.exact_values, 2);
+        assert!(steps.last().unwrap().propagation_requested);
+        assert!(updates
+            .iter()
+            .any(|c| c.cell == CellId::advice(1, 0)
+                && c.domain == Some(UcpValueDomain::exact(1.into()))));
+        let calls: usize = steps.iter().flat_map(|s| &s.checks).map(|c| c.calls).sum();
+        assert!(calls > 0);
+        assert_eq!(calls, report.solver_invocations);
+        assert_eq!(
+            report.solver_invocations,
+            crate::smt_solver::process::invocation_count() - before
+        );
+        assert_eq!(report.search_statistics.propagation_runs, 2);
+        let text = report.phase_report();
+        assert!(text.find("1. UCP").unwrap() < text.find("1. SMT").unwrap());
+        assert!(text.find("1. SMT").unwrap() < text.find("2. UCP").unwrap());
+        assert!(text.contains("UCP restart scheduled"));
+    }
+
+    #[test]
+    fn phase_trace_does_not_invent_propagation_after_feasibility_or_completeness() {
+        let report = analyze_private_recoverability_with_witness::<Fr, _, _>(
+            &ExampleCircuit::<BOOLEAN>::default(),
+            4,
+            &input(None),
+            [CellId::advice(0, 0)],
+            PrivacyAnalysisOptions::default(),
+        )
+        .unwrap();
+        let [RecoveryPhase::Ucp { counts, .. }, RecoveryPhase::Smt {
+            steps,
+            counts: after,
+            ..
+        }] = report.phases.as_slice()
+        else {
+            panic!("A teljességi metaadat nem indíthat új UCP-t");
+        };
+        assert_eq!(counts.exact_values, 0);
+        assert_eq!(counts.domains, 1);
+        assert_eq!(after.non_unique_cells, 1);
+        assert_eq!(after.complete_domains, 1);
+        assert!(steps.iter().all(|s| !s.propagation_requested));
+        assert_eq!(
+            steps
+                .iter()
+                .map(|s| s.feasible_samples.len())
+                .sum::<usize>(),
+            2
+        );
+        assert!(!report.phase_report().contains("2. UCP"));
+        assert!(report.phase_report().contains("non-unique proven"));
+        assert!(report.phase_report().contains("complete domain"));
     }
 
     #[test]

@@ -179,7 +179,18 @@ sorosan kell futtatni.
 
 A napló külön mutatja a tényleges SMT-folyamatindításokat, szemantikai
 próbákat, domainellenőrzéseket, UCP-futásokat, időt, domaineket és teljességet.
-Az `INVOICE_SAT evidence=Some(VerifiedWitness)` sor jelzi a tényleges tanúellenőrzést;
+Alapértelmezetten a [tömör fázisnapló](../../../../../docs/private-recovery-phase-report.md)
+jelenik meg: `1. UCP`, majd az egymást követő SMT-műveleteket összefogó `1. SMT`.
+A mennyiségek és a számla célcellái olvasható nevet kapnak. Csak valós
+új propagációnál jelenik meg `2. UCP`; ebben a példában jelenleg nincs ilyen.
+
+A részletes profilozás és a korábbi gépi sorok kapcsolója:
+
+```bash
+UCP_DEMO_VERBOSE=1 cargo test --offline -p korrekt --lib thesis_invoice_recovery_smoke -- --ignored --nocapture --test-threads=1
+```
+
+Ebben a részletes nézetben az `INVOICE_SAT evidence=Some(VerifiedWitness)` sor jelzi a tényleges tanúellenőrzést;
 ilyenkor `sat_checks=0`. Ez nem a SAT-előfeltétel ellenőrizetlen kihagyása.
 Az `INVOICE_BASELINE computed=false` sor jelzi a rendes, külön szerkezeti
 kontroll nélküli futást; a profilon egy normál `ucp.propagation` szerepel.

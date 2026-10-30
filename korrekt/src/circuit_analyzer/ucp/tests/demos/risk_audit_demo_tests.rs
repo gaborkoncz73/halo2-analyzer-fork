@@ -662,12 +662,14 @@ fn run_with_options<const PUBLISHED: usize, const SEEDED: bool>(
     )
     .unwrap();
     print_privacy_demo(&format!("Risk audit: published={PUBLISHED}, seeded={SEEDED}, bridge_only={bridge_only}; semantic/refinement/discovery budgets={}/{}/{}:", options.max_semantic_queries, options.domain_refinement.max_solver_checks, options.domain_discovery.max_solver_checks), &report);
-    println!(
-        "Propagation runs: {}; bridge domain checks: {}; timeout ms/invocation: {:?}",
-        report.search_statistics.propagation_runs,
-        report.search_statistics.bridge_domain_checks,
-        options.solver_timeout_ms
-    );
+    if demo_verbose() {
+        println!(
+            "Propagation runs: {}; bridge domain checks: {}; timeout ms/invocation: {:?}",
+            report.search_statistics.propagation_runs,
+            report.search_statistics.bridge_domain_checks,
+            options.solver_timeout_ms
+        );
+    }
     assert_ne!(report.status, PrivacyAnalysisStatus::Inconsistent);
     let xs = reference_candidates(PUBLISHED);
     for cell in &report.cells {
@@ -696,13 +698,15 @@ fn run_with_options<const PUBLISHED: usize, const SEEDED: bool>(
         assert!(report.cells.iter().all(|cell| cell.domain.is_none()));
         println!("Initial SAT incomplete: no recovery claim was established.");
     }
-    println!(
+    if demo_verbose() {
+        println!(
         "RISK_AUDIT_RESULT published={PUBLISHED} seeded={SEEDED} bridge_only={bridge_only} status={:?} elapsed_ms={} initial_sat_checks={} semantic_attempts={} refinement_checks={} discovery_checks={} exact={} complete={}",
         report.status, report.elapsed.as_millis(), report.satisfiability_checks,
         report.semantic_queries, report.domain_refinement_statistics.solver_checks,
         report.domain_discovery_statistics.solver_checks, report.summary.exact_values,
         report.cells.iter().filter(|cell| cell.domain_is_complete).count()
     );
+    }
     if std::env::var("UCP_RISK_VALIDATE").is_ok_and(|value| value == "1") {
         validate_claims(&circuit, &mut report);
     }

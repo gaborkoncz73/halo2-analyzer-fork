@@ -69,6 +69,14 @@ The existing low-level `Analyzer::query_ucp_cell_uniqueness_with_value` method
 remains shared solver infrastructure, also used by the legacy underconstrainedness
 pipeline. It is not a third operation in the privacy scheduler.
 
+The report also records the actual recovery timeline as `RecoveryPhase` values.
+UCP entries count only selected private targets; consecutive solver actions share
+one SMT phase until real propagation resumes. Per-action checks count actual
+solver processes, not semantic attempts, and retain samples, state updates and
+limitations separately. This observation does not execute extra queries or feed
+trace data into K/Delta. `phase_report()` is the compact presentation used by
+the demos; see [phase reporting](private-recovery-phase-report.md).
+
 ## Algorithm Names In Code
 
 The original `analyze_prepared` driver was renamed, not replaced by another
