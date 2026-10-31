@@ -227,7 +227,7 @@ fn options(checks: usize, values: usize) -> PrivacyAnalysisOptions {
             max_checks_per_round: 3,
             ..Default::default()
         },
-        ..Default::default()
+        ..PrivacyAnalysisOptions::fast_probe_only()
     }
 }
 
@@ -791,7 +791,7 @@ fn discovery_and_existing_domain_refinement_share_feedback_but_not_budgets() {
     check_witness(&circuit, Fr::from(21));
     let mut options = options(3, 2);
     options.domain_refinement = super::privacy_domain::PrivacyDomainRefinementOptions {
-        max_solver_checks: 5,
+        max_solver_checks: 4,
         max_candidates_per_cell: 4,
     };
     let report = analyze_private_recoverability::<Fr, _, _>(
@@ -810,7 +810,7 @@ fn discovery_and_existing_domain_refinement_share_feedback_but_not_budgets() {
     assert!(report.cells[1].domain_discovery.is_none());
     assert!(report.cells[1].domain_refinement.is_some());
     assert_eq!(report.domain_discovery_statistics.solver_checks, 3);
-    assert_eq!(report.domain_refinement_statistics.solver_checks, 5);
+    assert_eq!(report.domain_refinement_statistics.solver_checks, 4);
     assert_eq!(report.summary.non_unique_cells, 2);
     assert_eq!(report.semantic_queries, 0);
     assert_eq!(

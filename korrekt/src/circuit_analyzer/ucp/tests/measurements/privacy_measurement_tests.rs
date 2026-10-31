@@ -703,13 +703,14 @@ fn metadata() -> String {
 }
 
 fn measurement_options() -> PrivacyAnalysisOptions {
+    // A történeti SMT-only összehasonlítás kizárólag a gyorspróba-komponenst méri.
     PrivacyAnalysisOptions {
         search: PrivacySearchOptions {
             // Keep the same per-process budget as the SMT-only reference.
             retry_solver_timeout_ms: None,
             ..Default::default()
         },
-        ..Default::default()
+        ..PrivacyAnalysisOptions::fast_probe_only()
     }
 }
 
@@ -721,7 +722,7 @@ fn measurement_metadata_identifies_representation_and_process_policy() {
         "# privacy_search_policy: {PRIVACY_SEARCH_POLICY}\n"
     )));
     assert!(metadata.contains("# recovery_total_query_limit: 256\n"));
-    assert!(metadata.contains("# finite_domain_refinement_options: PrivacyDomainRefinementOptions { max_solver_checks: 0, max_candidates_per_cell: 16 }\n"));
+    assert!(metadata.contains("# finite_domain_refinement_options: PrivacyDomainRefinementOptions { max_solver_checks: 0, max_candidates_per_cell: 128 }\n"));
     assert!(metadata.contains("# finite_domain_discovery_options: PrivacyDomainDiscoveryOptions { max_solver_checks: 0, max_values_per_cell: 16, max_checks_per_round: 1, max_retries_per_cell: 1, retry_solver_timeout_ms: None, use_targeted_subsets: false }\n"));
     assert!(metadata.contains(&format!(
         "# targeted_subset_policy: {PRIVACY_TARGETED_SUBSET_POLICY}\n"
@@ -862,7 +863,7 @@ fn privacy_measurement_smoke_reports_explicit_api_budget() {
     let options = PrivacyAnalysisOptions {
         max_semantic_queries: 32,
         solver_timeout_ms: Some(2_000),
-        ..Default::default()
+        ..PrivacyAnalysisOptions::fast_probe_only()
     };
     let report = analyze_private_recoverability::<Fr, _, _>(
         &PrivateAmountBitsCircuit::<8>::new(amount),

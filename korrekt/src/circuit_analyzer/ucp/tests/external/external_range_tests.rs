@@ -234,7 +234,7 @@ fn boundary<const LOOKUP: bool>() {
         targets,
         PrivacyAnalysisOptions {
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();
@@ -276,7 +276,7 @@ fn interior<const LOOKUP: bool>() {
             PrivacyAnalysisOptions {
                 compute_structural_baseline: true,
                 solver_timeout_ms: Some(2_000),
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap()
@@ -314,7 +314,7 @@ fn partial_refinement<const LOOKUP: bool>() {
             compute_structural_baseline: true,
             max_semantic_queries: 0,
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();
@@ -451,7 +451,7 @@ fn external_range_impossible_aggregate_does_not_produce_vacuous_recovery() {
             range_private_inputs(&circuit),
             PrivacyAnalysisOptions {
                 solver_timeout_ms: Some(2_000),
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap();

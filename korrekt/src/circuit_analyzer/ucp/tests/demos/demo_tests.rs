@@ -1322,7 +1322,7 @@ fn demo_privacy_report_separates_recovered_bits_from_ambiguous_secrets() {
         5,
         &analyzer_input_with_public_amount(amount as i64),
         bit_targets::<N>(),
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     print_privacy_demo("Public amount=173 exposes all private bits:", &exposed);
@@ -1358,7 +1358,7 @@ fn demo_privacy_report_separates_recovered_bits_from_ambiguous_secrets() {
         4,
         &analyzer_input_with_public_amount(100),
         [CellId::advice(0, 0), CellId::advice(1, 0)],
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     print_privacy_demo(
@@ -1392,7 +1392,7 @@ fn demo_independent_validation_detects_a_wrong_recovered_bit() {
         4,
         &input,
         bit_targets::<4>(),
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     report.cells[0].domain = Some(super::value::UcpValueDomain::exact(
@@ -1423,7 +1423,7 @@ fn demo_independent_validation_can_use_a_separate_timeout() {
         bit_targets::<4>(),
         PrivacyAnalysisOptions {
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();
@@ -1515,7 +1515,7 @@ fn demo_package_prices_recover_one_private_unit_price() {
         4,
         &input,
         targets.clone(),
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     print_privacy_demo(
@@ -1550,7 +1550,7 @@ fn demo_package_prices_recover_one_private_unit_price() {
         [targets[0].clone()],
         PrivacyAnalysisOptions {
             max_semantic_queries: 0,
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();
@@ -1571,7 +1571,7 @@ fn demo_package_prices_recover_one_private_unit_price() {
         4,
         &input,
         [targets[0].clone()],
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     assert_eq!(recovered_again.status, PrivacyAnalysisStatus::Analyzed);
@@ -1667,7 +1667,7 @@ fn demo_package_price_catalogs_recover_x_and_restrict_y() {
             max_solver_checks: 64,
             max_candidates_per_cell: 16,
         },
-        ..Default::default()
+        ..PrivacyAnalysisOptions::fast_probe_only()
     };
     println!(
         "Public packages: A=300, B=500; Y catalog={:?}; Z catalog={:?}",
@@ -1869,7 +1869,7 @@ fn demo_residue_buckets_combine_partial_domains_into_exact_recovery() {
         let propagation_options = PrivacyAnalysisOptions {
             max_semantic_queries: 0,
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         };
         let propagate = |witness: &ResidueBucketsCircuit<PUBLISHED>| {
             let analyzable =
@@ -2080,7 +2080,7 @@ fn demo_linear_masking_individual_publications_are_ambiguous() {
             4,
             &input,
             linear_masking_targets(mode),
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
         )
         .unwrap();
         print_privacy_demo(
@@ -2111,7 +2111,7 @@ fn demo_linear_masking_reused_mask_leaks_secret_through_composition() {
         4,
         &input,
         linear_masking_targets(mode),
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     print_privacy_demo(
@@ -2175,7 +2175,7 @@ fn demo_linear_masking_independent_masks_keep_secret_ambiguous() {
         4,
         &input,
         linear_masking_targets(mode),
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     let alternate_report = analyze_private_recoverability::<Fr, _, _>(
@@ -2183,7 +2183,7 @@ fn demo_linear_masking_independent_masks_keep_secret_ambiguous() {
         4,
         &input,
         linear_masking_targets(mode),
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     print_privacy_demo(
@@ -2260,7 +2260,7 @@ fn demo_finite_domain_refinement_restarts_ucp_without_guessing_the_secret() {
         Some(UcpValueDomain::exact(0.into()))
     );
     assert_eq!(refined.semantic_queries, 0);
-    assert_eq!(refined.domain_refinement_statistics.solver_checks, 17);
+    assert_eq!(refined.domain_refinement_statistics.solver_checks, 16);
     let validation =
         validate_private_recovery_report::<Fr, _>(&circuit, 5, &input, &refined).unwrap();
     print_validation_demo("Fresh independent coverage validation:", &validation);
@@ -2358,7 +2358,7 @@ fn demo_fair_domain_discovery_recovers_later_targets_with_a_small_budget() {
                 max_solver_checks: 4,
                 ..Default::default()
             },
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();
@@ -2408,7 +2408,7 @@ fn demo_targeted_subset_exclusion_recovers_private_values_beside_unrelated_gates
             max_checks_per_round: 2,
             ..Default::default()
         },
-        ..Default::default()
+        ..PrivacyAnalysisOptions::fast_probe_only()
     };
     let full = analyze_private_recoverability::<Fr, _, _>(
         &circuit,
@@ -2509,7 +2509,7 @@ fn demo_public_observation_control_separates_smt_progress_from_publication_effec
         linear_masking_targets(LinearMaskingMode::ReusedMask),
         PrivacyAnalysisOptions {
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();
@@ -2587,7 +2587,7 @@ mod output_tests {
             elapsed: Duration::from_millis(6),
             options: PrivacyAnalysisOptions {
                 compute_structural_baseline: true,
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             ucp_result: None,
         }

@@ -7,11 +7,9 @@ use super::{
     extractor::extract_ucp_problem,
     facts::UcpFacts,
     privacy::{
-        analyze_private_recoverability, PrivacyAnalysisOptions, PrivacyAnalysisReport,
-        PrivacyAnalysisStatus, PrivacySearchOptions, PrivateCellUniqueness,
+        analyze_private_recoverability, PrivacyAnalysisOptions, PrivacyAnalysisProfile,
+        PrivacyAnalysisReport, PrivacyAnalysisStatus, PrivateCellUniqueness,
     },
-    privacy_discovery::PrivacyDomainDiscoveryOptions,
-    privacy_domain::PrivacyDomainRefinementOptions,
     privacy_validation::{validate_private_recovery_report, RecoveryValidationStatus},
     value::{UcpValueDomain, UcpValueFacts},
 };
@@ -381,39 +379,18 @@ enum Profile {
 }
 
 fn options(profile: Profile) -> PrivacyAnalysisOptions {
-    PrivacyAnalysisOptions {
-        compute_structural_baseline: false,
-        max_semantic_queries: if matches!(profile, Profile::FastProbe | Profile::Combined) {
-            16
-        } else {
-            0
-        },
+    let mut options = PrivacyAnalysisOptions {
         solver_timeout_ms: Some(5_000),
-        initial_sat_timeout_ms: None,
-        search: PrivacySearchOptions {
-            max_bridge_queries: 0,
-            retry_solver_timeout_ms: None,
-            ..Default::default()
-        },
-        domain_refinement: PrivacyDomainRefinementOptions {
-            max_solver_checks: if matches!(profile, Profile::Refinement | Profile::Combined) {
-                96
-            } else {
-                0
-            },
-            max_candidates_per_cell: 16,
-        },
-        domain_discovery: PrivacyDomainDiscoveryOptions {
-            max_solver_checks: if matches!(profile, Profile::Discovery | Profile::Combined) {
-                48
-            } else {
-                0
-            },
-            max_values_per_cell: 4,
-            max_retries_per_cell: 0,
-            ..Default::default()
-        },
-    }
+        ..PrivacyAnalysisOptions::default()
+    };
+    options.search.retry_solver_timeout_ms = None;
+    options.with_profile(match profile {
+        Profile::Combined => PrivacyAnalysisProfile::Standard,
+        Profile::Propagation => PrivacyAnalysisProfile::PropagationOnly,
+        Profile::FastProbe => PrivacyAnalysisProfile::FastProbeOnly,
+        Profile::Refinement => PrivacyAnalysisProfile::RefinementOnly,
+        Profile::Discovery => PrivacyAnalysisProfile::DiscoveryOnly,
+    })
 }
 
 fn entries(domain: &UcpValueDomain) -> BTreeSet<BigInt> {

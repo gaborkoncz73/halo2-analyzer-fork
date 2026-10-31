@@ -280,7 +280,7 @@ fn recover<C: Circuit<Fr>>(circuit: &C) -> super::privacy::PrivacyAnalysisReport
         PrivacyAnalysisOptions {
             max_semantic_queries: 4,
             solver_timeout_ms: Some(2000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap()
@@ -635,7 +635,7 @@ fn ucp_and_smt_use_the_same_wrapped_rotation_cells() {
         PrivacyAnalysisOptions {
             max_semantic_queries: 4,
             solver_timeout_ms: Some(2000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();

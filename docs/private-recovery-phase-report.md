@@ -22,16 +22,18 @@ Initial SAT: VerifiedWitness; 0 solver calls
   ...
   coupon_c in {2, 3} (covering domain)
 
-1. SMT (... s; 8 solver calls)
+1. SMT (... s; 7 solver calls)
   Refine/FastProbe: supplier_u; 2 calls (FastProbe: 2)
     New feasible samples: ...
     supplier_u; non-unique proven
   ...
-  Refine/Candidates: supplier_u; 1 call (Coverage: 1)
-    No new target or queried-cell facts.
-    Limitation: SolverTimeout
+  Refine/Candidates: supplier_u; 4 calls (CandidateFeasibility: 4)
+    New feasible samples: 16, 22, 28, 34
+    Model samples: supplier_v: 3, 9, 15, 21
+    supplier_u; complete domain {4, 10, 16, 22, 28, 34}
+    supplier_v; complete domain {3, 9, 15, 21, 27, 33}
   ...
-  Targets: 16 exact values, 3 domains; 17 complete domains, 3 non-unique.
+  Targets: 16 exact values, 3 domains; 19 complete domains, 3 non-unique. New: 0 exact, 0 new/refined domains.
   No UCP restart: K/Delta contents unchanged.
 ```
 
@@ -39,49 +41,63 @@ Initial SAT: VerifiedWitness; 0 solver calls
   a publikus/fixed cellákat vagy az összes belső segédváltozót.
 - Az `exact values` egyelemű domaineket jelent; a külön `domains` mező csak
   a többértékű lefedő domaineket számolja. A fejléc az aktuális teljes állapotot,
-  a `New` rész az adott UCP-fázis változásait mutatja.
+  a `New` rész az adott UCP- vagy SMT-fázis változásait mutatja.
+  Az SMT-blokkban ugyanazt a célt többszöri szűkítés után is csak egyszer
+  számolja, a blokk végére elért kategóriában. A minták, teljességi jelölések
+  és köztes cellák nem növelik ezt a számlálót.
 - Az egyes cellák sorai külön jelzik az érték/domain változását, a
   nemegyértelműség bizonyítását és a domain teljességének igazolását.
 - A `New feasible samples` az adott SMT-lépésben újonnan megőrzött értékeket
   jelenti. Ezek önmagukban nem lefedő domainek, és külön cellák mintái nem
   alkotnak automatikusan közös kielégítő értékadást.
+- A `Model samples: <cella>: <értékek>` a vizsgált cellán kívüli célokhoz
+  ugyanazon teljes SAT-modellekből újonnan megőrzött vetületeket jelenti.
+  A `RecoverySmtStep.model_samples` strukturált mező ezeket teljesen tárolja,
+  a szöveges előnézet legfeljebb nyolc cellát és cellánként nyolc értéket mutat.
+  Ezekkel más célok domaine is teljessé válhat külön ellenőrzés nélkül.
 - A köztes, nem célként kijelölt cellát `(bridge)` jelöli. Ennek új értéke
   látható, de a kijelölt célok darabszámát nem növeli.
 
 A szomszédos SMT-műveletek egy blokkba kerülnek, amíg nem indul valódi új
 propagáció. Ha az SMT új K/Delta-tényt ad át, a következő blokk `2. UCP`, majd
 újabb keresés esetén `2. SMT`. A puszta új minták, nemegyértelműségi bizonyíték
-és teljességi metaadat nem hoz létre fiktív UCP-blokkot. Az aktuális számlapélda
-ezért csak `1. UCP` és `1. SMT` blokkot ad; a settlement-audit valódi
-UCP/SMT/UCP visszacsatolást is mutat.
+és teljességi metaadat nem hoz létre fiktív UCP-blokkot. Az eredeti, felár nélküli
+számlapélda ezért csak `1. UCP` és `1. SMT` blokkot ad; a feláras számla és a
+settlement-audit valódi UCP/SMT/UCP visszacsatolást is mutat.
 
 A külön `settlement_audit_refinement_restarts_long_ucp_chain` tesztben
 ellenőrzött sorozat:
 
 ```text
 1. UCP: 7 exact values, 12 domains
-1. SMT: 3 solver calls; one amount bit recovered
-2. UCP: 22 exact values, 3 domains; 14 new exact values
-2. SMT: 25 solver calls; the remaining three domains completed
+1. SMT: 1 solver call; critical code value excluded
+2. UCP: 22 exact values, 3 domains; 15 new exact values
+2. SMT: 15 solver calls; code domain refined and completed
 3. UCP: no new target facts
+3. SMT: 2 solver calls; both fee domains completed through shared models
 ```
 
-A kezdeti külön SAT-hívással együtt ez 29 solverfolyamat. A napló a tényleges
-kiválasztást mutatja: itt nem a tarifakód, hanem az összeg egyik bitje indítja
-el az első SMT/UCP visszacsatolást. Az ütemezés más beállításokkal változhat.
+A kezdeti külön SAT-hívással együtt ez 19 solverfolyamat. A napló a tényleges
+kiválasztást mutatja: az új premisszavezérelt ütemezésben a tarifakód 5-ös
+értékének kizárása indítja az első SMT/UCP visszacsatolást. A korábbi, bitet
+először vizsgáló változat 29 folyamatot használt. Az ütemezés más beállításokkal változhat.
 
 ## Solverhívások
 
 A `calls` a tényleges solverfolyamatok száma, nem a szemantikai cellapróbáké.
-A számlapélda ellenőrzött futásában három fast-probe művelet összesen hat
-solverhívást végzett, majd két lefedésvizsgálat összesen kettőt. A két utóbbi
-timeoutolt; ez nem törölte a már bizonyított pontos értékeket vagy a
-nemegyértelműséget, és a napló a korlátot külön megmutatja.
+A számlapélda új release-futásában egy fast-probe művelet összesen két
+solverhívást végzett, majd egy kuponjelölt és négy további beszállítói jelölt
+ellenőrzése igazolta a domainek teljességét: összesen 7 hívás történt.
+A második beszállító értékeit az első vizsgálatának teljes SAT-modelljeiből veszi át.
+A recovery átveszi a már igazolt Delta-domainek lefedését, ezért nem indít
+külön lefedésvizsgálatot. A független validálás továbbra is az eredeti
+kontextusban ellenőriz, a visszaállított állítások feltételezése nélkül.
+A korlátos futások naplója továbbra is külön jelzi a timeoutot.
 
 | Hívástípus | Jelentés |
 | --- | --- |
 | `FastProbe` | Belső pontosérték/egyértelműségi stratégia; több solverfolyamatot, fallbacket is tartalmazhat |
-| `Coverage` | Az eredeti kontextusban kizárja a domainen kívüli értékeket |
+| `Coverage` | Korábbi riportok lefedésvizsgálata; a jelenlegi refinement igazolt Delta-domainből indul |
 | `CandidateFeasibility` | Egy konkrét domainjelölt megvalósíthatóságát vizsgálja |
 | `Enumeration` | Korábbi minták kizárásával új teljes modellértéket keres |
 | `SubsetExclusion` | Az eredeti kényszerek kiválasztott részhalmazán vizsgál kizárást; SAT-mintát innen nem vesz át |
@@ -112,9 +128,9 @@ nem változott. A megfigyelés a jelenlegi szinkron solverútvonal szálán szá
 A megjelenítési regressziók a fázissorrendet, a valódi folyamatdarabszámot,
 a célcellákra korlátozott összesítést, a teljesség miatti fiktív újraindítás
 elkerülését és a véges halmazok korlátos előnézetét ellenőrzik.
-A teljes könyvtári tesztkészlet 484 sikeres, 0 hibás és 10 szándékosan kihagyott
+A teljes könyvtári tesztkészlet a fast probe egységesítésével 505 sikeres, 0 hibás és 13 szándékosan kihagyott
 teszttel zárult; a külön számlamérés és a settlement-visszacsatolásos futás is
-sikeres. A módosítás nem vezetett be új inference-szabályt vagy solverkérdést.
+sikeres. A mintamegosztás nem vezetett be új következtetési szabályt vagy külön solverfolyamatot.
 
 A régi részletes gépi sorok és a számlapélda profilozása:
 

@@ -4,21 +4,129 @@ Ez a mappa az `ucp/tests` testvére. Kizárólag tesztfordításkor kapcsolódik
 nem módosítja a működő elemző szabályait vagy a keresési heurisztikáját.
 A korábbi demonstrációkat és regressziós teszteket nem helyettesíti.
 
-**Aktuális eredmény:** az általános lineáris/intervallumos következtetéssel a
+## Egységes Alapkonfiguráció
+
+Mindegyik számlaváltozat ugyanabból a `recovery_options` függvényből kapja a
+teljes konfigurációt: fast probe, domainszűkítés és domainfelderítés is
+engedélyezett. Az ütemező az aktuális tudás alapján választ; a példa neve,
+publikus értéke vagy elvárt eredménye nem kapcsol ki keresési lehetőséget.
+Az alapkeretek: 256 szemantikai próba, 160 szűkítési solverhívás és 64 felderítési
+solverhívás, legfeljebb 128 szűkítési jelölt és 16 felderítési minta cellánként.
+A hívásonkénti keret 3000 ms; az újrapróbálkozás sem kap automatikus hosszabbítást.
+
+Az alapértelmezett jóváhagyásos profil `standard`; a `combined` ugyanennek
+kompatibilis neve. A `refinement` kifejezetten komponens-kikapcsolásos kontroll,
+nem a dolgozat teljes algoritmusának alapbeállítása. Az alap számla mérési
+mátrixában a `propagation`, `fast`, `refinement` és `discovery` szintén ilyen
+kontrollprofilok. Mindegyik ugyanazt a futtató algoritmust használja.
+
+Az összkeretek közösen állíthatók: `UCP_INVOICE_SEMANTIC_QUERIES`,
+`UCP_INVOICE_REFINEMENT_CHECKS`, `UCP_INVOICE_DISCOVERY_CHECKS` és
+`UCP_INVOICE_DISCOVERY_VALUES`. A standard keretei pozitívak; a kontrollprofil
+ezután tiltja le a nem vizsgált komponenseket.
+
+## Korábbi Mérések
+
+A lentebbi futásadatok a feltüntetett korábbi konfigurációkhoz tartoznak,
+nem az új egységes standard alapbeállítással végzett új mérések.
+
+A [snapshot-alapú fast probe](../../../../../docs/seeded-fast-probes.md) már
+W-mintából is indul, és más célok modellértékeit is megosztja. Új egyszeri
+release-próbák: alap invoice combined 0,69 s / 7 hívás / 19 teljes domain;
+H=21 combined 2,62 s / 16 hívás / 21 teljes domain; díjkatalógusos H=25
+combined, 160-as kerettel 261,86 s / 138 hívás / 21 teljes domain.
+A lentebbi v8 és korábbi mérések történeti összehasonlítások.
+
+A jelenlegi refinement a [teljes SAT-modellek más célcellákhoz tartozó mintáit](../../../../../docs/shared-model-samples.md)
+is újrahasználja. A lentebbi lefedés-újrahasználati és régebbi futásadatok
+korábbi keresési szabályzatok egyszeri mérései; nem a mintamegosztás mérései.
+Az új egyszeri release-próbák: alap invoice 0,74 s / 10 hívás / 19 teljes domain;
+H=21 invoice 2,43 s / 16 hívás / 21 teljes domain; díjkatalógusos H=25 kontroll
+89,33 s / 48 hívás / 18 teljes domain, még részleges eredménnyel.
+
+**Új, visszacsatolásos változat:** a [jóváhagyáshoz kötött kézi felár](../../../../../docs/invoice-approval-demo.md)
+a számla egészéhez kapcsolódik. Az első UCP 5 pontos célértéket talál, az SMT
+a mód domainjét szűkíti, a következő UCP pedig további 12 értéket állít vissza.
+Külön többértelmű kontroll és független referencia tartozik hozzá.
+Ennek teljes UCP--SMT recovery-tesztje is futtatható azonos profilokkal:
+
+```bash
+cargo test --release -p korrekt --lib thesis_invoice_approval_control_recovery -- --ignored --nocapture --test-threads=1
+```
+
+A szűkebb, `a in {0,432}` díjkatalógusos kontroll két különböző kosarat enged.
+A széles kontroll megtartása mellett külön kapcsolás- és teljes recovery-tesztje van:
+
+```bash
+cargo test --release -p korrekt --lib thesis_invoice_surcharge_catalog_reference_and_mock_prover -- --nocapture --test-threads=1
+cargo test --release -p korrekt --lib thesis_invoice_surcharge_catalog_recovery -- --ignored --nocapture --test-threads=1
+```
+
+A refinement összkerete a teszt futtatásakor is megadható. A korábbi mérésekben
+48 volt, a standard konfigurációban 160 az alapértéke. Például explicit 160
+hívásos keret, csak szűkítést engedő kontroll és 3000 ms/hívás időkorlát:
+
+```bash
+UCP_INVOICE_APPROVAL_PROFILE=refinement UCP_INVOICE_REFINEMENT_CHECKS=160 UCP_INVOICE_TIMEOUT_MS=3000 cargo test --release -p korrekt --lib thesis_invoice_surcharge_catalog_recovery -- --ignored --nocapture --test-threads=1
+```
+
+Ez az egyszeri release-próba sikeres: 134 tényleges hívás, 249,35 s,
+9 pontos célérték és 12 többértékű domain, mind a 21 teljesnek igazolt;
+12 cél bizonyítottan nem egyedi, ismeretlen egyértelműségű cél nincs.
+A [részletes mérés](../../../../../docs/shared-model-samples.md)
+a 48-as és 160-as keretet azonos időkorláttal hasonlítja össze.
+
+A [kis domainekkel segített keresés](../../../../../docs/domain-assisted-search.md)
+ennek egyszeri release-idejét 104,46 s-ról 88,92 s-ra csökkentette azonos keretekkel,
+és a kupon nemegyértelműségét is bizonyította. A teljes domainigazolás még részleges;
+ez nem általános vagy ismételt gyorsulási mérés.
+
+Az alábbi 16 pontos értékes mérések az eredeti, felár nélküli számlára vonatkoznak.
+A feláras változat korábbi [általános ütemezési gyorsítása](../../../../../docs/premise-guided-refinement.md)
+az újramért teljes időt 69,56 s-ról 27,66 s-ra, a solverhívások számát 27-ről
+14-re csökkentette azonos keretekkel. Ez egyszeri összehasonlítás, nem általános garancia.
+
+**Korábbi, a Delta lefedését már újrahasználó, de modellmintákat még nem megosztó release-próbák:** alap invoice
+0,81 s / 14 hívás / 19 teljes domain; H=21 feláras számla
+2,59 s / 24 hívás / 21 teljes domain. A [részletes leírás](../../../../../docs/established-domain-refinement.md)
+a díjkatalógusos kontroll erősebb, de továbbra is részleges eredményét is megadja.
+Ezek egyszeri mérések, nem ismételt benchmarkok.
+
+**Korábbi, kis domainekkel segített, de lefedést újraellenőrző release-próbák:** alap invoice 1,05 s,
+16 hívás és 19 teljes domain; H=21 feláras számla 2,90 s, 28 hívás és 21 teljes
+domain. A [részletes leírás](../../../../../docs/domain-assisted-search.md)
+az export helyességi feltételeit és a díjkatalógusos kontroll fennmaradó korlátait
+is megadja. Az alábbi 1,72 s és 4,11 s a korábbi, csak pontos tényeket használó
+verzió egyszeri release-mérése, nem a jelenlegi változaté.
+
+**Korábbi, csak pontos tényeket használó release-próba:** a lefedésvizsgálatok a többi kereséshez hasonlóan
+újrahasználják a már igazolt pontos tényeket. A felár nélküli számla az alapértelmezett
+3000 ms/hívás kerettel 1,72 s alatt, 16 solverhívással futott le: UCP 0,48 s,
+SMT 1,20 s, egyéb munka 0,03 s (kerekített részidők). A 16 pontos célérték és
+három többértékű domain változatlan, de most mind a 19 domain teljesnek igazolt.
+A 60 s/hívás kerettel, pontos tények nélküli lefedéssel végzett korábbi release-próba
+120,69 s alatt sem igazolta a két beszállítói domain teljességét. Ezek egyszeri
+futások, nem ismételt benchmarkok; a korábbi debugidőkkel nem képeznek gyorsulási arányt.
+A külön riportvalidálás továbbra sem feltételezi a visszaállított pontos értékeket.
+A feláras számla új `refinement` release-próbája szintén sikeres: 4,11 s,
+28 hívás, 17 pontos érték és mind a 21 cél-domain teljes. A kezdeti SMT-kizárást
+követő UCP-visszacsatolás változatlanul megmaradt.
+
+**Korábbi debugmérés, pontos tények nélküli lefedéssel:** az általános lineáris/intervallumos következtetéssel a
 számlapélda már sikeresen visszaállítható. Az önálló UCP a végső új mérésben
 4,22 másodperc alatt 16 konkrét célértéket és a három fennmaradó cél helyes
-véges vetületét állította elő. A teljes elemzés jelenlegi új futása 10,52 másodperc,
+véges vetületét állította elő. A teljes elemzés akkori futása 10,52 másodperc,
 8 SMT-hívás és `Analyzed` eredmény volt. Az alábbi korábbi timeoutos mérések
 fejlesztési előzmények; nem a jelenlegi következtetési képességet jellemzik.
-A teljes futás most egyetlen normál, publikus értékekkel indított UCP-elemzést
+A teljes futás egyetlen normál, publikus értékekkel indított UCP-elemzést
 végzett, 4,08 s alatt; a solverfolyamatok együtt 6,15 s időt használtak.
 A korábbi, 66,11 s-os futás kötelező szerkezeti baseline-t is számított.
 Ez a kontroll most alapértelmezetten kikapcsolt, ezért nem terheli a rendes keresést.
 
-A teljes elemzés a kupont és a két beszállítói részt helyesen `NonUnique`
+Az akkori teljes elemzés a kupont és a két beszállítói részt helyesen `NonUnique`
 eredménnyel jelenti. Összesen 17 cél-domain teljesnek igazolt: a 16 singleton
 és a kupon kétértékű domainje. A beszállítói domainek megfelelnek a független
-referenciának, de a riportban még nem teljesnek tanúsítottak. Az `Analyzed`
+referenciának, de abban a riportban még nem voltak teljesnek tanúsítottak. Az `Analyzed`
 nem jelenti minden cél-domain teljességi bizonyítványát.
 
 Az új szabály [leírása](../../../../../docs/ucp-relational-propagation.md) és
@@ -119,6 +227,7 @@ változnak. Egy megfigyelés elhagyása nem egy számítási kapu törlését je
 | `invoice_circuit.rs` | Halo2 configure/synthesize, tanúadatok és cellaazonosítók |
 | `invoice_reference.rs` | Külön egészszámos referenciamodell, teljes bemeneti enumeráció |
 | `invoice_tests.rs` | MockProver, referenciák, tiszta UCP és választható SMT-mérések |
+| `invoice_approval_tests.rs` | Jóváhagyási felár, független referencia, többértelmű kontroll és valódi SMT-visszacsatolás |
 
 A riport céljai a négy mennyiség, a privát számla-köztesértékek, a kupon,
 a beszállítói bontás és a könyvelési részösszegek. A már publikált bruttó

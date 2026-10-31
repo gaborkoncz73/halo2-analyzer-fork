@@ -155,7 +155,7 @@ fn external_halo2_book_original_keeps_private_inputs_non_unique() {
         4,
         &input,
         targets.clone(),
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     println!("Unmodified Halo2 Book example, c=252:\n{report}");
@@ -170,7 +170,7 @@ fn external_halo2_book_original_keeps_private_inputs_non_unique() {
         4,
         &input,
         targets,
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     assert_eq!(report.cells, alternate_report.cells);
@@ -191,7 +191,7 @@ fn external_halo2_book_published_intermediates_recover_remaining_secret() {
         4,
         &input,
         [b],
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     println!("Local publication control, a=2 and ab=6 expose b=3:\n{report}");
@@ -221,7 +221,7 @@ fn external_halo2_book_published_intermediates_recover_remaining_secret() {
         4,
         &input,
         private_inputs(&invalid_witness).into_iter().skip(1),
-        PrivacyAnalysisOptions::default(),
+        PrivacyAnalysisOptions::fast_probe_only(),
     )
     .unwrap();
     assert_eq!(report.cells, without_witness_sampling.cells);
@@ -248,7 +248,7 @@ fn external_halo2_book_requires_complete_public_observations() {
             4,
             &input,
             [b.clone()],
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
         )
         .unwrap_err();
         assert!(error

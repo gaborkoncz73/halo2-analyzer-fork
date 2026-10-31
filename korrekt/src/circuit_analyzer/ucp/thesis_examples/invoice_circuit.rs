@@ -13,6 +13,7 @@ pub(super) const PRICES: [u64; 4] = [1200, 2500, 1800, 900];
 pub(super) const WEIGHTS: [u64; 4] = [500, 1000, 700, 200];
 pub(super) const POINTS: [u64; 4] = [2, 5, 4, 1];
 pub(super) const COUPONS: [u64; 5] = [0, 5, 10, 10, 15];
+pub(super) const SURCHARGE_CATALOG: [u64; 2] = [0, 432];
 pub(super) const SHIPPING: [[u64; 4]; 3] = [
     [0, 0, 50_000, 600],
     [1, 50_001, 100_000, 1200],
@@ -23,6 +24,9 @@ pub(super) const SUMMARY_ROW: usize = 4;
 pub(super) const INVOICE_ROW: usize = 5;
 pub(super) const SUPPLIER_ROW: usize = 6;
 pub(super) const LEDGER_ROW: usize = 7;
+pub(super) const APPROVAL_ROW: usize = 13;
+pub(super) const APPROVAL_MODE: usize = 0;
+pub(super) const SURCHARGE: usize = 1;
 const RANGE_START: usize = 8;
 const ROWS: usize = 13;
 const COLUMNS: usize = 16;
@@ -137,10 +141,21 @@ impl CartWitness {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct ApprovalWitness {
+    pub mode: u64,
+    pub surcharge: u64,
+}
+
 #[derive(Clone, Default)]
-pub(super) struct InvoiceAudit<const OBS: u8> {
+pub(super) struct InvoiceAudit<
+    const OBS: u8,
+    const APPROVAL: bool = false,
+    const CATALOG: bool = false,
+> {
     pub witness: Option<CartWitness>,
     pub tamper: Option<(usize, usize, u64)>,
+    pub approval: Option<ApprovalWitness>,
 }
 
 impl<const OBS: u8> InvoiceAudit<OBS> {
@@ -148,32 +163,52 @@ impl<const OBS: u8> InvoiceAudit<OBS> {
         Self {
             witness: Some(witness),
             tamper: None,
+            approval: None,
         }
+    }
+}
+
+impl<const OBS: u8, const APPROVAL: bool, const CATALOG: bool>
+    InvoiceAudit<OBS, APPROVAL, CATALOG>
+{
+    fn observations(&self) -> Vec<u64> {
+        let mut observations = self.witness.as_ref().unwrap().observations().to_vec();
+        if APPROVAL {
+            let approval = self.approval.as_ref().unwrap();
+            observations[3] += approval.surcharge;
+            observations.push(approval.mode * (10 - approval.mode));
+        }
+        observations
     }
 
     pub fn instances(&self) -> Vec<Vec<Fr>> {
-        vec![self
-            .witness
-            .as_ref()
-            .unwrap()
-            .observations()
-            .map(Fr::from)
-            .to_vec()]
+        vec![self.observations().into_iter().map(Fr::from).collect()]
     }
 
     pub fn input(&self) -> AnalyzerInput {
-        let observations = self.witness.as_ref().unwrap().observations();
+        let observations = self.observations();
         AnalyzerInput {
             verification_method: VerificationMethod::Specific,
             verification_input: VerificationInput::new(
                 observations
                     .into_iter()
                     .enumerate()
-                    .filter(|(i, _)| OBS & (1 << i) != 0)
+                    .filter(|(i, _)| (APPROVAL && *i == 4) || OBS & (1 << i) != 0)
                     .map(|(i, value)| (format!("I-0-{i}"), value as i64)),
                 1,
             ),
             lookup_method: LookupMethod::InlineConstraints,
+        }
+    }
+}
+
+impl<const OBS: u8, const CATALOG: bool> InvoiceAudit<OBS, true, CATALOG> {
+    pub fn with_approval(witness: CartWitness, mode: u64, surcharge: u64) -> Self {
+        assert!(mode < 10);
+        Self {
+            witness: Some(witness),
+            tamper: None,
+            approval: Some(ApprovalWitness { mode, surcharge }),
         }
     }
 }
@@ -199,8 +234,16 @@ pub(super) fn target_name(cell: &CellId) -> &'static str {
         ][cell.column],
         SUPPLIER_ROW => ["q_paper_copy", "supplier_u", "supplier_v"][cell.column],
         LEDGER_ROW => ["carrier_S0", "carrier_S1", "carrier_S2"][cell.column],
+        APPROVAL_ROW => ["approval_mode_r", "manual_surcharge_a"][cell.column],
         _ => unreachable!("Csak a kijelölt célcellákhoz rendel nevet"),
     }
+}
+
+pub(super) fn approval_targets() -> Vec<CellId> {
+    targets()
+        .into_iter()
+        .chain([APPROVAL_MODE, SURCHARGE].map(|col| CellId::advice(col, APPROVAL_ROW as i32)))
+        .collect()
 }
 
 pub(super) fn targets() -> Vec<CellId> {
@@ -236,9 +279,13 @@ pub(super) struct InvoiceConfig {
     fixed: [Column<Fixed>; 3],
     selectors: [Selector; 6],
     tables: [TableColumn; 10],
+    approval: Option<(Selector, TableColumn)>,
+    surcharge_catalog: Option<TableColumn>,
 }
 
-impl<const OBS: u8> Circuit<Fr> for InvoiceAudit<OBS> {
+impl<const OBS: u8, const APPROVAL: bool, const CATALOG: bool> Circuit<Fr>
+    for InvoiceAudit<OBS, APPROVAL, CATALOG>
+{
     type Config = InvoiceConfig;
     type FloorPlanner = SimpleFloorPlanner;
 
@@ -247,11 +294,14 @@ impl<const OBS: u8> Circuit<Fr> for InvoiceAudit<OBS> {
     }
 
     fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+        assert!(!CATALOG || APPROVAL);
         let advice = array::from_fn(|_| meta.advice_column());
         let public = meta.instance_column();
         let fixed = array::from_fn(|_| meta.fixed_column());
         let selectors = array::from_fn(|_| meta.complex_selector());
         let tables = array::from_fn(|_| meta.lookup_table_column());
+        let approval = APPROVAL.then(|| (meta.complex_selector(), meta.lookup_table_column()));
+        let surcharge_catalog = CATALOG.then(|| meta.lookup_table_column());
         for column in advice {
             meta.enable_equality(column);
         }
@@ -303,6 +353,18 @@ impl<const OBS: u8> Circuit<Fr> for InvoiceAudit<OBS> {
                 .iter()
                 .map(|col| meta.query_advice(*col, Rotation::cur()))
                 .collect();
+            let gross =
+                a[GROSS].clone() - a[TAX_BASE].clone() - a[TAX].clone() - a[SHIPPING_FEE].clone();
+            // A bővített változat a külön jóváhagyási sor felárát ugyanabba a számlába köti.
+            let gross = if APPROVAL {
+                gross
+                    - meta.query_advice(
+                        advice[SURCHARGE],
+                        Rotation((APPROVAL_ROW - INVOICE_ROW) as i32),
+                    )
+            } else {
+                gross
+            };
             vec![
                 a[RATE].clone() * a[SUBTOTAL].clone()
                     - c(100) * a[DISCOUNT].clone()
@@ -310,7 +372,7 @@ impl<const OBS: u8> Circuit<Fr> for InvoiceAudit<OBS> {
                 a[TAX_BASE].clone() - a[SUBTOTAL].clone() + a[DISCOUNT].clone()
                     - meta.query_fixed(fixed[0]),
                 c(20) * a[TAX_BASE].clone() - c(100) * a[TAX].clone() - a[TAX_REMAINDER].clone(),
-                a[GROSS].clone() - a[TAX_BASE].clone() - a[TAX].clone() - a[SHIPPING_FEE].clone(),
+                gross,
                 a[TOTAL_WEIGHT].clone() - a[LOWER].clone() - a[LOWER_SLACK].clone(),
                 a[UPPER].clone() - a[TOTAL_WEIGHT].clone() - a[UPPER_SLACK].clone(),
             ]
@@ -402,12 +464,54 @@ impl<const OBS: u8> Circuit<Fr> for InvoiceAudit<OBS> {
                 })
                 .collect::<Vec<_>>()
         });
+        if let Some((selector, modes)) = approval {
+            meta.create_gate("approval audit and exceptional manual surcharge", |meta| {
+                let q = meta.query_selector(selector);
+                let r = meta.query_advice(advice[APPROVAL_MODE], Rotation::cur());
+                let a = meta.query_advice(advice[SURCHARGE], Rotation::cur());
+                let h = meta.query_advice(advice[2], Rotation::cur());
+                vec![
+                    // A publikus ellenőrzőértéket kifejtett polinomként adja meg, nem gyöklistaként.
+                    q.clone() * (r.clone() * r.clone() - c(10) * r.clone() + h),
+                    q.clone() * a.clone() * (r - c(5)),
+                    q * (a
+                        - (0..4).fold(c(0), |sum, digit| {
+                            sum + c(1 << (4 * digit))
+                                * meta.query_advice(advice[3 + digit], Rotation::cur())
+                        })),
+                ]
+            });
+            for (column, table) in [(APPROVAL_MODE, modes)]
+                .into_iter()
+                .chain((3..7).map(|column| (column, tables[0])))
+            {
+                meta.lookup(|meta| {
+                    let q = meta.query_selector(selector);
+                    vec![(
+                        q * meta.query_advice(advice[column], Rotation::cur()),
+                        table,
+                    )]
+                });
+            }
+            if let Some(table) = surcharge_catalog {
+                // A felárat önálló üzleti lookup korlátozza; a 0 az inaktív sorokban is megengedett.
+                meta.lookup(|meta| {
+                    let q = meta.query_selector(selector);
+                    vec![(
+                        q * meta.query_advice(advice[SURCHARGE], Rotation::cur()),
+                        table,
+                    )]
+                });
+            }
+        }
         InvoiceConfig {
             advice,
             public,
             fixed,
             selectors,
             tables,
+            approval,
+            surcharge_catalog,
         }
     }
 
@@ -442,16 +546,55 @@ impl<const OBS: u8> Circuit<Fr> for InvoiceAudit<OBS> {
                             || Value::known(Fr::from(value)),
                         )?;
                     }
+                    if let Some((_, modes)) = config.approval {
+                        table.assign_cell(
+                            || "allowed approval mode",
+                            modes,
+                            row,
+                            || Value::known(Fr::from((row % 10) as u64)),
+                        )?;
+                    }
+                    if let Some(catalog) = config.surcharge_catalog {
+                        table.assign_cell(
+                            || "allowed surcharge",
+                            catalog,
+                            row,
+                            || {
+                                Value::known(Fr::from(
+                                    SURCHARGE_CATALOG[row % SURCHARGE_CATALOG.len()],
+                                ))
+                            },
+                        )?;
+                    }
                 }
                 Ok(())
             },
         )?;
-        let data = self.witness.as_ref().map(CartWitness::rows);
+        let data = self.witness.as_ref().map(|witness| {
+            let mut rows = witness.rows().to_vec();
+            if APPROVAL {
+                if let Some(approval) = &self.approval {
+                    rows[INVOICE_ROW][GROSS] += approval.surcharge;
+                    let mut row = [0; COLUMNS];
+                    row[APPROVAL_MODE] = approval.mode;
+                    row[SURCHARGE] = approval.surcharge;
+                    row[2] = approval.mode * (10 - approval.mode);
+                    for digit in 0..4 {
+                        row[3 + digit] = (approval.surcharge >> (4 * digit)) & 15;
+                    }
+                    rows.push(row);
+                }
+            }
+            rows
+        });
         let exposed = layouter.assign_region(
             || "connected invoice audit",
             |mut region| {
                 let mut cells = Vec::new();
-                for row in 0..ROWS {
+                for row in 0..ROWS + usize::from(APPROVAL) {
+                    if row == APPROVAL_ROW {
+                        config.approval.unwrap().0.enable(&mut region, row)?;
+                    }
                     let selector = match row {
                         0..=3 => 0,
                         4 => 1,
@@ -460,13 +603,16 @@ impl<const OBS: u8> Circuit<Fr> for InvoiceAudit<OBS> {
                         7 => 4,
                         _ => 5,
                     };
-                    config.selectors[selector].enable(&mut region, row)?;
+                    if row != APPROVAL_ROW {
+                        config.selectors[selector].enable(&mut region, row)?;
+                    }
                     let columns = match row {
                         0..=3 => 11,
                         4 => 8,
                         5 => 16,
                         6 => 3,
                         7 => 5,
+                        APPROVAL_ROW => 7,
                         _ => 6,
                     };
                     let mut assigned = Vec::new();
@@ -533,16 +679,20 @@ impl<const OBS: u8> Circuit<Fr> for InvoiceAudit<OBS> {
                         cells[RANGE_START + i][0].cell(),
                     )?;
                 }
-                Ok([
+                let mut exposed = vec![
                     cells[SUMMARY_ROW][4].clone(),
                     cells[SUMMARY_ROW][5].clone(),
                     cells[SUMMARY_ROW][6].clone(),
                     cells[INVOICE_ROW][GROSS].clone(),
-                ])
+                ];
+                if APPROVAL {
+                    exposed.push(cells[APPROVAL_ROW][2].clone());
+                }
+                Ok(exposed)
             },
         )?;
         for (i, cell) in exposed.into_iter().enumerate() {
-            if OBS & (1 << i) != 0 {
+            if (APPROVAL && i == 4) || OBS & (1 << i) != 0 {
                 layouter.constrain_instance(cell.cell(), config.public, i)?;
             }
         }

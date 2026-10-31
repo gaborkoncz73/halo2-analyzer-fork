@@ -10,11 +10,9 @@ use crate::{
             extractor::extract_ucp_problem,
             privacy::{
                 analyze_private_recoverability_with_witness, PrivacyAnalysisOptions,
-                PrivacyAnalysisReport, PrivacyAnalysisStatus, PrivacySearchOptions,
+                PrivacyAnalysisProfile, PrivacyAnalysisReport, PrivacyAnalysisStatus,
                 PrivateCellUniqueness,
             },
-            privacy_discovery::PrivacyDomainDiscoveryOptions,
-            privacy_domain::PrivacyDomainRefinementOptions,
             value::UcpValueDomain,
         },
     },
@@ -230,48 +228,13 @@ enum Profile {
 }
 
 fn options(profile: Profile) -> PrivacyAnalysisOptions {
-    let initial_sat_timeout = std::env::var("UCP_INVOICE_INITIAL_SAT_TIMEOUT_MS")
-        .map(|v| v.parse().unwrap())
-        .unwrap_or(60_000);
-    let timeout = std::env::var("UCP_INVOICE_TIMEOUT_MS")
-        .map(|v| v.parse().unwrap())
-        .unwrap_or(3_000);
-    assert!(timeout > 0);
-    assert!(initial_sat_timeout > 0);
-    PrivacyAnalysisOptions {
-        compute_structural_baseline: false,
-        solver_timeout_ms: Some(timeout),
-        initial_sat_timeout_ms: Some(initial_sat_timeout),
-        max_semantic_queries: if matches!(profile, Profile::Fast | Profile::Combined) {
-            8
-        } else {
-            0
-        },
-        search: PrivacySearchOptions {
-            max_bridge_queries: 8,
-            max_queries_without_progress: 8,
-            max_retries_per_target: 0,
-            retry_solver_timeout_ms: None,
-        },
-        domain_refinement: PrivacyDomainRefinementOptions {
-            max_solver_checks: if matches!(profile, Profile::Refinement | Profile::Combined) {
-                48
-            } else {
-                0
-            },
-            max_candidates_per_cell: 128,
-        },
-        domain_discovery: PrivacyDomainDiscoveryOptions {
-            max_solver_checks: if matches!(profile, Profile::Discovery | Profile::Combined) {
-                24
-            } else {
-                0
-            },
-            max_values_per_cell: 6,
-            max_retries_per_cell: 0,
-            ..Default::default()
-        },
-    }
+    super::recovery_options().with_profile(match profile {
+        Profile::Combined => PrivacyAnalysisProfile::Standard,
+        Profile::Propagation => PrivacyAnalysisProfile::PropagationOnly,
+        Profile::Fast => PrivacyAnalysisProfile::FastProbeOnly,
+        Profile::Refinement => PrivacyAnalysisProfile::RefinementOnly,
+        Profile::Discovery => PrivacyAnalysisProfile::DiscoveryOnly,
+    })
 }
 
 fn check_claims(report: &PrivacyAnalysisReport) {
@@ -315,7 +278,11 @@ fn run(profile: Profile, witness: CartWitness) -> PrivacyAnalysisReport {
             options(profile).initial_sat_timeout_ms
         );
     } else {
-        println!("Invoice audit: {profile:?}");
+        if matches!(profile, Profile::Combined) {
+            println!("Invoice audit: Standard (combined)");
+        } else {
+            println!("Invoice audit: Ablation/{profile:?}");
+        }
     }
     let report = analyze_private_recoverability_with_witness::<Fr, _, _>(
         &circuit,

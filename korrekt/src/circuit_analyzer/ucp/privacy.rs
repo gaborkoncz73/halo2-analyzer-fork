@@ -22,13 +22,14 @@ use super::{
     },
     value::{normalize_field_value, parse_cell_id, UcpValueDomain, UcpValueFacts},
 };
+#[cfg(test)]
+use crate::circuit_analyzer::analyzer::{
+    SemanticQueryOutput, SemanticQueryResult, ValueRecoveryFailure,
+};
 use crate::{
     circuit_analyzer::{
         analyzable::{Analyzable, AnalyzableField},
-        analyzer::{
-            Analyzer, OriginalPrivateQueryContext, PrivateSearchExactFacts, SemanticQueryOutput,
-            SemanticQueryResult, ValueRecoveryFailure,
-        },
+        analyzer::{Analyzer, OriginalPrivateQueryContext, PrivateModelQuery, PrivateSearchFacts},
         halo2_proofs_libs::*,
     },
     io::analyzer_io_type::{AnalyzerInput, AnalyzerType, LookupMethod, VerificationMethod},
@@ -60,7 +61,17 @@ pub(crate) const PRIVACY_SAT_HINT_POLICY: &str =
     "target-exact-ucp-hints-positive-only-original-fallback";
 pub(crate) const PRIVACY_WITNESS_SAT_POLICY: &str =
     "mock-prover-positive-only-original-smt-fallback";
-pub(crate) const PRIVACY_SEARCH_POLICY: &str = "refine-discover-complete-domain-v4";
+pub(crate) const PRIVACY_SEARCH_POLICY: &str = "standard-all-searches-v10";
+
+/// A Standard minden keresési lehetőséget enged; a többi profil összehasonlító komponensmérésre szolgál.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivacyAnalysisProfile {
+    Standard,
+    PropagationOnly,
+    FastProbeOnly,
+    RefinementOnly,
+    DiscoveryOnly,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrivacyAnalysisOptions {
@@ -91,8 +102,14 @@ impl Default for PrivacyAnalysisOptions {
             solver_timeout_ms: None,
             initial_sat_timeout_ms: None,
             search: PrivacySearchOptions::default(),
-            domain_refinement: PrivacyDomainRefinementOptions::default(),
-            domain_discovery: PrivacyDomainDiscoveryOptions::default(),
+            domain_refinement: PrivacyDomainRefinementOptions {
+                max_solver_checks: 160,
+                max_candidates_per_cell: 128,
+            },
+            domain_discovery: PrivacyDomainDiscoveryOptions {
+                max_solver_checks: 64,
+                ..PrivacyDomainDiscoveryOptions::default()
+            },
         }
     }
 }
@@ -122,6 +139,34 @@ impl Default for PrivacySearchOptions {
 }
 
 impl PrivacyAnalysisOptions {
+    /// Megtartja a beállított kereteket; csak az explicit ablation-profilhoz nem tartozó stratégiákat tiltja le.
+    pub fn with_profile(mut self, profile: PrivacyAnalysisProfile) -> Self {
+        if !matches!(
+            profile,
+            PrivacyAnalysisProfile::Standard | PrivacyAnalysisProfile::FastProbeOnly
+        ) {
+            self.max_semantic_queries = 0;
+        }
+        if !matches!(
+            profile,
+            PrivacyAnalysisProfile::Standard | PrivacyAnalysisProfile::RefinementOnly
+        ) {
+            self.domain_refinement.max_solver_checks = 0;
+        }
+        if !matches!(
+            profile,
+            PrivacyAnalysisProfile::Standard | PrivacyAnalysisProfile::DiscoveryOnly
+        ) {
+            self.domain_discovery.max_solver_checks = 0;
+        }
+        self
+    }
+
+    /// Kizárólag gyorspróbákat engedélyező konfigurációt ad komponensméréshez és célzott tesztekhez.
+    pub fn fast_probe_only() -> Self {
+        Self::default().with_profile(PrivacyAnalysisProfile::FastProbeOnly)
+    }
+
     pub(super) fn retry_timeout_ms(&self) -> Option<u64> {
         self.solver_timeout_ms
             .map(|initial| initial.max(self.search.retry_solver_timeout_ms.unwrap_or(initial)))
@@ -488,7 +533,7 @@ where
         options,
         started,
         initial_check,
-        |analyzer, input, cell| analyzer.query_ucp_cell_uniqueness_with_value(input, cell),
+        SnapshotRecoveryProbe,
     )
 }
 
@@ -509,7 +554,8 @@ fn original_context<F: AnalyzableField>(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let snapshot = if options.domain_refinement.max_solver_checks > 0
+    let snapshot = if options.max_semantic_queries > 0
+        || options.domain_refinement.max_solver_checks > 0
         || options.domain_discovery.max_solver_checks > 0
     {
         Some(analyzer.original_private_query_context(analyzer_input, &snapshot_cells)?)
@@ -543,13 +589,13 @@ fn propagate_to_fixpoint(
     result
 }
 
-fn established_exact_facts<F: AnalyzableField>(
+fn established_search_facts<F: AnalyzableField>(
     original: Option<&OriginalPrivateQueryContext>,
     analyzer: &Analyzer<F>,
     values: &UcpValueFacts,
-) -> Result<PrivateSearchExactFacts> {
+) -> Result<PrivateSearchFacts> {
     original
-        .map(|snapshot| snapshot.search_exact_facts(analyzer, values))
+        .map(|snapshot| snapshot.search_facts(analyzer, values))
         .transpose()
         .map(Option::unwrap_or_default)
 }
@@ -596,7 +642,7 @@ fn recover_private_inputs<F: AnalyzableField>(
     options: PrivacyAnalysisOptions,
     started: Instant,
     check_sat: impl FnOnce(&mut PrivacyAnalysisContext<F>) -> (Result<Satisfiability>, usize),
-    mut query: impl FnMut(&mut Analyzer<F>, &AnalyzerInput, &CellId) -> Result<SemanticQueryOutput>,
+    mut query: impl RecoveryProbe<F>,
 ) -> Result<PrivacyAnalysisReport> {
     let solver_start = crate::smt_solver::process::invocation_count();
     let recovery_timeout = context.analyzer.smt_timeout_ms();
@@ -656,7 +702,7 @@ fn recover_private_inputs<F: AnalyzableField>(
     let mut limitations = BTreeMap::new();
     let mut search = RecoverySearchState::initialize_search(&facts, &values);
     let mut evidence = RecoveryEvidence::default();
-    let mut exact_search_facts = PrivateSearchExactFacts::default();
+    let mut search_facts = PrivateSearchFacts::default();
     // A kifejezésstátuszokat a ciklus első, kötelező propagációja tölti ki; előtte csak K-t és Deltát használja.
     let mut result = UcpResult {
         facts,
@@ -690,9 +736,12 @@ fn recover_private_inputs<F: AnalyzableField>(
                 }
             }
             search.observe_progress(&result, &problem.field_modulus);
-            // E-t kizárólag az aktuális Delta igazolt pontos értékeiből állítja elő az SMT-kereséshez.
-            exact_search_facts =
-                established_exact_facts(original_context.as_ref(), &analyzer, &result.value_facts)?;
+            // Az aktuális Delta pontos értékeiből és kis lefedő domainjeiből frissíti az SMT keresési premisszáit.
+            search_facts = established_search_facts(
+                original_context.as_ref(),
+                &analyzer,
+                &result.value_facts,
+            )?;
             propagation_needed = false;
         }
         let (actions, probe_plan) = shortlist_actions(
@@ -709,8 +758,14 @@ fn recover_private_inputs<F: AnalyzableField>(
             original_context.is_some(),
             &options,
         )?;
-        let Some(action) = choose_action(actions, &private_cells, &problem, &result, &evidence)
-        else {
+        let Some(action) = choose_action(
+            actions,
+            &private_cells,
+            &problem,
+            &result,
+            &evidence,
+            Some(&domain_search),
+        ) else {
             let ProbePlan::Stop(status, reason, pending) = probe_plan else {
                 anyhow::bail!("Selectable recovery probe was lost by the scheduler");
             };
@@ -751,7 +806,7 @@ fn recover_private_inputs<F: AnalyzableField>(
                 analyzer: &mut analyzer,
                 analyzer_input,
                 original: original_context.as_ref(),
-                exact_facts: &exact_search_facts,
+                search_facts: &search_facts,
                 modulus: &problem.field_modulus,
                 knowledge: &result,
                 smt_domain_reference: &problem.initial_value_facts,
@@ -765,7 +820,7 @@ fn recover_private_inputs<F: AnalyzableField>(
                     operations.refine_domain(&cell, strategy, &mut domain_search, &evidence)
                 }
                 RecoveryAction::Discover(cell, strategy) => {
-                    operations.discover_domain(&cell, strategy, &mut discovery)
+                    operations.discover_domain(&cell, strategy, &mut discovery, &evidence)
                 }
             }
         }?;
@@ -792,6 +847,19 @@ fn recover_private_inputs<F: AnalyzableField>(
             recovered.samples.iter().cloned(),
             &problem.field_modulus,
         )?;
+        let mut model_samples = BTreeMap::new();
+        for (sample_cell, values) in &recovered.model_samples {
+            let previous = evidence.samples(sample_cell);
+            let added: Vec<_> = values.difference(&previous).cloned().collect();
+            evidence.remember_feasible_samples(
+                sample_cell,
+                values.iter().cloned(),
+                &problem.field_modulus,
+            )?;
+            if sample_cell != &cell && !added.is_empty() {
+                model_samples.insert(sample_cell.clone(), added);
+            }
+        }
         propagation_needed |= facts_changed(merge_established_results(
             &mut result,
             recovered,
@@ -801,6 +869,7 @@ fn recover_private_inputs<F: AnalyzableField>(
         )?);
         propagation_needed |=
             evidence.certify_complete_domains(&mut result, &problem.field_modulus)?;
+        non_unique.extend(evidence.non_unique_cells());
         let after = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
         let mut updates = before.updates(&after);
         if !private_set.contains(&cell) {
@@ -826,6 +895,7 @@ fn recover_private_inputs<F: AnalyzableField>(
                     .difference(&prior_samples)
                     .cloned()
                     .collect(),
+                model_samples,
                 updates,
                 limitation,
             },
@@ -919,6 +989,7 @@ struct RecoveryStepResult {
     checks: Vec<RecoverySmtCalls>,
     cell: CellId,
     samples: Vec<BigInt>,
+    model_samples: BTreeMap<CellId, BTreeSet<BigInt>>,
     domain: Option<UcpValueDomain>,
     unique: bool,
     non_unique: bool,
@@ -932,12 +1003,171 @@ impl RecoveryStepResult {
             checks: Vec::new(),
             cell: cell.clone(),
             samples: Vec::new(),
+            model_samples: BTreeMap::new(),
             domain: None,
             unique: false,
             non_unique: false,
             limitation: None,
             retryable: false,
         }
+    }
+
+    fn remember_model(&mut self, samples: BTreeMap<CellId, BigInt>) {
+        for (cell, value) in samples {
+            if cell == self.cell {
+                self.samples.push(value.clone());
+            }
+            self.model_samples.entry(cell).or_default().insert(value);
+        }
+    }
+
+    fn inconclusive(mut self, error: anyhow::Error) -> Result<Self> {
+        self.limitation = Some(limitation_from_solver_error(error)?);
+        self.retryable = true;
+        Ok(self)
+    }
+}
+
+struct FastProbeRequest<'a> {
+    original: Option<&'a OriginalPrivateQueryContext>,
+    facts: &'a PrivateSearchFacts,
+    seed: Option<&'a BigInt>,
+    sample_cells: &'a BTreeSet<CellId>,
+    timeout_ms: Option<u64>,
+    #[cfg(test)]
+    is_target: bool,
+}
+
+// A recovery solverútvonalát különíti el a régi szemantikai API tesztadapterétől.
+trait RecoveryProbe<F: AnalyzableField> {
+    fn run(
+        &mut self,
+        analyzer: &mut Analyzer<F>,
+        input: &AnalyzerInput,
+        cell: &CellId,
+        request: FastProbeRequest<'_>,
+    ) -> Result<RecoveryStepResult>;
+}
+
+struct SnapshotRecoveryProbe;
+
+impl<F: AnalyzableField> RecoveryProbe<F> for SnapshotRecoveryProbe {
+    fn run(
+        &mut self,
+        _analyzer: &mut Analyzer<F>,
+        _input: &AnalyzerInput,
+        cell: &CellId,
+        request: FastProbeRequest<'_>,
+    ) -> Result<RecoveryStepResult> {
+        let original = request.original.context("Missing fast-probe snapshot")?;
+        probe_from_models(cell, request.seed.cloned(), |excluded| {
+            original.query_probe_model_with_search_facts::<F>(
+                cell,
+                excluded,
+                request.timeout_ms,
+                request.facts,
+                request.sample_cells,
+            )
+        })
+    }
+}
+
+// A kezdőértéket csak azonos Gamma mellett bizonyított W-mintából vagy teljes SAT-modellből fogadja el.
+fn probe_from_models(
+    cell: &CellId,
+    seed: Option<BigInt>,
+    mut query: impl FnMut(Option<&BigInt>) -> Result<PrivateModelQuery>,
+) -> Result<RecoveryStepResult> {
+    let mut recovered = RecoveryStepResult::new(cell);
+    let value = if let Some(seed) = seed {
+        seed
+    } else {
+        let first = match query(None) {
+            Ok(first) => first,
+            Err(error) => return recovered.inconclusive(error),
+        };
+        ensure!(
+            first.sat == Satisfiability::Satisfiable,
+            "Fast-probe model contradicts the originally satisfiable circuit"
+        );
+        let value = first
+            .samples
+            .get(cell)
+            .context("Missing fast-probe value")?
+            .clone();
+        recovered.remember_model(first.samples);
+        value
+    };
+    let alternative = match query(Some(&value)) {
+        Ok(alternative) => alternative,
+        // A sikeres első modell mintáit bizonytalan kizárás esetén is megőrzi W számára.
+        Err(error) => return recovered.inconclusive(error),
+    };
+    match alternative.sat {
+        Satisfiability::Unsatisfiable => {
+            recovered.unique = true;
+            recovered.domain = Some(UcpValueDomain::exact(value));
+        }
+        Satisfiability::Satisfiable => {
+            let other = alternative
+                .samples
+                .get(cell)
+                .context("Missing alternative fast-probe value")?;
+            ensure!(
+                other != &value,
+                "Fast-probe model violates the excluded value"
+            );
+            recovered.remember_model(alternative.samples);
+            recovered.non_unique = true;
+        }
+    }
+    Ok(recovered)
+}
+
+#[cfg(test)]
+struct LegacyRecoveryProbe<Q>(Q);
+
+#[cfg(test)]
+impl<F: AnalyzableField, Q> RecoveryProbe<F> for LegacyRecoveryProbe<Q>
+where
+    Q: FnMut(&mut Analyzer<F>, &AnalyzerInput, &CellId) -> Result<SemanticQueryOutput>,
+{
+    fn run(
+        &mut self,
+        analyzer: &mut Analyzer<F>,
+        input: &AnalyzerInput,
+        cell: &CellId,
+        request: FastProbeRequest<'_>,
+    ) -> Result<RecoveryStepResult> {
+        let mut recovered = RecoveryStepResult::new(cell);
+        let answer = match (self.0)(analyzer, input, cell) {
+            Ok(answer) => answer,
+            Err(error) => return recovered.inconclusive(error),
+        };
+        recovered.samples = answer.samples;
+        match answer.result {
+            SemanticQueryResult::ProvenUnique => {
+                recovered.unique = true;
+                recovered.domain = answer.value.map(UcpValueDomain::exact);
+                if recovered.domain.is_none() {
+                    recovered.limitation = Some(match answer.value_unavailable_reason {
+                        Some(ValueRecoveryFailure::RepresentationLimit) => {
+                            RecoveryLimitation::ValueRepresentationLimit
+                        }
+                        _ => RecoveryLimitation::NoConcreteValue,
+                    });
+                }
+            }
+            SemanticQueryResult::NotUnique => recovered.non_unique = request.is_target,
+            SemanticQueryResult::Unknown => {
+                recovered.retryable = true;
+                recovered.limitation = Some(RecoveryLimitation::SolverUnknown { reason: None });
+            }
+            SemanticQueryResult::Overconstrained => {
+                anyhow::bail!("Inferred facts conflict with the initially satisfiable circuit");
+            }
+        }
+        Ok(recovered)
     }
 }
 
@@ -948,7 +1178,7 @@ struct RecoveryOperations<'a, F: AnalyzableField, Q> {
     analyzer: &'a mut Analyzer<F>,
     analyzer_input: &'a AnalyzerInput,
     original: Option<&'a OriginalPrivateQueryContext>,
-    exact_facts: &'a PrivateSearchExactFacts,
+    search_facts: &'a PrivateSearchFacts,
     modulus: &'a BigInt,
     knowledge: &'a UcpResult,
     smt_domain_reference: &'a UcpValueFacts,
@@ -960,7 +1190,7 @@ struct RecoveryOperations<'a, F: AnalyzableField, Q> {
 
 impl<F: AnalyzableField, Q> RecoveryOperations<'_, F, Q>
 where
-    Q: FnMut(&mut Analyzer<F>, &AnalyzerInput, &CellId) -> Result<SemanticQueryOutput>,
+    Q: RecoveryProbe<F>,
 {
     fn refine_domain(
         &mut self,
@@ -974,12 +1204,21 @@ where
             "Cannot refine a complete domain"
         );
         if strategy == RecoveryStrategy::FastProbe {
-            return self.fast_probe(cell);
+            return self.fast_probe(cell, evidence);
         }
         let before_checks = state.statistics.solver_checks;
         let original = self.original.context("Missing refinement snapshot")?;
         let samples = evidence.samples(cell);
         let mut learned = Vec::new();
+        // A teljes modellből a még nem teljes cél-domainekhez és a vizsgált cellához kér mintát.
+        let sample_cells: BTreeSet<_> = self
+            .private_set
+            .iter()
+            .filter(|cell| !self.knowledge.value_facts.domain_is_complete(cell))
+            .cloned()
+            .chain(std::iter::once(cell.clone()))
+            .collect();
+        let mut model_samples = BTreeMap::<CellId, BTreeSet<BigInt>>::new();
         let mut checks = Vec::new();
         let (cell, domain, proven_non_unique) = state
             .refine_domain(
@@ -988,38 +1227,33 @@ where
                 self.modulus,
                 &samples,
                 |cell, domain, exclude| {
+                    ensure!(
+                        !exclude,
+                        "Established recovery domain unexpectedly requested coverage"
+                    );
                     let answer = measure_check(
                         &mut checks,
-                        if exclude {
-                            RecoverySmtCheckKind::Coverage
-                        } else {
-                            RecoverySmtCheckKind::CandidateFeasibility
-                        },
+                        RecoverySmtCheckKind::CandidateFeasibility,
                         || {
-                            if exclude {
-                                // A lefedést minden visszaállított állítástól függetlenül ellenőrzi.
-                                original.check_membership::<F>(
-                                    cell,
-                                    domain,
-                                    true,
-                                    self.options.solver_timeout_ms,
-                                )
-                            } else {
-                                original.check_candidate_with_exact_facts::<F>(
-                                    cell,
-                                    domain,
-                                    self.options.solver_timeout_ms,
-                                    self.exact_facts,
-                                )
-                            }
+                            // A domainből választott konkrét jelöltet a teljes eredeti kontextus mellett vizsgálja.
+                            original.query_candidate_with_search_facts::<F>(
+                                cell,
+                                domain,
+                                self.options.solver_timeout_ms,
+                                self.search_facts,
+                                &sample_cells,
+                            )
                         },
                     )?;
-                    if !exclude && answer == Satisfiability::Satisfiable {
+                    if answer.sat == Satisfiability::Satisfiable {
                         if let Some(value) = domain.exact_value() {
                             learned.push(value.clone());
                         }
+                        for (sample_cell, value) in answer.samples {
+                            model_samples.entry(sample_cell).or_default().insert(value);
+                        }
                     }
-                    Ok(answer)
+                    Ok(answer.sat)
                 },
             )?
             .context("Scheduled refinement became ineligible")?;
@@ -1031,6 +1265,7 @@ where
         let mut recovered = RecoveryStepResult::new(&cell);
         recovered.checks = checks;
         recovered.samples = learned;
+        recovered.model_samples = model_samples;
         recovered.domain = Some(domain);
         recovered.non_unique = proven_non_unique;
         Ok(recovered)
@@ -1041,13 +1276,14 @@ where
         cell: &CellId,
         strategy: RecoveryStrategy,
         state: &mut DomainDiscoveryState,
+        evidence: &RecoveryEvidence,
     ) -> Result<RecoveryStepResult> {
         ensure!(
             !self.knowledge.value_facts.domain_is_complete(cell),
             "Cannot discover a complete domain again"
         );
         if strategy == RecoveryStrategy::FastProbe {
-            return self.fast_probe(cell);
+            return self.fast_probe(cell, evidence);
         }
         let original = self.original.context("Missing discovery snapshot")?;
         let mut checks = Vec::new();
@@ -1086,11 +1322,11 @@ where
                                 }
                             } else {
                                 full_discovery_response(
-                                    original.query_unseen_value_with_exact_facts::<F>(
+                                    original.query_unseen_value_with_search_facts::<F>(
                                         cell,
                                         blocked,
                                         timeout,
-                                        self.exact_facts,
+                                        self.search_facts,
                                     ),
                                 )
                             }
@@ -1111,7 +1347,11 @@ where
         Ok(recovered)
     }
 
-    fn fast_probe(&mut self, cell: &CellId) -> Result<RecoveryStepResult> {
+    fn fast_probe(
+        &mut self,
+        cell: &CellId,
+        evidence: &RecoveryEvidence,
+    ) -> Result<RecoveryStepResult> {
         let timeout_ms = if self.search.cells.contains_key(cell) {
             self.options.retry_timeout_ms()
         } else {
@@ -1126,44 +1366,32 @@ where
         ));
         self.search
             .record_query(cell, self.private_set.contains(cell), timeout_ms);
-        let mut recovered = RecoveryStepResult::new(cell);
-        let answer = match measure_check(
-            &mut recovered.checks,
-            RecoverySmtCheckKind::FastProbe,
-            || (self.query)(self.analyzer, self.analyzer_input, cell),
-        ) {
-            Ok(answer) => answer,
-            Err(error) => {
-                recovered.limitation = Some(limitation_from_solver_error(error)?);
-                recovered.retryable = true;
-                return Ok(recovered);
-            }
-        };
-        recovered.samples = answer.samples;
-        match answer.result {
-            SemanticQueryResult::ProvenUnique => {
-                recovered.unique = true;
-                recovered.domain = answer.value.map(UcpValueDomain::exact);
-                if recovered.domain.is_none() {
-                    recovered.limitation = Some(match answer.value_unavailable_reason {
-                        Some(ValueRecoveryFailure::RepresentationLimit) => {
-                            RecoveryLimitation::ValueRepresentationLimit
-                        }
-                        _ => RecoveryLimitation::NoConcreteValue,
-                    });
-                }
-            }
-            SemanticQueryResult::NotUnique => {
-                recovered.non_unique = self.private_set.contains(cell);
-            }
-            SemanticQueryResult::Unknown => {
-                recovered.retryable = true;
-                recovered.limitation = Some(RecoveryLimitation::SolverUnknown { reason: None });
-            }
-            SemanticQueryResult::Overconstrained => {
-                anyhow::bail!("Inferred facts conflict with the initially satisfiable circuit");
-            }
-        }
+        let samples = evidence.samples(cell);
+        let sample_cells: BTreeSet<_> = self
+            .private_set
+            .iter()
+            .filter(|cell| !self.knowledge.value_facts.domain_is_complete(cell))
+            .cloned()
+            .chain(std::iter::once(cell.clone()))
+            .collect();
+        let mut checks = Vec::new();
+        let mut recovered = measure_check(&mut checks, RecoverySmtCheckKind::FastProbe, || {
+            self.query.run(
+                self.analyzer,
+                self.analyzer_input,
+                cell,
+                FastProbeRequest {
+                    original: self.original,
+                    facts: self.search_facts,
+                    seed: samples.iter().next(),
+                    sample_cells: &sample_cells,
+                    timeout_ms,
+                    #[cfg(test)]
+                    is_target: self.private_set.contains(cell),
+                },
+            )
+        })?;
+        recovered.checks = checks;
         Ok(recovered)
     }
 }
@@ -1269,6 +1497,146 @@ mod tests {
     use crate::io::analyzer_io_type::VerificationInput;
     use std::collections::HashMap;
 
+    #[test]
+    fn standard_options_enable_all_searches_and_ablations_only_mask_budgets() {
+        let standard = PrivacyAnalysisOptions::default();
+        assert!(standard.max_semantic_queries > 0);
+        assert!(standard.domain_refinement.max_solver_checks > 0);
+        assert!(standard.domain_discovery.max_solver_checks > 0);
+        for (profile, enabled) in [
+            (PrivacyAnalysisProfile::Standard, [true, true, true]),
+            (
+                PrivacyAnalysisProfile::PropagationOnly,
+                [false, false, false],
+            ),
+            (PrivacyAnalysisProfile::FastProbeOnly, [true, false, false]),
+            (PrivacyAnalysisProfile::RefinementOnly, [false, true, false]),
+            (PrivacyAnalysisProfile::DiscoveryOnly, [false, false, true]),
+        ] {
+            let options = standard.with_profile(profile);
+            assert_eq!(
+                options.max_semantic_queries,
+                if enabled[0] {
+                    standard.max_semantic_queries
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                options.domain_refinement.max_solver_checks,
+                if enabled[1] {
+                    standard.domain_refinement.max_solver_checks
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                options.domain_discovery.max_solver_checks,
+                if enabled[2] {
+                    standard.domain_discovery.max_solver_checks
+                } else {
+                    0
+                }
+            );
+            assert_eq!(options.solver_timeout_ms, standard.solver_timeout_ms);
+            assert_eq!(options.search, standard.search);
+            assert_eq!(
+                options.domain_refinement.max_candidates_per_cell,
+                standard.domain_refinement.max_candidates_per_cell
+            );
+            assert_eq!(
+                options.domain_discovery.max_values_per_cell,
+                standard.domain_discovery.max_values_per_cell
+            );
+        }
+    }
+
+    #[test]
+    fn standard_scheduler_chooses_refinement_or_discovery_from_available_knowledge() {
+        fn check<const CASE: u8>(discovery: bool) {
+            let options = PrivacyAnalysisOptions {
+                solver_timeout_ms: Some(2_000),
+                search: PrivacySearchOptions {
+                    max_bridge_queries: 0,
+                    retry_solver_timeout_ms: None,
+                    ..Default::default()
+                },
+                ..PrivacyAnalysisOptions::default()
+            };
+            let report = analyze_private_recoverability::<Fr, _, _>(
+                &ExampleCircuit::<CASE>::default(),
+                4,
+                &input(None),
+                [CellId::advice(0, 0)],
+                options,
+            )
+            .unwrap();
+            assert_eq!(report.options, options);
+            assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+            assert!(report.cells[0].domain_is_complete);
+            assert_eq!(
+                report.domain_refinement_statistics.solver_checks > 0,
+                !discovery
+            );
+            assert_eq!(
+                report.domain_discovery_statistics.solver_checks > 0,
+                discovery
+            );
+            assert_eq!(report.semantic_queries, 0);
+        }
+        check::<BOOLEAN>(false);
+        check::<EXPANDED>(true);
+    }
+
+    #[test]
+    fn standard_scheduler_can_choose_fast_probe_for_a_larger_covering_domain() {
+        use super::super::{
+            external_circuit_tests::observations,
+            external_range_tests::{range_private_inputs, RangeAggregateCircuit, RANGE_K},
+        };
+        let circuit = RangeAggregateCircuit::<true>::new(3, 12);
+        let options = PrivacyAnalysisOptions {
+            solver_timeout_ms: Some(2_000),
+            search: PrivacySearchOptions {
+                max_bridge_queries: 0,
+                retry_solver_timeout_ms: None,
+                ..Default::default()
+            },
+            ..PrivacyAnalysisOptions::default()
+        };
+        let report = analyze_private_recoverability::<Fr, _, _>(
+            &circuit,
+            RANGE_K,
+            &observations(&[15]),
+            range_private_inputs(&circuit),
+            options,
+        )
+        .unwrap();
+        assert_eq!(report.options, options);
+        assert!(report.semantic_queries > 0);
+        assert!(report
+            .cells
+            .iter()
+            .all(|cell| cell.uniqueness == PrivateCellUniqueness::NonUnique));
+    }
+
+    // A vezérlés régi, háromparaméteres hibainjektálási tesztjeit ugyanahhoz a fő ciklushoz illeszti.
+    fn recover_private_inputs<F: AnalyzableField>(
+        context: PrivacyAnalysisContext<F>,
+        options: PrivacyAnalysisOptions,
+        started: Instant,
+        check_sat: impl FnOnce(&mut PrivacyAnalysisContext<F>) -> (Result<Satisfiability>, usize),
+        query: impl FnMut(&mut Analyzer<F>, &AnalyzerInput, &CellId) -> Result<SemanticQueryOutput>,
+    ) -> Result<PrivacyAnalysisReport> {
+        super::recover_private_inputs(
+            context,
+            options,
+            started,
+            check_sat,
+            LegacyRecoveryProbe(query),
+        )
+    }
+
     const LINEAR: u8 = 0;
     const MASKED: u8 = 1;
     const CANDIDATES: u8 = 2;
@@ -1285,6 +1653,219 @@ mod tests {
     const SQUARED_DERIVED: u8 = 13;
     const MANY_EXPANDED: u8 = 14;
     const TWO_BOOLEANS: u8 = 15;
+    const TERNARY: u8 = 16;
+    const CORRELATED_BOOLEANS: u8 = 17;
+
+    #[test]
+    fn seeded_fast_probe_skips_model_search_and_shares_alternative_samples() {
+        let cell = CellId::advice(0, 0);
+        let other = CellId::advice(1, 0);
+        let mut calls = 0;
+        let unique = probe_from_models(&cell, Some(3.into()), |excluded| {
+            calls += 1;
+            assert_eq!(excluded, Some(&BigInt::from(3)));
+            Ok(PrivateModelQuery {
+                sat: Satisfiability::Unsatisfiable,
+                samples: BTreeMap::new(),
+            })
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert!(unique.unique);
+        assert_eq!(unique.domain, Some(UcpValueDomain::exact(3.into())));
+        assert!(unique.model_samples.is_empty());
+
+        let non_unique = probe_from_models(&cell, Some(3.into()), |excluded| {
+            assert_eq!(excluded, Some(&BigInt::from(3)));
+            Ok(PrivateModelQuery {
+                sat: Satisfiability::Satisfiable,
+                samples: [(cell.clone(), 7.into()), (other.clone(), 9.into())].into(),
+            })
+        })
+        .unwrap();
+        assert!(non_unique.non_unique);
+        assert!(!non_unique.unique);
+        assert!(non_unique.domain.is_none());
+        assert_eq!(non_unique.model_samples[&other], BTreeSet::from([9.into()]));
+    }
+
+    #[test]
+    fn fast_probe_preserves_first_model_samples_when_exclusion_is_unknown() {
+        let cell = CellId::advice(0, 0);
+        let other = CellId::advice(1, 0);
+        let mut calls = 0;
+        let result = probe_from_models(&cell, None, |excluded| {
+            calls += 1;
+            if calls == 1 {
+                assert!(excluded.is_none());
+                Ok(PrivateModelQuery {
+                    sat: Satisfiability::Satisfiable,
+                    samples: [(cell.clone(), 3.into()), (other.clone(), 9.into())].into(),
+                })
+            } else {
+                assert_eq!(excluded, Some(&BigInt::from(3)));
+                Err(unknown_error(Some("TIMEOUT")))
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(result.limitation, Some(RecoveryLimitation::SolverTimeout));
+        assert!(result.retryable);
+        assert!(!result.unique && !result.non_unique);
+        assert!(result.domain.is_none());
+        assert_eq!(result.samples, vec![3.into()]);
+        assert_eq!(result.model_samples[&other], BTreeSet::from([9.into()]));
+        assert!(probe_from_models(&cell, None, |_| Err(anyhow::anyhow!("invalid model"))).is_err());
+    }
+
+    #[test]
+    fn fast_probe_rejects_inconsistent_missing_or_non_alternative_models() {
+        let cell = CellId::advice(0, 0);
+        assert!(probe_from_models(&cell, None, |_| Ok(PrivateModelQuery {
+            sat: Satisfiability::Unsatisfiable,
+            samples: BTreeMap::new(),
+        }))
+        .is_err());
+        assert!(probe_from_models(&cell, None, |_| Ok(PrivateModelQuery {
+            sat: Satisfiability::Satisfiable,
+            samples: BTreeMap::new(),
+        }))
+        .is_err());
+        assert!(
+            probe_from_models(&cell, Some(3.into()), |_| Ok(PrivateModelQuery {
+                sat: Satisfiability::Satisfiable,
+                samples: [(cell.clone(), 3.into())].into(),
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fast_probe_only_shares_models_and_completes_other_targets_without_refinement() {
+        let report = analyze_private_recoverability::<Fr, _, _>(
+            &ExampleCircuit::<CORRELATED_BOOLEANS>::default(),
+            4,
+            &input(None),
+            [CellId::advice(0, 0), CellId::advice(1, 0)],
+            PrivacyAnalysisOptions {
+                max_semantic_queries: 1,
+                solver_timeout_ms: Some(2_000),
+                ..PrivacyAnalysisOptions::fast_probe_only()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+        assert_eq!(report.semantic_queries, 1);
+        assert_eq!(report.solver_invocations, 3);
+        assert_eq!(report.domain_refinement_statistics.solver_checks, 0);
+        assert_eq!(report.domain_discovery_statistics.solver_checks, 0);
+        assert_eq!(report.summary.exact_values, 0);
+        assert_eq!(report.summary.non_unique_cells, 2);
+        assert!(report.cells.iter().all(|cell| cell.domain_is_complete));
+        assert_eq!(report.search_statistics.propagation_runs, 1);
+        assert!(report.phase_report().contains("Model samples:"));
+    }
+
+    #[test]
+    fn snapshot_fast_probe_reuses_a_real_cached_sat_value_with_one_solver_call() {
+        fn check<const CASE: u8>(seed: i64, unique: bool) {
+            let target = CellId::advice(0, 0);
+            let other = CellId::advice(1, 0);
+            let mut context = prepare_privacy_analysis::<Fr, _, _>(
+                &ExampleCircuit::<CASE>::default(),
+                4,
+                &input(None),
+                [target.clone(), other.clone()],
+            )
+            .unwrap();
+            assert_eq!(
+                check_sat(&mut context).0.unwrap(),
+                Satisfiability::Satisfiable
+            );
+            let options = PrivacyAnalysisOptions {
+                max_semantic_queries: 1,
+                solver_timeout_ms: Some(2_000),
+                ..PrivacyAnalysisOptions::fast_probe_only()
+            };
+            let (_, original) = original_context(
+                &mut context.analyzer,
+                &context.analyzer_input,
+                &context.problem,
+                &context.private_cells,
+                &options,
+            )
+            .unwrap();
+            let (facts, values) = initialize_knowledge(&context.problem, &context.public_values);
+            let mut search = RecoverySearchState::initialize_search(&facts, &values);
+            let knowledge = propagate_to_fixpoint(&context.problem, facts, values, &mut search);
+            let search_facts = established_search_facts(
+                original.as_ref(),
+                &context.analyzer,
+                &knowledge.value_facts,
+            )
+            .unwrap();
+            let model = original
+                .as_ref()
+                .unwrap()
+                .query_candidate_with_search_facts::<Fr>(
+                    &target,
+                    &UcpValueDomain::exact(seed.into()),
+                    Some(2_000),
+                    &search_facts,
+                    &BTreeSet::from([target.clone(), other.clone()]),
+                )
+                .unwrap();
+            assert_eq!(model.sat, Satisfiability::Satisfiable);
+            // A kezdőminta forrása tényleges teljes SAT-vizsgálat, nem a teszttanú.
+            let mut evidence = RecoveryEvidence::default();
+            evidence
+                .remember_feasible_samples(
+                    &target,
+                    [model.samples[&target].clone()],
+                    &context.problem.field_modulus,
+                )
+                .unwrap();
+            let private_set = context.private_cells.iter().cloned().collect();
+            let mut query = SnapshotRecoveryProbe;
+            let before = crate::smt_solver::process::invocation_count();
+            let recovered = RecoveryOperations {
+                analyzer: &mut context.analyzer,
+                analyzer_input: &context.analyzer_input,
+                original: original.as_ref(),
+                search_facts: &search_facts,
+                modulus: &context.problem.field_modulus,
+                knowledge: &knowledge,
+                smt_domain_reference: &context.problem.initial_value_facts,
+                options: &options,
+                search: &mut search,
+                private_set: &private_set,
+                query: &mut query,
+            }
+            .fast_probe(&target, &evidence)
+            .unwrap();
+            assert_eq!(crate::smt_solver::process::invocation_count() - before, 1);
+            assert_eq!(
+                recovered
+                    .checks
+                    .iter()
+                    .map(|check| check.calls)
+                    .sum::<usize>(),
+                1
+            );
+            assert_eq!(search.total_queries(), 1);
+            assert_eq!(recovered.unique, unique);
+            assert_eq!(recovered.non_unique, !unique);
+            if unique {
+                assert_eq!(recovered.domain, Some(UcpValueDomain::exact(seed.into())));
+            } else {
+                assert!(recovered.domain.is_none());
+                assert!(recovered.model_samples.contains_key(&other));
+            }
+            assert_eq!(evidence.samples(&target), BTreeSet::from([seed.into()]));
+        }
+        check::<BOOLEAN>(0, false);
+        check::<EXPANDED>(1, true);
+    }
 
     // A teszt két advice cellával különíti el a visszaállítást, a nemegyértelműséget és a szerkezeti korlátot.
     #[derive(Clone, Default)]
@@ -1346,7 +1927,15 @@ mod tests {
                         s + n - public.unwrap(),
                     ],
                     BOOLEAN => vec![boolean(s)],
+                    TERNARY => vec![
+                        s.clone()
+                            * (s.clone() - one.clone())
+                            * (s - Expression::Constant(Fr::from(2))),
+                    ],
                     TWO_BOOLEANS => vec![boolean(s), boolean(n)],
+                    CORRELATED_BOOLEANS => {
+                        vec![boolean(s.clone()), boolean(n.clone()), s + n - one]
+                    }
                     EXPANDED | MANY_EXPANDED => {
                         vec![s.clone() * s.clone() - Expression::Constant(Fr::from(2)) * s + one]
                     }
@@ -1445,6 +2034,94 @@ mod tests {
     }
 
     #[test]
+    fn shared_candidate_models_complete_correlated_targets_without_extra_checks_or_ucp() {
+        let targets = [CellId::advice(0, 0), CellId::advice(1, 0)];
+        for checks in [1, 2] {
+            let report = analyze_private_recoverability::<Fr, _, _>(
+                &ExampleCircuit::<CORRELATED_BOOLEANS>::default(),
+                4,
+                &input(None),
+                targets.clone(),
+                PrivacyAnalysisOptions {
+                    max_semantic_queries: 0,
+                    solver_timeout_ms: Some(2_000),
+                    domain_refinement: PrivacyDomainRefinementOptions {
+                        max_solver_checks: checks,
+                        max_candidates_per_cell: 2,
+                    },
+                    ..PrivacyAnalysisOptions::fast_probe_only()
+                },
+            )
+            .unwrap();
+            assert_eq!(report.domain_refinement_statistics.solver_checks, checks);
+            assert_eq!(report.domain_refinement_statistics.attempted_cells, 1);
+            assert_eq!(report.search_statistics.propagation_runs, 1);
+            assert_eq!(report.summary.exact_values, 0);
+            for target in &report.cells {
+                assert_eq!(
+                    target.domain,
+                    UcpValueDomain::finite_set([0.into(), 1.into()])
+                );
+                assert_eq!(target.domain_is_complete, checks == 2);
+                assert_eq!(
+                    target.uniqueness,
+                    if checks == 2 {
+                        PrivateCellUniqueness::NonUnique
+                    } else {
+                        PrivateCellUniqueness::Unknown
+                    }
+                );
+            }
+            let shared: Vec<_> = report
+                .phases
+                .iter()
+                .filter_map(|phase| match phase {
+                    RecoveryPhase::Smt { steps, .. } => Some(steps),
+                    _ => None,
+                })
+                .flatten()
+                .flat_map(|step| step.model_samples.values())
+                .collect();
+            assert_eq!(shared.len(), 1);
+            assert_eq!(shared[0].len(), checks);
+            assert!(report.phase_report().contains("Model samples:"));
+        }
+    }
+
+    #[test]
+    fn shared_candidate_samples_do_not_create_domains_for_unbounded_targets() {
+        let report = analyze_private_recoverability::<Fr, _, _>(
+            &ExampleCircuit::<BOOLEAN>::default(),
+            4,
+            &input(None),
+            [CellId::advice(0, 0), CellId::advice(1, 0)],
+            PrivacyAnalysisOptions {
+                max_semantic_queries: 0,
+                solver_timeout_ms: Some(2_000),
+                domain_refinement: PrivacyDomainRefinementOptions {
+                    max_solver_checks: 2,
+                    max_candidates_per_cell: 2,
+                },
+                ..PrivacyAnalysisOptions::fast_probe_only()
+            },
+        )
+        .unwrap();
+        let unbounded = report
+            .cells
+            .iter()
+            .find(|target| target.cell == CellId::advice(1, 0))
+            .unwrap();
+        assert!(unbounded.domain.is_none());
+        assert!(!unbounded.domain_is_complete);
+        assert_eq!(report.search_statistics.propagation_runs, 1);
+        assert!(report.phases.iter().any(|phase| matches!(
+            phase,
+            RecoveryPhase::Smt { steps, .. }
+                if steps.iter().any(|step| step.model_samples.contains_key(&unbounded.cell))
+        )));
+    }
+
+    #[test]
     fn operation_fast_probes_return_evidence_until_the_common_merge() {
         fn check<const CASE: u8>(refine: bool, timeout: bool) {
             let cell = CellId::advice(0, 0);
@@ -1466,24 +2143,26 @@ mod tests {
             let mut domains = DomainRefinementState::new(Default::default());
             let mut discovery = DomainDiscoveryState::new(Default::default());
             let mut evidence = RecoveryEvidence::default();
-            let exact = PrivateSearchExactFacts::default();
+            let facts = PrivateSearchFacts::default();
             let targets = HashSet::from([cell.clone()]);
-            let options = PrivacyAnalysisOptions::default();
+            let options = PrivacyAnalysisOptions::fast_probe_only();
             let mut calls = 0;
-            let mut query = |analyzer: &mut Analyzer<Fr>, input: &AnalyzerInput, cell: &CellId| {
-                calls += 1;
-                if timeout {
-                    Err(unknown_error(Some("TIMEOUT")))
-                } else {
-                    analyzer.query_ucp_cell_uniqueness_with_value(input, cell)
-                }
-            };
+            let mut query = LegacyRecoveryProbe(
+                |analyzer: &mut Analyzer<Fr>, input: &AnalyzerInput, cell: &CellId| {
+                    calls += 1;
+                    if timeout {
+                        Err(unknown_error(Some("TIMEOUT")))
+                    } else {
+                        analyzer.query_ucp_cell_uniqueness_with_value(input, cell)
+                    }
+                },
+            );
             let recovered = {
                 let mut operations = RecoveryOperations {
                     analyzer: &mut context.analyzer,
                     analyzer_input: &context.analyzer_input,
                     original: None,
-                    exact_facts: &exact,
+                    search_facts: &facts,
                     modulus: &context.problem.field_modulus,
                     knowledge: &knowledge,
                     smt_domain_reference: &context.problem.initial_value_facts,
@@ -1500,7 +2179,12 @@ mod tests {
                         &evidence,
                     )
                 } else {
-                    operations.discover_domain(&cell, RecoveryStrategy::FastProbe, &mut discovery)
+                    operations.discover_domain(
+                        &cell,
+                        RecoveryStrategy::FastProbe,
+                        &mut discovery,
+                        &evidence,
+                    )
                 }
             }
             .unwrap();
@@ -1660,7 +2344,7 @@ mod tests {
             PrivacyAnalysisOptions {
                 compute_structural_baseline: true,
                 max_semantic_queries: budget,
-                ..PrivacyAnalysisOptions::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap()
@@ -1730,7 +2414,7 @@ mod tests {
             [CellId::advice(0, 0), CellId::advice(1, 0)],
             PrivacyAnalysisOptions {
                 max_semantic_queries: 1,
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap();
@@ -1764,6 +2448,12 @@ mod tests {
         assert!(text.find("1. UCP").unwrap() < text.find("1. SMT").unwrap());
         assert!(text.find("1. SMT").unwrap() < text.find("2. UCP").unwrap());
         assert!(text.contains("UCP restart scheduled"));
+        let smt_summary = text
+            .lines()
+            .skip_while(|line| !line.starts_with("1. SMT"))
+            .find(|line| line.starts_with("  Targets:"))
+            .unwrap();
+        assert!(smt_summary.ends_with("New: 1 exact, 0 new/refined domains."));
     }
 
     #[test]
@@ -1773,7 +2463,7 @@ mod tests {
             4,
             &input(None),
             [CellId::advice(0, 0)],
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
         )
         .unwrap();
         let [RecoveryPhase::Ucp { counts, .. }, RecoveryPhase::Smt {
@@ -1799,6 +2489,13 @@ mod tests {
         assert!(!report.phase_report().contains("2. UCP"));
         assert!(report.phase_report().contains("non-unique proven"));
         assert!(report.phase_report().contains("complete domain"));
+        let text = report.phase_report();
+        let smt_summary = text
+            .lines()
+            .skip_while(|line| !line.starts_with("1. SMT"))
+            .find(|line| line.starts_with("  Targets:"))
+            .unwrap();
+        assert!(smt_summary.ends_with("New: 0 exact, 0 new/refined domains."));
     }
 
     #[test]
@@ -1818,7 +2515,7 @@ mod tests {
                 context,
                 PrivacyAnalysisOptions {
                     compute_structural_baseline: enabled,
-                    ..Default::default()
+                    ..PrivacyAnalysisOptions::fast_probe_only()
                 },
                 Instant::now(),
                 |context| check_sat_with_witness(context, &circuit, 4),
@@ -1874,7 +2571,7 @@ mod tests {
             context,
             PrivacyAnalysisOptions {
                 compute_structural_baseline: true,
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             Instant::now(),
             |_| (Ok(Satisfiability::Unsatisfiable), 1),
@@ -1900,7 +2597,7 @@ mod tests {
         let mut calls = 0;
         let report = recover_private_inputs(
             context,
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
             Instant::now(),
             check_sat,
             |analyzer, input, cell| {
@@ -1951,7 +2648,7 @@ mod tests {
         let options = PrivacyAnalysisOptions {
             compute_structural_baseline: true,
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         };
         context
             .analyzer
@@ -2060,7 +2757,7 @@ mod tests {
             4,
             &input(Some(100)),
             targets.clone(),
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
         )
         .unwrap();
         assert_eq!(report.summary.non_unique_cells, 2);
@@ -2075,7 +2772,7 @@ mod tests {
             4,
             &input(Some(100)),
             targets,
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
         )
         .unwrap();
         assert_eq!(report.cells, other.cells);
@@ -2505,7 +3202,7 @@ mod tests {
             targets.clone(),
             PrivacyAnalysisOptions {
                 compute_structural_baseline: true,
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap();
@@ -2537,7 +3234,7 @@ mod tests {
                 4,
                 &unsupported,
                 targets.clone(),
-                PrivacyAnalysisOptions::default(),
+                PrivacyAnalysisOptions::fast_probe_only(),
             )
             .unwrap_err();
             assert_eq!(
@@ -2581,7 +3278,7 @@ mod tests {
                     max_queries_without_progress: 1,
                     ..Default::default()
                 },
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             |analyzer, input, cell| {
                 visited.push(cell.clone());
@@ -2622,7 +3319,7 @@ mod tests {
             vec![target.clone()],
             PrivacyAnalysisOptions {
                 max_semantic_queries: 1,
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             |analyzer, input, cell| {
                 assert_eq!(cell, &target);
@@ -2643,7 +3340,7 @@ mod tests {
             vec![target.clone()],
             PrivacyAnalysisOptions {
                 max_semantic_queries: 2,
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             |_, _, cell| {
                 visited.push(cell.clone());
@@ -2682,12 +3379,12 @@ mod tests {
                     max_solver_checks: 3,
                     max_candidates_per_cell: 2,
                 },
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap();
         assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
-        assert_eq!(report.domain_refinement_statistics.solver_checks, 3);
+        assert_eq!(report.domain_refinement_statistics.solver_checks, 2);
         assert_eq!(report.summary.non_unique_cells, 1);
         assert_eq!(report.search_statistics.propagation_runs, 1);
         let query = std::fs::read_to_string("src/output/private_domain_refinement.smt2").unwrap();
@@ -2703,7 +3400,7 @@ mod tests {
     #[test]
     fn inconclusive_internal_refinement_probe_falls_back_without_repeating_it() {
         let mut attempts = 0;
-        let report = search_report::<BOOLEAN>(
+        let report = search_report::<TERNARY>(
             vec![CellId::advice(0, 0)],
             PrivacyAnalysisOptions {
                 max_semantic_queries: 100,
@@ -2715,9 +3412,9 @@ mod tests {
                 },
                 domain_refinement: PrivacyDomainRefinementOptions {
                     max_solver_checks: 3,
-                    max_candidates_per_cell: 2,
+                    max_candidates_per_cell: 3,
                 },
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             |_, _, _| {
                 attempts += 1;
@@ -2733,7 +3430,7 @@ mod tests {
         assert_eq!(report.search_statistics.propagation_runs, 1);
         assert_eq!(
             validate_private_recovery_report::<Fr, _>(
-                &ExampleCircuit::<BOOLEAN>::default(),
+                &ExampleCircuit::<TERNARY>::default(),
                 4,
                 &input(None),
                 &report,
@@ -2746,7 +3443,7 @@ mod tests {
 
     #[test]
     fn unchanged_refinements_advance_to_other_cells_without_repeating_propagation() {
-        for checks in [4, 6] {
+        for checks in [3, 4] {
             let report = search_report::<TWO_BOOLEANS>(
                 vec![CellId::advice(0, 0), CellId::advice(1, 0)],
                 PrivacyAnalysisOptions {
@@ -2756,34 +3453,25 @@ mod tests {
                         max_solver_checks: checks,
                         max_candidates_per_cell: 2,
                     },
-                    ..Default::default()
+                    ..PrivacyAnalysisOptions::fast_probe_only()
                 },
                 |_, _, _| panic!("Refinement must not consume semantic queries"),
             );
             assert_eq!(report.search_statistics.propagation_runs, 1);
             // Az első, publikus adatokkal indított propagáció önmagában új szerkezeti domaineket tanul.
             assert_eq!(report.search_statistics.progress_rounds, 1);
-            assert_eq!(report.domain_refinement_statistics.attempted_cells, 2);
-            assert_eq!(report.domain_refinement_statistics.solver_checks, checks);
+            // A második cella modellmintái legalább egy külön jelöltkérdést megtakarítanak.
+            assert!((1..=2).contains(&report.domain_refinement_statistics.attempted_cells));
+            assert!((2..=3).contains(&report.domain_refinement_statistics.solver_checks));
             assert_eq!(report.semantic_queries, 0);
-            assert_eq!(
-                report.summary.non_unique_cells,
-                if checks == 6 { 2 } else { 1 }
-            );
-            assert_eq!(
-                report.status,
-                if checks == 6 {
-                    PrivacyAnalysisStatus::Analyzed
-                } else {
-                    PrivacyAnalysisStatus::QueryLimitReached
-                }
-            );
+            assert_eq!(report.summary.non_unique_cells, 2);
+            assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
             for cell in &report.cells {
                 assert_eq!(
                     cell.domain,
                     UcpValueDomain::finite_set([0.into(), 1.into()])
                 );
-                assert!(cell.domain_refinement.is_some());
+                assert!(cell.domain_is_complete);
             }
         }
     }
@@ -2803,7 +3491,7 @@ mod tests {
                         max_queries_without_progress: 1,
                         ..Default::default()
                     },
-                    ..Default::default()
+                    ..PrivacyAnalysisOptions::fast_probe_only()
                 },
                 |analyzer, input, cell| analyzer.query_ucp_cell_uniqueness_with_value(input, cell),
             );
@@ -2832,7 +3520,7 @@ mod tests {
         let mut visited = Vec::new();
         let report = search_report::<TWO_EXPANDED>(
             vec![secret.clone(), nonce.clone()],
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
             |analyzer, input, cell| {
                 visited.push(cell.clone());
                 if visited.len() == 1 {
@@ -2877,7 +3565,7 @@ mod tests {
                     retry_solver_timeout_ms: Some(2_000),
                     ..Default::default()
                 },
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             |analyzer, input, cell| {
                 timeouts.push(analyzer.smt_timeout_ms());
@@ -2908,7 +3596,7 @@ mod tests {
                         retry_solver_timeout_ms: Some(2_000),
                         ..Default::default()
                     },
-                    ..Default::default()
+                    ..PrivacyAnalysisOptions::fast_probe_only()
                 },
                 |_, _, _| Ok(result.into()),
             );
@@ -2942,7 +3630,7 @@ mod tests {
                     max_queries_without_progress: 0,
                     ..Default::default()
                 },
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             |_, _, _| Err(unknown_error(Some("TIMEOUT"))),
         );
@@ -2989,7 +3677,7 @@ mod tests {
                 max_solver_checks: 10,
                 max_candidates_per_cell: 2,
             },
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         };
         let private_set = HashSet::from([target.clone()]);
         let mut domains = DomainRefinementState::new(options.domain_refinement);
@@ -3070,7 +3758,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(actions(&result, &search, &mut domains).is_empty());
-        assert_eq!(domains.statistics.solver_checks, 5);
+        assert_eq!(domains.statistics.solver_checks, 4);
         assert_eq!(domains.statistics.attempted_cells, 1);
     }
 
@@ -3126,7 +3814,7 @@ mod tests {
                     retry_solver_timeout_ms: Some(0),
                     ..Default::default()
                 },
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap_err();
@@ -3146,7 +3834,7 @@ mod tests {
             6,
             &input(None),
             (0..40).map(|row| CellId::advice(0, row)),
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
         )
         .unwrap();
         assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
@@ -3166,7 +3854,7 @@ mod tests {
         let circuit = ExampleCircuit::<LINEAR>::default();
         let options = PrivacyAnalysisOptions {
             solver_timeout_ms: Some(10_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         };
         let report = analyze_private_recoverability::<Fr, _, _>(
             &circuit,
@@ -3222,7 +3910,7 @@ mod tests {
             let options = PrivacyAnalysisOptions {
                 initial_sat_timeout_ms: Some(60_000),
                 solver_timeout_ms: Some(2_000),
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             };
             let mut queried = false;
             let report = recover_private_inputs(
@@ -3275,7 +3963,7 @@ mod tests {
             [CellId::advice(0, 0)],
             PrivacyAnalysisOptions {
                 initial_sat_timeout_ms: Some(0),
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap_err();
@@ -3296,7 +3984,7 @@ mod tests {
             let mut checks = 0;
             let report = recover_private_inputs(
                 context,
-                PrivacyAnalysisOptions::default(),
+                PrivacyAnalysisOptions::fast_probe_only(),
                 Instant::now(),
                 |_| {
                     checks += 1;
@@ -3357,7 +4045,7 @@ mod tests {
                         max_solver_checks: 3,
                         max_candidates_per_cell: 2,
                     },
-                    ..Default::default()
+                    ..PrivacyAnalysisOptions::fast_probe_only()
                 },
                 Instant::now(),
                 |_| (Err(unknown_error(reason)), 2),
@@ -3395,7 +4083,7 @@ mod tests {
         .unwrap();
         let report = recover_private_inputs(
             context,
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
             Instant::now(),
             check_sat,
             |_, _, _| Err(unknown_error(Some("TIMEOUT"))),
@@ -3435,7 +4123,7 @@ mod tests {
             .mark_unique(CellId::advice(0, 0));
         let report = recover_private_inputs(
             context,
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
             Instant::now(),
             check_sat,
             |_, _, _| Err(unknown_error(Some("TIMEOUT"))),
@@ -3470,7 +4158,7 @@ mod tests {
             context,
             PrivacyAnalysisOptions {
                 max_semantic_queries: 0,
-                ..PrivacyAnalysisOptions::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
             Instant::now(),
             check_sat,
@@ -3501,7 +4189,7 @@ mod tests {
         .unwrap();
         assert!(recover_private_inputs(
             context,
-            PrivacyAnalysisOptions::default(),
+            PrivacyAnalysisOptions::fast_probe_only(),
             Instant::now(),
             check_sat,
             |_, _, _| Err(anyhow::anyhow!("invalid solver response")),

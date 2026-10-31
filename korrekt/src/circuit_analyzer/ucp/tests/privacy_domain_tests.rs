@@ -7,9 +7,7 @@ use super::{
         analyze_private_recoverability, prepare_privacy_analysis, PrivacyAnalysisOptions,
         PrivacyAnalysisReport, PrivacyAnalysisStatus, PrivateCellUniqueness, RecoveryLimitation,
     },
-    privacy_domain::{
-        DomainRefinementState, PrivacyDomainRefinementOptions, PrivateDomainRefinementStatus,
-    },
+    privacy_domain::{PrivacyDomainRefinementOptions, PrivateDomainRefinementStatus},
     privacy_validation::{validate_private_recovery_report, RecoveryValidationStatus},
     value::{UcpValueDomain, UcpValueFacts},
 };
@@ -52,7 +50,7 @@ fn options(checks: usize) -> PrivacyAnalysisOptions {
             max_solver_checks: checks,
             max_candidates_per_cell: 16,
         },
-        ..Default::default()
+        ..PrivacyAnalysisOptions::fast_probe_only()
     }
 }
 
@@ -245,11 +243,11 @@ fn finite_projection_recovers_two_values_then_ucp_recovers_a_different_cell() {
     assert!(report.cells[1].domain_refinement.is_none()); // Derived by UCP, not an SMT cell query.
     assert_eq!(report.semantic_queries, 0);
     assert_eq!(report.search_statistics.unqueried_targets, 0);
-    assert_eq!(report.domain_refinement_statistics.solver_checks, 17);
+    assert_eq!(report.domain_refinement_statistics.solver_checks, 16);
     assert_eq!(report.domain_refinement_statistics.removed_candidates, 14);
     assert_eq!(report.domain_refinement_statistics.complete_domains, 1);
-    assert_eq!(report.search_statistics.propagation_runs, 2);
-    // The refinement and its UCP consequences arrive in the same next fixed-point round.
+    assert_eq!(report.search_statistics.propagation_runs, 3);
+    // Az 5 kizárása után már propagál, majd a végső kételemű domain után ismét fixpontot számol.
     assert!(report.search_statistics.progress_rounds >= 1);
     assert_eq!(
         validate_private_recovery_report::<Fr, _>(
@@ -271,17 +269,18 @@ fn finite_projection_recovers_two_values_then_ucp_recovers_a_different_cell() {
 
 #[test]
 fn partial_refinement_preserves_unchecked_values_and_reports_its_cost() {
-    let report = analyze::<false>(3, 21, 4); // Coverage + rejection of 0,1,2; all other values remain.
+    let report = analyze::<false>(3, 21, 4); // Az 5 kizárása után a 0, 1 és 2 jelöltet vizsgálja.
     assert_eq!(
         report.cells[0].domain,
-        UcpValueDomain::finite_set((3..16).map(BigInt::from))
+        UcpValueDomain::finite_set((3..16).filter(|value| *value != 5).map(BigInt::from))
     );
-    assert_eq!(report.cells[1].domain, None);
-    assert!(report.cells.iter().all(|cell| !cell.domain_is_complete));
+    assert_eq!(report.cells[1].domain, Some(candidates(&[0])));
+    assert!(!report.cells[0].domain_is_complete);
+    assert!(report.cells[1].domain_is_complete);
     let evidence = report.cells[0].domain_refinement.as_ref().unwrap();
     assert_eq!(evidence.status, PrivateDomainRefinementStatus::Partial);
     assert_eq!(evidence.feasible_candidates, 0);
-    assert_eq!(evidence.unresolved_candidates, 13);
+    assert_eq!(evidence.unresolved_candidates, 12);
     assert_eq!(evidence.limitation, Some(RecoveryLimitation::QueryLimit));
     assert_eq!(report.domain_refinement_statistics.solver_checks, 4);
     assert!(report.domain_refinement_statistics.budget_exhausted);
@@ -319,7 +318,7 @@ fn a_newly_small_domain_is_refined_in_the_next_ucp_round_under_the_same_total_ca
     MockProver::run(K, &circuit, vec![vec![Fr::from(21)]])
         .unwrap()
         .assert_satisfied();
-    for checks in [18, 22] {
+    for checks in [17, 18] {
         let report = analyze_private_recoverability::<Fr, _, _>(
             &circuit,
             K,
@@ -329,9 +328,9 @@ fn a_newly_small_domain_is_refined_in_the_next_ucp_round_under_the_same_total_ca
         )
         .unwrap();
         assert_eq!(report.cells[0].domain, Some(candidates(&[3, 7])));
-        let complete = checks == 22;
-        // d=s+offset starts with 17 candidates, above the configured per-cell cap of 16.
-        // Refining s makes d eligible; these four values still need feasibility checks.
+        let complete = checks == 18;
+        // A 17 elemű kezdeti d-domain csak s szűkítése után válik vizsgálhatóvá.
+        // Az s két SAT-modellje d két értékét már igazolja, így csak két új ellenőrzés szükséges.
         assert_eq!(report.cells[1].domain, Some(candidates(&[3, 4, 7, 8])));
         assert_eq!(report.domain_refinement_statistics.solver_checks, checks);
         assert_eq!(report.domain_refinement_statistics.attempted_cells, 2);
@@ -368,7 +367,7 @@ fn finite_refinement_can_recover_an_exact_private_input_then_propagate_it() {
     assert_eq!(report.cells[0].uniqueness, PrivateCellUniqueness::Unique);
     assert_eq!(report.cells[1].domain, Some(candidates(&[0])));
     assert_eq!(report.summary.exact_values, 2);
-    assert_eq!(report.search_statistics.propagation_runs, 2);
+    assert_eq!(report.search_statistics.propagation_runs, 3);
     assert_eq!(
         report.cells[0].domain_refinement.as_ref().unwrap().status,
         PrivateDomainRefinementStatus::Complete
@@ -437,7 +436,7 @@ fn original_snapshot_is_not_strengthened_by_later_inferred_assertions_or_other_c
 }
 
 #[test]
-fn a_forged_covering_domain_is_rejected_without_circular_candidate_assumptions() {
+fn independent_coverage_check_rejects_a_forged_domain_without_circular_assumptions() {
     let mut context = prepare_privacy_analysis::<Fr, _, _>(
         &FiniteProjectionCircuit::<false>::new(3),
         K,
@@ -450,18 +449,13 @@ fn a_forged_covering_domain_is_rejected_without_circular_candidate_assumptions()
         .original_private_query_context(&context.analyzer_input, &context.private_cells)
         .unwrap();
     let secret = context.private_cells[0].clone();
-    let mut values = UcpValueFacts::new();
-    values.mark_domain(secret.clone(), candidates(&[3, 4])); // Feasible 7 is deliberately omitted.
-    let mut state = DomainRefinementState::new(options(3).domain_refinement);
-    let result = state.refine_next(
-        &[secret],
-        &context.problem,
-        &context
-            .problem
-            .analyze_with_values(context.problem.initial_facts.clone(), values),
-        |cell, domain, exclude| original.check_membership::<Fr>(cell, domain, exclude, Some(2_000)),
+    // A hamis {3,4} állításból hiányzik a megvalósítható 7; a független ellenőrzés nem feltételezi az állítást.
+    assert_eq!(
+        original
+            .check_membership::<Fr>(&secret, &candidates(&[3, 4]), true, Some(2_000))
+            .unwrap(),
+        Satisfiability::Satisfiable
     );
-    assert!(result.unwrap_err().to_string().contains("does not cover"));
 }
 
 #[derive(Clone)]
@@ -544,10 +538,10 @@ fn refinement_priority_recovers_a_dependent_cell_before_spending_the_budget_on_a
         CellId::advice(2, 0),
     ];
     let report =
-        analyze_private_recoverability::<Fr, _, _>(&circuit, K, &input, targets, options(4))
+        analyze_private_recoverability::<Fr, _, _>(&circuit, K, &input, targets, options(3))
             .unwrap();
     assert_eq!(report.status, PrivacyAnalysisStatus::QueryLimitReached);
-    assert_eq!(report.domain_refinement_statistics.solver_checks, 4);
+    assert_eq!(report.domain_refinement_statistics.solver_checks, 3);
     assert_eq!(report.domain_refinement_statistics.attempted_cells, 1);
     assert_eq!(report.semantic_queries, 0);
     assert_eq!(report.search_statistics.propagation_runs, 2);
@@ -614,7 +608,7 @@ fn shared_semantic_samples_save_two_refinement_solver_invocations() {
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
     assert_eq!(report.cells[0].domain, Some(candidates(&[3, 7])));
     assert_eq!(report.semantic_queries, 1);
-    assert_eq!(report.domain_refinement_statistics.solver_checks, 15);
+    assert_eq!(report.domain_refinement_statistics.solver_checks, 14);
     assert_eq!(
         report.cells[0]
             .domain_refinement
@@ -642,7 +636,7 @@ fn domain_refinement_can_use_a_non_target_bridge_without_exceeding_its_allowance
         },
         lookup_method: LookupMethod::InlineConstraints,
     };
-    for allowance in [3, 4] {
+    for allowance in [2, 3] {
         let mut options = options(4);
         options.search.max_bridge_queries = allowance;
         let report = analyze_private_recoverability::<Fr, _, _>(
@@ -655,9 +649,9 @@ fn domain_refinement_can_use_a_non_target_bridge_without_exceeding_its_allowance
         .unwrap();
         assert_eq!(report.semantic_queries, 0);
         assert!(report.search_statistics.bridge_domain_checks <= allowance);
-        if allowance == 4 {
+        if allowance == 3 {
             assert_eq!(report.cells[0].domain, Some(candidates(&[0])));
-            assert_eq!(report.search_statistics.bridge_domain_checks, 4);
+            assert_eq!(report.search_statistics.bridge_domain_checks, 3);
             assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
             assert_eq!(
                 validate_private_recovery_report::<Fr, _>(&circuit, K, &input, &report)
@@ -829,5 +823,5 @@ fn finite_refinement_preserves_full_lookup_tuple_correlations() {
     assert_eq!(report.cells[1].domain, Some(candidates(&[0])));
     assert!(report.cells[0].domain_is_complete);
     // Tuple propagation removes two infeasible candidates before SMT feasibility checks.
-    assert_eq!(report.domain_refinement_statistics.solver_checks, 3);
+    assert_eq!(report.domain_refinement_statistics.solver_checks, 2);
 }

@@ -314,7 +314,7 @@ fn external_poseidon_publication_control_recovers_private_message() {
         PrivacyAnalysisOptions {
             max_semantic_queries: 0,
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();
@@ -352,7 +352,7 @@ fn probe<C: Circuit<Fr>>(id: &str, circuit: &C, input: &AnalyzerInput, expect_re
         PrivacyAnalysisOptions {
             max_semantic_queries: 2,
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();

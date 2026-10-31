@@ -105,7 +105,7 @@ fn options() -> PrivacyAnalysisOptions {
         max_semantic_queries: 0,
         solver_timeout_ms: Some(2_000),
         initial_sat_timeout_ms: Some(2_000),
-        ..Default::default()
+        ..PrivacyAnalysisOptions::fast_probe_only()
     }
 }
 

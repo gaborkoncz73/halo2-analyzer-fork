@@ -168,24 +168,30 @@ pub(crate) struct OriginalPrivateQueryContext {
     targeted_subsets: BTreeMap<CellId, (String, usize)>,
 }
 
-/// Only entailed Exact facts from the recovery state, never candidate domains or model samples.
+const MAX_SEARCH_DOMAIN_SIZE: usize = 16;
+const MAX_SEARCH_DOMAIN_VALUES: usize = 512;
+
+/// A recovery állapotából igazolt pontos értékeket és kis lefedő domaineket tárol, modellmintákat nem.
 #[derive(Default)]
-pub(crate) struct PrivateSearchExactFacts {
-    values: BTreeMap<String, BigInt>,
+pub(crate) struct PrivateSearchFacts {
+    domains: BTreeMap<String, BTreeSet<BigInt>>,
+}
+
+pub(crate) struct PrivateModelQuery {
+    pub sat: Satisfiability,
+    /// Egyetlen teljes kielégítő modell cellánkénti vetületeit adja át, nem pontosérték-tényeket.
+    pub samples: BTreeMap<CellId, BigInt>,
 }
 
 impl OriginalPrivateQueryContext {
-    /// The caller supplies sound Delta facts established under this snapshot's observations.
-    pub(crate) fn search_exact_facts<F: AnalyzableField>(
+    /// A hívó az eredeti megfigyelések mellett levezetett, helyes Delta-domaineket adja át.
+    pub(crate) fn search_facts<F: AnalyzableField>(
         &self,
         analyzer: &Analyzer<F>,
         values: &UcpValueFacts,
-    ) -> Result<PrivateSearchExactFacts> {
-        let mut exact = PrivateSearchExactFacts::default();
+    ) -> Result<PrivateSearchFacts> {
+        let mut domains = BTreeMap::<String, BTreeSet<BigInt>>::new();
         for (cell, domain) in values.domains() {
-            let UcpValueDomain::Exact(value) = domain else {
-                continue;
-            };
             if cell.kind != CellKind::Advice {
                 continue;
             }
@@ -195,28 +201,72 @@ impl OriginalPrivateQueryContext {
             if !self.variables.contains(&variable) {
                 continue;
             }
-            let value = normalize_field_value(value.clone(), &self.prime)
-                .context("Exact search fact exceeds field representation limits")?;
-            if let Some(previous) = exact.values.insert(variable, value.clone()) {
-                if previous != value {
-                    return Err(anyhow!("Conflicting exact facts for copied SMT cells"));
+            let canonical = match domain {
+                UcpValueDomain::Exact(value) => {
+                    BTreeSet::from([normalize_field_value(value.clone(), &self.prime)
+                        .context("Exact search fact exceeds field representation limits")?])
                 }
+                UcpValueDomain::FiniteSet(entries) => {
+                    if entries.len() > MAX_SEARCH_DOMAIN_SIZE {
+                        continue;
+                    }
+                    entries
+                        .iter()
+                        .map(|value| normalize_field_value(value.clone(), &self.prime))
+                        .collect::<Option<BTreeSet<_>>>()
+                        .context("Search domain exceeds field representation limits")?
+                }
+            };
+            if canonical.is_empty() {
+                return Err(anyhow!("Empty established search domain"));
+            }
+            // A másolt cellák domainjeit mezőbeli normalizálás után, közös SMT-név alatt metszi.
+            if let Some(previous) = domains.get_mut(&variable) {
+                previous.retain(|value| canonical.contains(value));
+                if previous.is_empty() {
+                    return Err(anyhow!("Conflicting search facts for copied SMT cells"));
+                }
+            } else {
+                domains.insert(variable, canonical);
             }
         }
-        Ok(exact)
+        let (exact, mut finite): (Vec<_>, Vec<_>) = domains
+            .into_iter()
+            .partition(|(_, entries)| entries.len() == 1);
+        finite.sort_by(|(left, a), (right, b)| a.len().cmp(&b.len()).then_with(|| left.cmp(right)));
+        let mut facts = PrivateSearchFacts {
+            domains: exact.into_iter().collect(),
+        };
+        let mut remaining = MAX_SEARCH_DOMAIN_VALUES;
+        for (variable, entries) in finite {
+            // Az egész többértékű domaint hagyja ki, ha nem fér a többletállítások keretébe.
+            if entries.len() <= remaining {
+                remaining -= entries.len();
+                facts.domains.insert(variable, entries);
+            }
+        }
+        Ok(facts)
     }
 
-    fn write_search_exact_facts<F: AnalyzableField, W: Write>(
+    fn write_search_facts<F: AnalyzableField, W: Write>(
         &self,
         printer: &mut Printer<'_, W>,
         target: &str,
-        exact: &PrivateSearchExactFacts,
+        facts: &PrivateSearchFacts,
     ) {
-        for (variable, value) in &exact.values {
-            // Canonical names also exclude copy aliases of the queried cell.
+        for (variable, entries) in &facts.domains {
+            // A cél saját domainjét és másolati aliasait nem használja a célra vonatkozó kérdés premisszájaként.
             if variable != target {
+                let equalities: Vec<_> = entries
+                    .iter()
+                    .map(|value| Analyzer::<F>::smt_field_equality(variable, value, &self.prime))
+                    .collect();
                 printer.write_assert_bool(
-                    Analyzer::<F>::smt_field_equality(variable, value, &self.prime),
+                    if equalities.len() == 1 {
+                        equalities[0].clone()
+                    } else {
+                        format!("(or {})", equalities.join(" "))
+                    },
                     Operation::And,
                 );
             }
@@ -285,21 +335,21 @@ impl OriginalPrivateQueryContext {
         blocked_values: &BTreeSet<BigInt>,
         timeout_ms: Option<u64>,
     ) -> Result<Option<BigInt>> {
-        self.query_unseen_value_with_exact_facts::<F>(
+        self.query_unseen_value_with_search_facts::<F>(
             cell,
             blocked_values,
             timeout_ms,
-            &PrivateSearchExactFacts::default(),
+            &PrivateSearchFacts::default(),
         )
     }
 
-    /// Search acceleration only: exact facts must already follow from the original C AND P.
-    pub(crate) fn query_unseen_value_with_exact_facts<F: AnalyzableField>(
+    /// Csak az eredeti C és P következményeit használja fel keresési gyorsításként.
+    pub(crate) fn query_unseen_value_with_search_facts<F: AnalyzableField>(
         &self,
         cell: &CellId,
         blocked_values: &BTreeSet<BigInt>,
         timeout_ms: Option<u64>,
-        exact: &PrivateSearchExactFacts,
+        facts: &PrivateSearchFacts,
     ) -> Result<Option<BigInt>> {
         let expression = self
             .expressions
@@ -309,7 +359,7 @@ impl OriginalPrivateQueryContext {
         let mut file = File::create(path).context("Failed to create domain discovery file")?;
         file.write_all(self.smt.as_bytes())?;
         let mut printer = Printer::new(&mut file);
-        self.write_search_exact_facts::<F, _>(&mut printer, expression, exact);
+        self.write_search_facts::<F, _>(&mut printer, expression, facts);
         for value in blocked_values {
             printer.write_assert_bool(
                 format!(
@@ -351,6 +401,7 @@ impl OriginalPrivateQueryContext {
     }
 
     /// A separate file per check prevents candidate assumptions from accumulating.
+    #[cfg(test)]
     pub(crate) fn check_membership<F: AnalyzableField>(
         &self,
         cell: &CellId,
@@ -358,33 +409,177 @@ impl OriginalPrivateQueryContext {
         exclude: bool,
         timeout_ms: Option<u64>,
     ) -> Result<Satisfiability> {
-        self.check_membership_with_exact_facts::<F>(
+        self.check_membership_with_search_facts::<F>(
             cell,
             domain,
             exclude,
             timeout_ms,
-            &PrivateSearchExactFacts::default(),
+            &PrivateSearchFacts::default(),
         )
     }
 
-    pub(crate) fn check_candidate_with_exact_facts<F: AnalyzableField>(
+    #[cfg(test)]
+    pub(crate) fn check_candidate_with_search_facts<F: AnalyzableField>(
         &self,
         cell: &CellId,
         candidate: &UcpValueDomain,
         timeout_ms: Option<u64>,
-        exact: &PrivateSearchExactFacts,
+        facts: &PrivateSearchFacts,
     ) -> Result<Satisfiability> {
-        self.check_membership_with_exact_facts::<F>(cell, candidate, false, timeout_ms, exact)
+        self.check_membership_with_search_facts::<F>(cell, candidate, false, timeout_ms, facts)
     }
 
-    fn check_membership_with_exact_facts<F: AnalyzableField>(
+    pub(crate) fn query_candidate_with_search_facts<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        candidate: &UcpValueDomain,
+        timeout_ms: Option<u64>,
+        facts: &PrivateSearchFacts,
+        sample_cells: &BTreeSet<CellId>,
+    ) -> Result<PrivateModelQuery> {
+        self.membership_query_with_samples::<F>(
+            cell,
+            candidate,
+            false,
+            timeout_ms,
+            facts,
+            sample_cells,
+        )
+    }
+
+    /// Ismert megvalósítható értéknél közvetlenül annak kizárását vizsgálja; nélküle teljes modellt keres.
+    pub(crate) fn query_probe_model_with_search_facts<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        excluded: Option<&BigInt>,
+        timeout_ms: Option<u64>,
+        facts: &PrivateSearchFacts,
+        sample_cells: &BTreeSet<CellId>,
+    ) -> Result<PrivateModelQuery> {
+        // Az üres halmaz kizárása nem szűkíti a kontextust, csak a kezdő modell lekérését szolgálja.
+        let blocked = excluded.map_or_else(
+            || UcpValueDomain::FiniteSet(BTreeSet::new()),
+            |value| UcpValueDomain::exact(value.clone()),
+        );
+        self.membership_query_with_samples::<F>(
+            cell,
+            &blocked,
+            true,
+            timeout_ms,
+            facts,
+            sample_cells,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn membership_query_with_samples<F: AnalyzableField>(
         &self,
         cell: &CellId,
         domain: &UcpValueDomain,
         exclude: bool,
         timeout_ms: Option<u64>,
-        exact: &PrivateSearchExactFacts,
+        facts: &PrivateSearchFacts,
+        sample_cells: &BTreeSet<CellId>,
+    ) -> Result<PrivateModelQuery> {
+        let variables = sample_cells
+            .iter()
+            .filter(|cell| !self.constants.contains_key(*cell))
+            .map(|cell| {
+                self.expressions
+                    .get(cell)
+                    .cloned()
+                    .context("Sample cell absent from original SMT snapshot")
+            })
+            .collect::<Result<HashSet<_>>>()?;
+        let model = self.membership_model_with_search_facts::<F>(
+            cell, domain, exclude, timeout_ms, facts, &variables,
+        )?;
+        let samples = self.project_feasible_model(&model, sample_cells)?;
+        Ok(PrivateModelQuery {
+            sat: model.sat,
+            samples,
+        })
+    }
+
+    fn project_feasible_model(
+        &self,
+        model: &ModelResult,
+        cells: &BTreeSet<CellId>,
+    ) -> Result<BTreeMap<CellId, BigInt>> {
+        if model.sat != Satisfiability::Satisfiable {
+            return Ok(BTreeMap::new());
+        }
+        cells
+            .iter()
+            .map(|cell| {
+                let value = if let Some(value) = self.constants.get(cell) {
+                    value.clone()
+                } else {
+                    let expression = self
+                        .expressions
+                        .get(cell)
+                        .context("Sample cell absent from original SMT snapshot")?;
+                    let value = &model
+                        .result
+                        .get(expression)
+                        .context("Missing requested feasible SMT sample")?
+                        .value;
+                    if BigInt::from_str_radix(&value.order, 10)? != self.prime {
+                        return Err(anyhow!("Feasible SMT sample belongs to a different field"));
+                    }
+                    BigInt::from_str_radix(&value.element, 10)
+                        .context("Invalid feasible SMT sample")?
+                };
+                let value = normalize_field_value(value, &self.prime)
+                    .context("Unsupported feasible SMT sample")?;
+                Ok((cell.clone(), value))
+            })
+            .collect()
+    }
+
+    /// A keresési lefedésvizsgálat a többi cella igazolt domainjeit redundáns premisszaként használja.
+    #[cfg(test)]
+    pub(crate) fn check_coverage_with_search_facts<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        domain: &UcpValueDomain,
+        timeout_ms: Option<u64>,
+        facts: &PrivateSearchFacts,
     ) -> Result<Satisfiability> {
+        self.check_membership_with_search_facts::<F>(cell, domain, true, timeout_ms, facts)
+    }
+
+    #[cfg(test)]
+    fn check_membership_with_search_facts<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        domain: &UcpValueDomain,
+        exclude: bool,
+        timeout_ms: Option<u64>,
+        facts: &PrivateSearchFacts,
+    ) -> Result<Satisfiability> {
+        Ok(self
+            .membership_model_with_search_facts::<F>(
+                cell,
+                domain,
+                exclude,
+                timeout_ms,
+                facts,
+                &HashSet::new(),
+            )?
+            .sat)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn membership_model_with_search_facts<F: AnalyzableField>(
+        &self,
+        cell: &CellId,
+        domain: &UcpValueDomain,
+        exclude: bool,
+        timeout_ms: Option<u64>,
+        facts: &PrivateSearchFacts,
+        variables: &HashSet<String>,
+    ) -> Result<ModelResult> {
         let expression = self
             .expressions
             .get(cell)
@@ -407,7 +602,7 @@ impl OriginalPrivateQueryContext {
         let mut file = File::create(path).context("Failed to create domain refinement file")?;
         file.write_all(self.smt.as_bytes())?;
         let mut printer = Printer::new(&mut file);
-        self.write_search_exact_facts::<F, _>(&mut printer, expression, exact);
+        self.write_search_facts::<F, _>(&mut printer, expression, facts);
         printer.write_assert_bool(
             if exclude {
                 format!("(not {})", membership)
@@ -416,12 +611,7 @@ impl OriginalPrivateQueryContext {
             },
             Operation::And,
         );
-        Ok(Analyzer::<F>::solve_and_get_model_with_timeout(
-            path.to_owned(),
-            &HashSet::new(),
-            timeout_ms,
-        )?
-        .sat)
+        Analyzer::<F>::solve_and_get_model_with_timeout(path.to_owned(), variables, timeout_ms)
     }
 }
 
@@ -3741,8 +3931,241 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
 mod validation_subset_tests {
     use super::*;
 
+    fn search_domain_context() -> (Analyzer<Fr>, OriginalPrivateQueryContext) {
+        use crate::io::analyzer_io_type::VerificationInput;
+        use crate::sample_circuits::zcash::bit_decomposition::two_bit_decomp::TwoBitDecompCircuit;
+        let input = AnalyzerInput {
+            verification_method: VerificationMethod::Specific,
+            verification_input: VerificationInput::new([("I-0-0".to_owned(), 3)], 1),
+            lookup_method: LookupMethod::InlineConstraints,
+        };
+        let mut analyzer = Analyzer::<Fr>::new_with_original_subset_capture(
+            &TwoBitDecompCircuit::<Fr>::default(),
+            4,
+            AnalyzerType::UnderconstrainedCircuit,
+            Some(&input),
+            true,
+        )
+        .unwrap();
+        let original = analyzer
+            .original_private_query_context(
+                &input,
+                &[
+                    CellId::advice(0, 0),
+                    CellId::advice(1, 0),
+                    CellId::advice(2, 0),
+                    CellId::instance(0, 0),
+                ],
+            )
+            .unwrap();
+        (analyzer, original)
+    }
+
     #[test]
-    fn search_exact_facts_filter_domains_and_preserve_original_queries() {
+    fn candidate_sat_models_share_projections_and_unsat_models_share_nothing() {
+        let (_, mut original) = search_domain_context();
+        let first = CellId::advice(0, 0);
+        let second = CellId::advice(1, 0);
+        let packed = CellId::advice(2, 0);
+        let alias = CellId::advice(7, 0);
+        original
+            .expressions
+            .insert(alias.clone(), original.expressions[&first].clone());
+        let cells = BTreeSet::from([first.clone(), second.clone(), packed.clone(), alias.clone()]);
+        let before = crate::smt_solver::process::invocation_count();
+        let sat = original
+            .query_candidate_with_search_facts::<Fr>(
+                &first,
+                &UcpValueDomain::exact(1.into()),
+                Some(2_000),
+                &PrivateSearchFacts::default(),
+                &cells,
+            )
+            .unwrap();
+        assert_eq!(crate::smt_solver::process::invocation_count() - before, 1);
+        assert_eq!(sat.sat, Satisfiability::Satisfiable);
+        assert_eq!(sat.samples[&first], 1.into());
+        assert_eq!(sat.samples[&second], 1.into());
+        assert_eq!(sat.samples[&packed], 3.into());
+        assert_eq!(sat.samples[&alias], sat.samples[&first]);
+        let unsat = original
+            .query_candidate_with_search_facts::<Fr>(
+                &first,
+                &UcpValueDomain::exact(0.into()),
+                Some(2_000),
+                &PrivateSearchFacts::default(),
+                &cells,
+            )
+            .unwrap();
+        assert_eq!(unsat.sat, Satisfiability::Unsatisfiable);
+        assert!(unsat.samples.is_empty());
+    }
+
+    #[test]
+    fn shared_model_projections_reject_missing_values_and_wrong_fields() {
+        let (_, original) = search_domain_context();
+        let cell = CellId::advice(0, 0);
+        let cells = BTreeSet::from([cell.clone()]);
+        let empty = ModelResult {
+            sat: Satisfiability::Satisfiable,
+            result: HashMap::new(),
+        };
+        assert!(original.project_feasible_model(&empty, &cells).is_err());
+        let wrong_field = smt_parser::extract_model_response(format!(
+            "sat\n(({} #f1m7))\n",
+            original.expressions[&cell]
+        ))
+        .unwrap();
+        assert!(original
+            .project_feasible_model(&wrong_field, &cells)
+            .is_err());
+    }
+
+    #[test]
+    fn search_domains_use_covering_sets_without_completeness_or_target_assumptions() {
+        let (mut analyzer, original) = search_domain_context();
+        let snapshot = original.smt.clone();
+        let first = CellId::advice(0, 0);
+        let second = CellId::advice(1, 0);
+        let packed = CellId::advice(2, 0);
+        let public = CellId::instance(0, 0);
+        let first_name = &original.expressions[&first];
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(
+            first.clone(),
+            UcpValueDomain::finite_set([1.into(), 2.into(), &original.prime + 1]).unwrap(),
+        );
+        values.mark_domain(
+            second.clone(),
+            UcpValueDomain::finite_set((0..=MAX_SEARCH_DOMAIN_SIZE).map(BigInt::from)).unwrap(),
+        );
+        assert!(!values.domain_is_complete(&first));
+        let before = values.clone();
+        let facts = original.search_facts(&analyzer, &values).unwrap();
+        assert_eq!(facts.domains.len(), 1);
+        assert_eq!(
+            facts.domains[first_name],
+            BTreeSet::from([1.into(), 2.into()])
+        );
+        assert_eq!(values, before);
+        let expected = format!(
+            "(or {} {})",
+            Analyzer::<Fr>::smt_field_equality(first_name, &1.into(), &original.prime),
+            Analyzer::<Fr>::smt_field_equality(first_name, &2.into(), &original.prime),
+        );
+        assert_eq!(
+            original
+                .check_candidate_with_search_facts::<Fr>(
+                    &second,
+                    &UcpValueDomain::exact(1.into()),
+                    Some(2_000),
+                    &facts
+                )
+                .unwrap(),
+            Satisfiability::Satisfiable
+        );
+        let query = fs::read_to_string("src/output/private_domain_refinement.smt2").unwrap();
+        assert!(query.starts_with(&snapshot));
+        assert!(query[snapshot.len()..].contains(&expected));
+        assert_eq!(
+            original
+                .query_unseen_value_with_search_facts::<Fr>(
+                    &second,
+                    &BTreeSet::new(),
+                    Some(2_000),
+                    &facts
+                )
+                .unwrap(),
+            Some(1.into())
+        );
+        let query = fs::read_to_string("src/output/private_domain_discovery.smt2").unwrap();
+        assert!(query[snapshot.len()..].contains(&expected));
+
+        // A szándékosan hibás céldomaint sem közvetlenül, sem másolati aliason keresztül nem feltételezi.
+        values.mark_domain(
+            packed,
+            UcpValueDomain::finite_set([0.into(), 1.into()]).unwrap(),
+        );
+        let facts = original.search_facts(&analyzer, &values).unwrap();
+        assert_eq!(
+            original
+                .check_coverage_with_search_facts::<Fr>(
+                    &public,
+                    &UcpValueDomain::finite_set([0.into(), 1.into()]).unwrap(),
+                    Some(2_000),
+                    &facts
+                )
+                .unwrap(),
+            Satisfiability::Satisfiable
+        );
+        let query = fs::read_to_string("src/output/private_domain_refinement.smt2").unwrap();
+        let packed_name = &original.expressions[&public];
+        let packed_equality =
+            Analyzer::<Fr>::smt_field_equality(packed_name, &0.into(), &original.prime);
+        assert_eq!(query[snapshot.len()..].matches(&packed_equality).count(), 1);
+
+        let alias = CellId::advice(99, 0);
+        analyzer
+            .cell_to_cycle_head
+            .insert(alias.to_string(), first_name.clone());
+        values.mark_domain(
+            alias.clone(),
+            UcpValueDomain::finite_set([1.into(), 3.into()]).unwrap(),
+        );
+        let facts = original.search_facts(&analyzer, &values).unwrap();
+        assert_eq!(facts.domains[first_name], BTreeSet::from([1.into()]));
+        values.mark_known(first, 1.into());
+        values.mark_domain(
+            alias,
+            UcpValueDomain::finite_set([2.into(), 3.into()]).unwrap(),
+        );
+        assert!(original.search_facts(&analyzer, &values).is_err());
+        assert_eq!(original.smt, snapshot);
+    }
+
+    #[test]
+    fn search_domain_budget_skips_whole_sets_deterministically_and_retains_exact_values() {
+        let (analyzer, mut original) = search_domain_context();
+        let mut forward = UcpValueFacts::new();
+        let mut reverse = UcpValueFacts::new();
+        for row in 0..200 {
+            let cell = CellId::advice(90, row);
+            original.variables.insert(cell.to_string());
+            forward.mark_domain(
+                cell,
+                UcpValueDomain::finite_set([0.into(), 1.into(), 2.into()]).unwrap(),
+            );
+            reverse.mark_domain(
+                CellId::advice(90, 199 - row),
+                UcpValueDomain::finite_set([0.into(), 1.into(), 2.into()]).unwrap(),
+            );
+        }
+        let exact = CellId::advice(90, 1000);
+        original.variables.insert(exact.to_string());
+        forward.mark_known(exact.clone(), 7.into());
+        reverse.mark_known(exact.clone(), 7.into());
+        let before = forward.clone();
+        let facts = original.search_facts(&analyzer, &forward).unwrap();
+        assert_eq!(
+            facts.domains,
+            original.search_facts(&analyzer, &reverse).unwrap().domains
+        );
+        assert_eq!(
+            facts.domains[&exact.to_string()],
+            BTreeSet::from([7.into()])
+        );
+        let finite: Vec<_> = facts
+            .domains
+            .values()
+            .filter(|domain| domain.len() > 1)
+            .collect();
+        assert!(finite.iter().all(|domain| domain.len() == 3));
+        assert_eq!(finite.len() * 3, MAX_SEARCH_DOMAIN_VALUES / 3 * 3);
+        assert_eq!(forward, before);
+    }
+
+    #[test]
+    fn search_facts_filter_domains_and_preserve_original_queries() {
         use crate::io::analyzer_io_type::VerificationInput;
         use crate::sample_circuits::zcash::bit_decomposition::two_bit_decomp::TwoBitDecompCircuit;
         let input = AnalyzerInput {
@@ -3786,18 +4209,24 @@ mod validation_subset_tests {
         values.mark_known(public.clone(), 3.into());
         values.mark_known(CellId::fixed(0, 0), 1.into());
         values.mark_known(CellId::advice(99, 0), 123.into());
-        let exact = original.search_exact_facts(&analyzer, &values).unwrap();
+        let exact = original.search_facts(&analyzer, &values).unwrap();
         let first_name = &original.expressions[&first];
         let packed_name = &original.expressions[&packed];
-        assert_eq!(exact.values.len(), 2);
-        assert_eq!(exact.values[first_name], BigInt::from(1));
-        assert_eq!(exact.values[packed_name], BigInt::from(3));
-        assert!(!exact.values.contains_key(&original.expressions[&second]));
+        assert_eq!(exact.domains.len(), 3);
+        assert_eq!(exact.domains[first_name], BTreeSet::from([BigInt::from(1)]));
+        assert_eq!(
+            exact.domains[packed_name],
+            BTreeSet::from([BigInt::from(3)])
+        );
+        assert_eq!(
+            exact.domains[&original.expressions[&second]],
+            BTreeSet::from([BigInt::from(0), BigInt::from(1)])
+        );
 
         // Querying an instance alias must also exclude the packed advice cell's exact fact.
         assert_eq!(original.expressions[&public], *packed_name);
         let mut bytes = Vec::new();
-        original.write_search_exact_facts::<Fr, _>(
+        original.write_search_facts::<Fr, _>(
             &mut Printer::new(&mut bytes),
             &original.expressions[&public],
             &exact,
@@ -3816,7 +4245,7 @@ mod validation_subset_tests {
 
         assert_eq!(
             original
-                .query_unseen_value_with_exact_facts::<Fr>(
+                .query_unseen_value_with_search_facts::<Fr>(
                     &second,
                     &BTreeSet::new(),
                     Some(2_000),
@@ -3839,12 +4268,61 @@ mod validation_subset_tests {
         let candidate = UcpValueDomain::exact(1.into());
         assert_eq!(
             original
-                .check_candidate_with_exact_facts::<Fr>(&second, &candidate, Some(2_000), &exact)
+                .check_candidate_with_search_facts::<Fr>(&second, &candidate, Some(2_000), &exact)
                 .unwrap(),
             Satisfiability::Satisfiable
         );
         let accelerated = fs::read_to_string("src/output/private_domain_refinement.smt2").unwrap();
         assert!(accelerated[snapshot.len()..].contains(&first_equality));
+        assert_eq!(
+            original
+                .check_coverage_with_search_facts::<Fr>(&second, &candidate, Some(2_000), &exact)
+                .unwrap(),
+            Satisfiability::Unsatisfiable
+        );
+        let accelerated = fs::read_to_string("src/output/private_domain_refinement.smt2").unwrap();
+        assert!(accelerated.starts_with(&snapshot));
+        assert!(accelerated[snapshot.len()..].contains(&first_equality));
+        // A lefedést a jelölthalmaz feltételezése helyett annak tagadásával vizsgálja.
+        let second_equality = Analyzer::<Fr>::smt_field_equality(
+            &original.expressions[&second],
+            &1.into(),
+            &original.prime,
+        );
+        assert!(accelerated[snapshot.len()..].contains(&format!("(not {second_equality})")));
+        assert_eq!(
+            original
+                .check_coverage_with_search_facts::<Fr>(
+                    &second,
+                    &UcpValueDomain::exact(0.into()),
+                    Some(2_000),
+                    &exact
+                )
+                .unwrap(),
+            Satisfiability::Satisfiable
+        );
+        assert_eq!(
+            original
+                .check_coverage_with_search_facts::<Fr>(
+                    &public,
+                    &UcpValueDomain::exact(3.into()),
+                    Some(2_000),
+                    &exact
+                )
+                .unwrap(),
+            Satisfiability::Unsatisfiable
+        );
+        let accelerated = fs::read_to_string("src/output/private_domain_refinement.smt2").unwrap();
+        let packed_equality =
+            Analyzer::<Fr>::smt_field_equality(packed_name, &3.into(), &original.prime);
+        // A cél másolati aliasának pontos ténye nem szerepel külön premisszaként, csak a kizárási kérdésben.
+        assert_eq!(
+            accelerated[snapshot.len()..]
+                .matches(&packed_equality)
+                .count(),
+            1
+        );
+        assert!(accelerated[snapshot.len()..].contains(&format!("(not {packed_equality})")));
         original
             .check_membership::<Fr>(&second, &candidate, true, Some(2_000))
             .unwrap();

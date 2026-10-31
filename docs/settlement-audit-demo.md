@@ -5,12 +5,22 @@ Valódi Halo2-kapcsoláson futtatja a tényleges recovery pipeline-t.
 Nem módosítja az elemző szabályait, ütemezését vagy solverkezelését a példa kedvéért.
 A referencia csak a teszt eredményét ellenőrzi, nem elemzési premissza.
 
+Az alapértelmezett `combined` futás a közös standard keresési kereteket használja:
+fast probe, szűkítés és felderítés egyaránt engedélyezett. A többi profil explicit
+komponens-kikapcsolásos kontroll. A lentebbi korábbi időadatok a rögzített akkori
+konfigurációk eredményei, nem az új standard keretekkel végzett új mérések.
+
 A dolgozat összefüggő vállalati számlapéldája külön circuit:
 [`thesis_examples/invoice_circuit.rs`](../korrekt/src/circuit_analyzer/ucp/thesis_examples/invoice_circuit.rs).
 Az új általános lineáris/intervallumos következtetéssel abban az UCP már
 16 konkrét célértéket visszaállít. Az alábbi technikai benchmark továbbra is
 az SMT-ből visszacsatolt domain utáni új UCP-fázist szemlélteti; a két példát
 és a méréseiket nem szabad összekeverni.
+
+Az összefüggő számla [jóváhagyási felárral bővített változata](invoice-approval-demo.md)
+már szintén valódi UCP--SMT--UCP átadást mutat: az SMT a jóváhagyási módot
+szűkíti, majd az új UCP-fázis a felárat és a kosarat állítja vissza.
+Az eredeti számla és az itt részletezett technikai benchmark továbbra is megmarad.
 
 ## Kapcsolás
 
@@ -64,20 +74,27 @@ alkalmazhatóságát konkrét értékek nélkül, a ténylegesen igazolt K-tény
 Egy eredményt több szabály is igazolhat; ez nem kizárólagos szabályattribúció.
 
 A szűkítési profil letiltja a szemantikai gyorspróbákat és a domainfelderítést.
-Az ütemező a tényleges domainek és a várható haszon alapján választ cellát;
-nem kötelező először a tarifakódot vizsgálnia. Az aktuális ellenőrzött kis
-futásban először a legalsó összegbitet állítja vissza: három solverhívás
-(egy lefedés- és két jelöltellenőrzés) után bit0=1 lesz. Ettől a kilencbites
-összeg legfeljebb 256 jelöltje már explicit ábrázolható. Az UCP feltételes
-vizsgálata a többi kényszerrel együtt visszaállítja amount=373 és mask=0
-értékét, majd a további biteket, másolt cellákat és az auditláncot.
+Az aktuális [premisszavezérelt ütemező](premise-guided-refinement.md) a kényszerekből
+felismeri, hogy az 5 kizárása feloldhatja a szorzatkényszer hiányzó nemnullasági
+premisszáját. A mért kis futásban egy jelöltellenőrzéssel kizárja az 5-öt.
+A Delta-domain lefedését külön solverhívás nélkül veszi át.
+A code domainje még 15 elemű, de már
+biztosan code-5 nem nulla. Az új UCP-fázis ebből mask=0, amount=373 és a
+kilenc összegbit, majd az auditlánc értékeit vezeti le: 15 új pontos célértéket.
 
-A későbbi SMT-blokk a két díjkatalógust és a code in {3,7} domaint teszi
-teljessé. A kóddomain szűkülése még egy valódi UCP-futást indít, de ekkor
-már nem születik új célérték. Alternatív érvényes következtetési út a
-code in {3,7} után code-5 nemnullaságából mask=0 levezetése; a napló nem
-állítja ezt kizárólagos vagy kötelező futási sorrendnek. A mask=0 és
-amount=373 állítás egyik útnál sem szerepel eredeti kényszerként.
+A félbehagyott kódvizsgálat az új pontos tényekkel folytatódik, lefedésének
+megismétlése nélkül. További 15 jelöltellenőrzésből code in {3,7} és a domain
+teljessége igazolódik. Ez még egy valódi UCP-futást indít, de ekkor már nem
+születik új célérték. A kód SAT-modelljei már egy-egy díjértéket is igazolnak.
+Végül két további jelöltellenőrzés mindkét díjdomain teljességét igazolja:
+a második díj értékei ugyanazon teljes modellekből kerülnek át W-be.
+A kezdeti külön SAT-hívással együtt ez 19 solverfolyamat,
+a mért release API-idő 2,30 s. Ez egyszeri eredmény, nem átlag vagy időgarancia.
+
+A korábbi ütemező először az összeg legalsó bitjét állította vissza három
+solverhívással, majd feltételes UCP-vizsgálattal folytatta az elemzést.
+Az a változat 29 solverfolyamatot használt. Mindkét következtetési út helyes;
+a mask=0 és amount=373 egyiknél sem szerepel eredeti kényszerként.
 
 Négy auditcél mellett a végső eredmény:
 

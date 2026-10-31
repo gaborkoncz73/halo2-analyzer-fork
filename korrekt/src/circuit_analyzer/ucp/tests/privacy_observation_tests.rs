@@ -33,7 +33,7 @@ use std::collections::BTreeSet;
 fn recovery_options() -> PrivacyAnalysisOptions {
     PrivacyAnalysisOptions {
         solver_timeout_ms: Some(2_000),
-        ..Default::default()
+        ..PrivacyAnalysisOptions::fast_probe_only()
     }
 }
 

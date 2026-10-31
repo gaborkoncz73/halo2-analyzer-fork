@@ -139,7 +139,7 @@ fn check_recovery<const NEGATIVE: bool>(wrong_witness: bool) {
         PrivacyAnalysisOptions {
             max_semantic_queries: 2,
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();
@@ -340,7 +340,7 @@ fn full_width_public_observation_supports_recovery_validation_and_pipeline() {
             PrivacyAnalysisOptions {
                 max_semantic_queries: 2,
                 solver_timeout_ms: Some(2_000),
-                ..Default::default()
+                ..PrivacyAnalysisOptions::fast_probe_only()
             },
         )
         .unwrap();
@@ -438,7 +438,7 @@ fn wide_public_sum_still_allows_multiple_private_operands() {
         PrivacyAnalysisOptions {
             max_semantic_queries: 2,
             solver_timeout_ms: Some(2_000),
-            ..Default::default()
+            ..PrivacyAnalysisOptions::fast_probe_only()
         },
     )
     .unwrap();

@@ -69,6 +69,8 @@ pub struct RecoverySmtStep {
     pub propagation_requested: bool,
     /// Csak az adott lépésben újonnan megőrzött, megvalósítható értékeket sorolja fel.
     pub feasible_samples: Vec<BigInt>,
+    /// Ugyanazon teljes SAT-modellek más cellákhoz újonnan megőrzött vetületeit sorolja fel.
+    pub model_samples: BTreeMap<CellId, Vec<BigInt>>,
     pub updates: Vec<RecoveryCellUpdate>,
     pub limitation: Option<RecoveryLimitation>,
 }
@@ -258,6 +260,25 @@ fn update_text(
     text
 }
 
+fn new_target_domains<'a>(
+    updates: impl IntoIterator<Item = &'a RecoveryCellUpdate>,
+    targets: &HashSet<CellId>,
+) -> (usize, usize) {
+    // Egy cél többszöri szűkítését egyszer, az utolsó megváltozott domain szerint számolja.
+    // A köztes cellákat és a puszta teljességi vagy egyértelműségi jelöléseket nem veszi ide.
+    let changed: BTreeMap<_, _> = updates
+        .into_iter()
+        .filter(|u| u.domain_changed && targets.contains(&u.cell))
+        .filter_map(|u| match &u.domain {
+            Some(UcpValueDomain::Exact(_)) => Some((&u.cell, true)),
+            Some(UcpValueDomain::FiniteSet(_)) => Some((&u.cell, false)),
+            None => None,
+        })
+        .collect();
+    let exact = changed.values().filter(|is_exact| **is_exact).count();
+    (exact, changed.len() - exact)
+}
+
 impl super::PrivacyAnalysisReport {
     /// A kijelölt privát célokra vonatkozó, időrendi recovery-fázisokat jeleníti meg.
     pub fn phase_report(&self) -> String {
@@ -290,6 +311,7 @@ impl super::PrivacyAnalysisReport {
                 .unwrap_or_else(|| format!("{:?}", self.status)),
             self.solver_invocations.saturating_sub(recovery_calls)
         )];
+        let targets = self.cells.iter().map(|c| c.cell.clone()).collect();
         let (mut ucp_number, mut smt_number) = (0, 0);
         for phase in &self.phases {
             lines.push(String::new());
@@ -304,19 +326,7 @@ impl super::PrivacyAnalysisReport {
                         "{ucp_number}. UCP ({:.2} s)",
                         elapsed.as_secs_f64()
                     ));
-                    let exact = updates
-                        .iter()
-                        .filter(|u| {
-                            u.domain_changed && matches!(u.domain, Some(UcpValueDomain::Exact(_)))
-                        })
-                        .count();
-                    let domains = updates
-                        .iter()
-                        .filter(|u| {
-                            u.domain_changed
-                                && matches!(u.domain, Some(UcpValueDomain::FiniteSet(_)))
-                        })
-                        .count();
+                    let (exact, domains) = new_target_domains(updates, &targets);
                     lines.push(format!("  Targets: {} exact values, {} domains. New: {exact} exact, {domains} new/refined domains.",counts.exact_values,counts.domains));
                     if updates.is_empty() {
                         lines.push("  No new target facts.".into());
@@ -374,6 +384,25 @@ impl super::PrivacyAnalysisReport {
                                 }
                             ));
                         }
+                        for (cell, samples) in step.model_samples.iter().take(8) {
+                            let label = names(cell).unwrap_or_else(|| cell.to_string());
+                            let preview = samples
+                                .iter()
+                                .take(8)
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            lines.push(format!(
+                                "    Model samples: {label}: {preview}{}",
+                                if samples.len() > 8 { ", ..." } else { "" }
+                            ));
+                        }
+                        if step.model_samples.len() > 8 {
+                            lines.push(format!(
+                                "    Model samples: {} further cells",
+                                step.model_samples.len() - 8
+                            ));
+                        }
                         for update in &step.updates {
                             lines.push(format!("    {}", update_text(update, &mut names)));
                         }
@@ -384,7 +413,9 @@ impl super::PrivacyAnalysisReport {
                             lines.push(format!("    Limitation: {limitation:?}"));
                         }
                     }
-                    lines.push(format!("  Targets: {} exact values, {} domains; {} complete domains, {} non-unique.",counts.exact_values,counts.domains,counts.complete_domains,counts.non_unique_cells));
+                    let (exact, domains) =
+                        new_target_domains(steps.iter().flat_map(|s| &s.updates), &targets);
+                    lines.push(format!("  Targets: {} exact values, {} domains; {} complete domains, {} non-unique. New: {exact} exact, {domains} new/refined domains.",counts.exact_values,counts.domains,counts.complete_domains,counts.non_unique_cells));
                     lines.push(if steps.iter().any(|step| step.propagation_requested) {
                         "  UCP restart scheduled.".into()
                     } else {
@@ -469,6 +500,38 @@ mod tests {
     }
 
     #[test]
+    fn phase_new_domains_count_distinct_targets_and_ignore_metadata_and_bridges() {
+        let targets: HashSet<_> = (0..3).map(|col| CellId::advice(col, 0)).collect();
+        let update = |column, domain, domain_changed| RecoveryCellUpdate {
+            cell: CellId::advice(column, 0),
+            domain: Some(domain),
+            domain_changed,
+            uniqueness: PrivateCellUniqueness::Unknown,
+            uniqueness_changed: false,
+            domain_is_complete: false,
+            completeness_changed: false,
+        };
+        let finite = |values: &[i32]| {
+            UcpValueDomain::finite_set(values.iter().copied().map(BigInt::from)).unwrap()
+        };
+        let mut updates = vec![
+            update(0, UcpValueDomain::exact(7.into()), true),
+            update(1, finite(&[1, 2, 3]), true),
+            update(1, finite(&[1, 2]), true),
+            update(2, finite(&[4, 5]), false),
+            update(99, UcpValueDomain::exact(42.into()), true),
+        ];
+        assert_eq!(new_target_domains(&updates, &targets), (1, 1));
+        updates.push(update(1, UcpValueDomain::exact(1.into()), true));
+        let mut metadata = update(1, UcpValueDomain::exact(1.into()), false);
+        metadata.domain_is_complete = true;
+        metadata.completeness_changed = true;
+        updates.push(metadata.clone());
+        assert_eq!(new_target_domains(&updates, &targets), (2, 0));
+        assert_eq!(new_target_domains([&metadata], &targets), (0, 0));
+    }
+
+    #[test]
     fn consecutive_solver_operations_form_one_phase_until_real_propagation() {
         let step = || RecoverySmtStep {
             cell: CellId::advice(0, 0),
@@ -482,6 +545,7 @@ mod tests {
             elapsed: Duration::from_millis(1),
             propagation_requested: false,
             feasible_samples: vec![1.into(), 2.into()],
+            model_samples: BTreeMap::new(),
             updates: vec![],
             limitation: None,
         };

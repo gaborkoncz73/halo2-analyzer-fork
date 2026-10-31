@@ -31,10 +31,12 @@ let options = PrivacyAnalysisOptions {
 };
 ```
 
-Pass these options to `analyze_private_recoverability` as before. Refinement is
-disabled by default (`max_solver_checks = 0`); existing callers using default
-options incur no extra domain checks. Full struct literals need the new field
-or `..Default::default()`.
+Pass these options to `analyze_private_recoverability` as before. The outer
+`PrivacyAnalysisOptions::default()` enables refinement with 160 checks and at most
+128 candidates per cell, alongside discovery and fast probes. The standalone
+`PrivacyDomainRefinementOptions::default()` has zero checks, so assigning it
+explicitly disables candidate checking. Use the named ablation profiles for
+component comparisons; see [the standard configuration](unified-private-recovery.md#standard-and-ablation-configurations).
 
 Selected private cells, and optionally useful non-target advice cells, with an
 existing `FiniteSet` of at most `max_candidates_per_cell` distinct field values
@@ -49,9 +51,10 @@ selected cells with no inferred domain. It enumerates target values and exports
 only after original-model exhaustion. Both searches can be enabled together;
 already complete discovered sets are not redundantly refined.
 
-The domain budget is a separate hard total on actual solver invocations, including
-covering checks. It never resets on progress. An initial full attempt with N
-candidates costs at most N+1 checks. Progress-gated continuations share the same
+The domain budget is a separate hard total on actual candidate-feasibility solver
+invocations. Recovery inherits coverage from the established Delta invariant
+instead of rechecking it. It never resets on progress. An initial full attempt
+with N candidates costs at most N checks. Progress-gated continuations share the same
 remaining allowance and reuse previous proofs. The usual uniqueness-query
 allowance, bridge/retry limits, initial SAT checks, and optional fresh validation
 remain separate.
@@ -63,44 +66,61 @@ The [joint scheduler](unified-private-recovery.md) can choose refinement's inter
 fast uniqueness strategy if fewer than two feasible values are known and its
 estimated cost is lower than candidate enumeration. It is not a separate third
 operation. Feasible values from that attempt are shared: candidate refinement
-does not recheck them. Coverage is still checked against the original context,
-independently of cached samples. Probe attempts retain their separate semantic
+does not recheck them. Coverage is inherited from Delta, not inferred from cached
+samples. Probe attempts retain their separate semantic
 allowance and retry history; they do not spend candidate-refinement checks.
 
 ## Cell Selection
 
 `RefineNext` ranks eligible cells instead of always taking the first CellId.
-The policy is `progress-gated-resumable-domain-refinement-v3` and is also
+The policy is `established-domain-refinement-v7` and is also
 recorded in measurement metadata. Complete domains are never selected again.
-Partial and coverage-unknown attempts can resume only after the global knowledge
+Partial attempts can resume only after the global knowledge
 generation advances: established uniqueness or value-domain information must
 change, not merely sample caches or statistics. At most one attempt per cell is
 permitted in a generation. All continuations retain the original hard check cap.
 
-Fresh eligible cells take priority over retries. Among retries, the oldest
+An attempt deliberately yielded to propagation is resumed first once a new
+knowledge generation makes it eligible. This is not an unchanged-state retry:
+yielding requires a newly proved candidate exclusion, and all checks retain the
+same cumulative allowance. Otherwise fresh eligible cells take priority over retries. Among retries, the oldest
 knowledge generation and then the least recent attempt take priority. Cost and
 conditional-gain scoring apply within this fairness shortlist; they cannot
 repeatedly promote a recently retried cell ahead of older eligible refinements.
 Other operation families retain the joint scheduler's existing ordering.
 
 A cell with N distinct field candidates has a full-attempt cost estimate of
-N+1 invocations, including coverage. Cells whose full attempt fits the remaining
+N invocations, with no coverage recheck. Cells whose full attempt fits the remaining
 allowance take priority. A cheap shortlist keeps at most 32 cells, ordered by
 budget fit, candidate count, then CellId. Unselected cells remain eligible later.
 
-For each shortlisted cell, up to four evenly spaced candidates are hypothetically
-excluded, one per simulation. Each simulation runs the complete UCP problem,
+Before general scoring, the scheduler looks for critical candidates derived from
+affine zero roots of factors in existing product equations. For `a*(c*v+d)=0`,
+excluding a possible root of `c*v+d` may establish the missing nonzero premise.
+The root is computed with existing field-aware expression-domain projection;
+it is not inserted into Delta or treated as an infeasibility proof. Recognition
+examines at most 64 factors per equation and does not factor expanded polynomials.
+
+Critical exclusions are included before evenly spaced samples in the existing
+limit of four hypothetical exclusions per cell. Each simulation runs the complete UCP problem,
 including lookup projections, on cloned K/Delta state. This can expose useful
 non-singleton refinements: excluding 5 from {3,5,7}, for example, can force d=0
 in d*(s-5)=0 without recovering s. Field-equivalent singleton domains are
 simulated by canonicalizing the remaining value instead of excluding it.
 
-Scores compare, lexicographically, the mean simulated gain per estimated solver
+If a budget-fitting critical exclusion predicts a new exact target or a tighter
+domain for another target, that premise-unlocking shortlist is used without
+scoring all general alternatives. Otherwise the earlier general shortlist is
+retained. Within the shortlist, budget fit and predicted premise-unlocking target
+gain precede the mean simulated gain per estimated solver
 invocation: newly exact targets, refined target domains, new unique targets,
 refined cell domains, then new unique cells. Ties prefer fewer checks and the
 smaller CellId. Rates use exact integer cross-products, not floating-point
-weights. With one eligible cell or only one remaining check, simulations are
-skipped and the cheap ordering decides.
+weights. With one eligible cell, ordinary simulations are skipped unless critical
+candidate planning is needed. With only one remaining check the cheap ordering
+decides. Existing score caching also retains the candidate order and predicted
+yield points. Joint action selection reuses this benefit instead of simulating
+the same planned operation again or replacing it with a uniqueness-only probe.
 
 These are bounded conditional-gain estimates, not feasibility probabilities or
 SMT-runtime predictions. Simulated exclusions and their consequences never enter
@@ -110,33 +130,58 @@ end-to-end CPU deadline, and neither optimal ordering nor a speedup is guarantee
 
 ## Original-Model Reasoning
 
-Let `C` denote original constraints, `P` public observations, and `D` a proposed
-candidate superset. Original satisfiability must already have been established.
+Let `C` denote original constraints, `P` public observations, and `D` an already
+established covering domain from the current Delta. Original satisfiability must
+already have been established. Arbitrary proposed candidate sets are not valid
+recovery premises; they require independent verification first.
+Let `R` denote redundant exact and small-domain assertions established for other
+cells under `C AND P`; the queried cell and its copy aliases are omitted.
 
-1. Check `C AND P AND x NOT IN D`. Only UNSAT establishes coverage.
-2. For each candidate v, check `C AND P AND x = v` independently.
+1. Reuse the established coverage of `D`, including domains tightened by UCP.
+2. For each candidate v in `D`, check `C AND P AND R AND x = v` independently.
 3. UNSAT excludes v. SAT certifies v as feasible. Unknown or untested values stay.
 4. Merge the retained superset into Delta. Run UCP to a fixed point again only
    if the merge changes Delta; otherwise continue searching with the existing
    fixpoint and updated refinement evidence.
+
+Candidate checks start with the planned critical exclusions. After an actual
+UNSAT exclusion with predicted propagation benefit, refinement can yield a
+partial covering domain immediately, before checking the remaining candidates.
+This deliberate yield is `Partial`, not a timeout or exhausted budget. SAT,
+UNKNOWN, or a simulation alone cannot exclude a candidate or trigger this yield.
+After real propagation, the suspended attempt reuses the new Delta coverage and proved values
+when valid and continues under the original total budget. It may finish without
+further shrinking, by certifying the feasibility of the retained values.
 
 Step 2 skips a candidate already witnessed by a full-context SAT model in the
 same analysis run. Such values count as feasible, but skipped checks consume no
 solver allowance. Unknown, untested, and merely hypothesized values are not
 cached as feasible. Continuations also remember earlier SAT candidates and
 UNSAT exclusions without relying on the caller to resend those samples.
-Original-context coverage is reused only if its certified set, minus previously
-proved exclusions, is contained in the current domain. A smaller propagated
-domain that is not justified by those exclusions requires a fresh independent
-coverage check. A proposed domain contradicting cached feasibility fails closed.
+Each SAT candidate model also supplies samples for other incomplete target
+domains. These enter W only, not Delta, and may certify completeness or
+non-uniqueness without another solver invocation. The
+[shared-model description](shared-model-samples.md) gives the data flow and
+distinguishes per-cell projections from joint assignments.
+An updated domain is accepted as covering because it comes from the established
+recovery state, even if its tightening was performed by UCP rather than SMT.
+A domain contradicting cached feasibility fails closed. Coverage alone does not
+certify that every remaining candidate is feasible or make the domain complete.
 
 An immutable original snapshot is captured before ordinary semantic queries can
 write inferred facts. Each domain check writes a separate SMT file from that
-snapshot. Coverage checks add only the domain-exclusion assertion. Candidate
-feasibility checks also reuse current, established `Exact` advice-cell facts as
-redundant equalities; finite domains, model samples, and uniqueness without a
-value are not exported. The queried cell and its copy aliases are excluded from
-these extra equalities. The proposed covering domain is never assumed.
+snapshot. Candidate feasibility and full discovery checks reuse
+established exact advice-cell values and bounded finite covering domains.
+Each finite set must already be a sound Delta-domain; it need not be complete.
+Model samples, hypothetical domains, and uniqueness without value information
+are not exported. The queried cell and its copy aliases are excluded from
+the added assertions. The proposed covering domain is never assumed.
+At most 16 raw entries per finite domain and 512 candidate equalities across
+multi-value domains are exported, preferring smaller domains with stable ties.
+Larger sets are omitted whole, never truncated; singleton facts remain available.
+The assertions in `R` follow from `C AND P` and do not change its solution set.
+Recovery trusts sound propagation and previously established domain facts. It
+does not add `x IN D` and ask `x NOT IN D` as a circular coverage proof.
 Candidate assumptions do not accumulate between checks, and later strengthening
 of the ordinary analyzer cannot strengthen the snapshot. Full gates, copy
 equalities, and correlated lookup tuples are retained. Independent report
@@ -146,9 +191,10 @@ The analyzer also remembers whether UCP assertions have ever been written.
 Clearing its export vectors cannot make an already strengthened SMT file usable
 as a fresh validation context or original snapshot.
 
-If coverage is SAT, a circuit-valid value lies outside the proposed set: the run
-fails rather than exporting a false covering claim. If coverage is unknown, no
-SMT exclusions from that attempt are exported. Candidate timeout results do not
+Independent report validation still asks coverage queries against the original
+context without assuming recovered claims, and can refute forged domains.
+Standalone test helpers retain explicit verification for arbitrary proposed sets;
+the production recovery path always uses established coverage. Candidate timeout results do not
 exclude that value or prevent checking later candidates while budget remains.
 Malformed output and execution errors remain errors, not inconclusive proofs.
 An empty retained set contradicts original SAT and also fails the run.
@@ -158,9 +204,10 @@ An empty retained set contradicts original SAT and also fails the run.
 `PrivateCellReport.domain_refinement` records the latest attempt's candidate
 counts, cumulative actual solver checks across that cell's attempts, and one of:
 
-- `Complete`: coverage checked and every remaining value established feasible.
-- `Partial`: coverage checked; unresolved candidates remain in the superset.
-- `CoverageUnknown`: coverage could not be checked; no new exclusions exported.
+- `Complete`: coverage established and every remaining value established feasible.
+- `Partial`: coverage established; unresolved candidates remain in the superset.
+- `CoverageUnknown`: retained for standalone checks and historical reports; not
+  produced by recovery refinement of established Delta domains.
 - `None`: no finite-domain attempt; this does not certify projection completeness.
 
 The separate `PrivateCellReport.domain_is_complete` flag describes the final

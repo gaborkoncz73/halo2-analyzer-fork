@@ -306,7 +306,7 @@ pub(super) fn shortlist_actions(
                 .filter(|cell| {
                     if let Some(UcpValueDomain::FiniteSet(values)) = result.value_facts.domain(cell)
                     {
-                        values.len() + 1 <= bridge_left.min(remaining_refinement)
+                        values.len() <= bridge_left.min(remaining_refinement)
                     } else {
                         false
                     }
@@ -364,14 +364,18 @@ pub(super) fn shortlist_actions(
                     RecoveryAction::Discover(_, RecoveryStrategy::DomainSearch)
                 )
             });
-        integrate_fast_probe(
-            &mut actions,
-            cell,
-            problem,
-            result,
-            evidence,
-            discovery_available,
-        );
+        let premise_planned = domain_search.planned_gain(cell).is_some() && actions.iter().any(|action|
+            matches!(action, RecoveryAction::Refine(c, RecoveryStrategy::DomainSearch) if c == cell));
+        if !premise_planned {
+            integrate_fast_probe(
+                &mut actions,
+                cell,
+                problem,
+                result,
+                evidence,
+                discovery_available,
+            );
+        }
     }
     Ok((actions, probe_plan))
 }
@@ -410,6 +414,14 @@ pub(crate) struct RecoveryEvidence {
 impl RecoveryEvidence {
     pub fn samples(&self, cell: &CellId) -> BTreeSet<BigInt> {
         self.feasible.get(cell).cloned().unwrap_or_default()
+    }
+
+    /// Két különböző teljes modellérték domainlefedés nélkül is bizonyítja a nemegyértelműséget.
+    pub fn non_unique_cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.feasible
+            .iter()
+            .filter(|(_, samples)| samples.len() >= 2)
+            .map(|(cell, _)| cell.clone())
     }
 
     pub fn remember_feasible_samples(
@@ -462,7 +474,10 @@ fn refinement_cost(
                 .iter()
                 .filter_map(|value| normalize_field_value(value.clone(), &problem.field_modulus))
                 .collect();
-            1 + candidates.difference(&evidence.samples(cell)).count()
+            candidates
+                .difference(&evidence.samples(cell))
+                .count()
+                .max(1)
         }
         _ => usize::MAX / 2,
     }
@@ -516,6 +531,7 @@ pub(crate) fn choose_action(
     problem: &UcpProblem,
     result: &UcpResult,
     evidence: &RecoveryEvidence,
+    refinement: Option<&DomainRefinementState>,
 ) -> Option<RecoveryAction> {
     actions.retain(|action| !result.value_facts.domain_is_complete(action.cell()));
     if actions.len() <= 1 {
@@ -526,7 +542,16 @@ pub(crate) fn choose_action(
         .map(|action| {
             let cell = action.cell();
             let samples = evidence.samples(cell).len();
+            let premise_gain = if matches!(
+                action,
+                RecoveryAction::Refine(_, RecoveryStrategy::DomainSearch)
+            ) {
+                refinement.and_then(|state| state.planned_gain(cell))
+            } else {
+                None
+            };
             let checks = match &action {
+                _ if premise_gain.is_some() => 1,
                 _ if action.strategy() == RecoveryStrategy::FastProbe => 2,
                 RecoveryAction::Refine(_, _) => refinement_cost(cell, problem, result, evidence),
                 RecoveryAction::Discover(_, _) => {
@@ -537,31 +562,43 @@ pub(crate) fn choose_action(
                     }
                 }
             };
-            let mut facts = result.facts.clone();
-            facts.mark_unique(cell.clone());
-            let simulated = problem
-                .simulate_with_values(facts, result.value_facts.for_hypothetical_reasoning());
-            let gain = 1 + targets
-                .iter()
-                .filter(|target| {
-                    !result.facts.is_unique(target) && simulated.facts.is_unique(target)
-                })
-                .count();
+            // A már kiszámított premisszafeloldó hasznot új szimuláció nélkül használja fel.
+            let gain = 1 + premise_gain.unwrap_or_else(|| {
+                let mut facts = result.facts.clone();
+                facts.mark_unique(cell.clone());
+                let simulated = problem
+                    .simulate_with_values(facts, result.value_facts.for_hypothetical_reasoning());
+                targets
+                    .iter()
+                    .filter(|target| {
+                        !result.facts.is_unique(target) && simulated.facts.is_unique(target)
+                    })
+                    .count()
+            });
             let target = targets.contains(cell);
             let known_unique = target && result.facts.is_unique(cell);
             // A domain teljességének vizsgálatát előnyben részesíti az ismert nemegyértelműség újbóli igazolásával szemben.
             let completion = samples > 0 && action.strategy() == RecoveryStrategy::DomainSearch;
-            (action, known_unique, target, gain, checks, completion)
+            (
+                action,
+                known_unique,
+                target,
+                premise_gain.is_some(),
+                gain,
+                checks,
+                completion,
+            )
         })
         .max_by(|left, right| {
             left.1
                 .cmp(&right.1)
                 .then(left.2.cmp(&right.2))
+                .then(left.3.cmp(&right.3))
                 .then_with(|| {
-                    ((left.3 as u128) * right.4 as u128).cmp(&((right.3 as u128) * left.4 as u128))
+                    ((left.4 as u128) * right.5 as u128).cmp(&((right.4 as u128) * left.5 as u128))
                 })
-                .then(left.5.cmp(&right.5))
-                .then_with(|| right.4.cmp(&left.4))
+                .then(left.6.cmp(&right.6))
+                .then_with(|| right.5.cmp(&left.5))
                 .then_with(|| right.0.cell().cmp(left.0.cell()))
                 .then_with(|| {
                     let rank = |action: &RecoveryAction| match action {
@@ -623,7 +660,8 @@ mod tests {
             &[cell.clone()],
             &problem,
             &result,
-            &evidence
+            &evidence,
+            None
         )
         .is_none());
         assert!(!bridge_has_gain(&cell, &[cell.clone()], &problem, &result).unwrap());
@@ -722,7 +760,7 @@ mod tests {
         integrate_fast_probe(&mut actions, &cell, &problem, &result, &evidence, false);
         assert_eq!(actions.len(), 1);
         assert_eq!(
-            choose_action(actions, &[cell.clone()], &problem, &result, &evidence),
+            choose_action(actions, &[cell.clone()], &problem, &result, &evidence, None),
             Some(RecoveryAction::Refine(
                 cell.clone(),
                 RecoveryStrategy::FastProbe
@@ -737,9 +775,64 @@ mod tests {
         )];
         integrate_fast_probe(&mut actions, &cell, &problem, &result, &evidence, false);
         assert_eq!(
-            choose_action(actions, &[cell.clone()], &problem, &result, &evidence),
+            choose_action(actions, &[cell.clone()], &problem, &result, &evidence, None),
             Some(RecoveryAction::Refine(cell, RecoveryStrategy::DomainSearch))
         );
+        assert_eq!(result, before);
+    }
+
+    #[test]
+    fn joint_selection_reuses_premise_gain_instead_of_replacing_it_with_a_fast_probe() {
+        let mode = CellId::advice(7, 3);
+        let other = CellId::advice(0, 0);
+        let recovered = CellId::advice(8, 3);
+        let targets = [mode.clone(), other.clone(), recovered.clone()];
+        let mut problem = problem(&mode);
+        problem.expressions.push(super::super::expr::UcpExpr::mul(
+            super::super::expr::UcpExpr::var(recovered),
+            super::super::expr::UcpExpr::add(
+                super::super::expr::UcpExpr::var(mode.clone()),
+                super::super::expr::UcpExpr::known_constant_i64(-5),
+            ),
+        ));
+        let mut values = UcpValueFacts::new();
+        values.mark_domain(
+            mode.clone(),
+            UcpValueDomain::finite_set((0..10).map(BigInt::from)).unwrap(),
+        );
+        values.mark_domain(
+            other.clone(),
+            UcpValueDomain::finite_set([0.into(), 1.into()]).unwrap(),
+        );
+        let result = problem.analyze_with_values(UcpFacts::new(), values);
+        let before = result.clone();
+        let mut refinement = DomainRefinementState::new(
+            super::super::privacy_domain::PrivacyDomainRefinementOptions {
+                max_solver_checks: 32,
+                max_candidates_per_cell: 16,
+            },
+        );
+        assert_eq!(
+            refinement.choose_cell(&targets, &problem, &result).unwrap(),
+            Some(mode.clone())
+        );
+        let profile = super::super::profiling::ProfilingSession::start();
+        let selected = choose_action(
+            vec![
+                RecoveryAction::Refine(other, RecoveryStrategy::FastProbe),
+                RecoveryAction::Refine(mode.clone(), RecoveryStrategy::DomainSearch),
+            ],
+            &targets,
+            &problem,
+            &result,
+            &RecoveryEvidence::default(),
+            Some(&refinement),
+        );
+        assert_eq!(
+            selected,
+            Some(RecoveryAction::Refine(mode, RecoveryStrategy::DomainSearch))
+        );
+        assert_eq!(profile.snapshot().measurements["ucp.simulation"].calls, 1);
         assert_eq!(result, before);
     }
 
@@ -758,7 +851,7 @@ mod tests {
         )];
         integrate_fast_probe(&mut actions, &cell, &problem, &result, &evidence, false);
         assert_eq!(
-            choose_action(actions, &[cell.clone()], &problem, &result, &evidence),
+            choose_action(actions, &[cell.clone()], &problem, &result, &evidence, None),
             Some(RecoveryAction::Discover(
                 cell.clone(),
                 RecoveryStrategy::DomainSearch

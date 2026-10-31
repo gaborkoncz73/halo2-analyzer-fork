@@ -37,9 +37,12 @@ let options = PrivacyAnalysisOptions {
 };
 ```
 
-Pass these options to `analyze_private_recoverability`. Discovery is disabled by
-default (`max_solver_checks = 0`), so existing default analyses do not pay for
-enumeration. Full option literals require the scheduling fields or `..Default::default()`.
+Pass these options to `analyze_private_recoverability`. The outer
+`PrivacyAnalysisOptions::default()` enables discovery with 64 solver checks and
+at most 16 retained values per cell, alongside refinement and fast probes.
+The standalone `PrivacyDomainDiscoveryOptions::default()` has zero checks, so
+assigning it explicitly disables enumeration. Named ablation profiles isolate
+components; see [the standard configuration](unified-private-recovery.md#standard-and-ablation-configurations).
 
 Selected private cells without any current Delta domain are enumerated; useful
 non-target advice cells can also be considered within the shared bridge allowance.
@@ -141,16 +144,17 @@ Unknown or inconsistent initial contexts produce no recovered domains.
 
 The SMT snapshot is captured before inferred UCP assertions can be written.
 Every invocation recreates a separate query file from that immutable snapshot.
-Full-model searches additionally reuse established `Exact` advice-cell facts
-from the current Delta as redundant equalities. They must already follow from
-the original `C AND P`; finite domains, sampled values, and uniqueness facts
-without values are not exported. The queried cell and its copy aliases are
-excluded. The exact-fact cache is refreshed after propagation, so values learned
+Full-model searches additionally reuse established exact values and bounded
+finite covering domains from the current Delta as redundant assertions. These
+must already follow from the original `C AND P`; sampled values and uniqueness
+facts without domains are not exported. Completeness is not required for a
+covering set. The queried cell and its copy aliases are excluded.
+The search-fact cache is refreshed after propagation, so domains learned
 through SMT-to-UCP feedback are available to subsequent searches without changing
 the original snapshot. Blocking is by target field value, not by whole witness
 assignment, so irrelevant free witnesses cannot prevent proving a singleton
 projection. Targeted subset checks and independent validation remain free of
-these extra equalities. This optimization does not add solver invocations or
+these extra assertions. This optimization does not add solver invocations or
 reset any search allowance; a runtime improvement is not guaranteed.
 
 With targeted subsets disabled and no imported samples, completing a projection

@@ -1,15 +1,64 @@
 # UCP és keresési teljesítmény
 
+## Snapshot-alapú Fast Probe
+
+A [v9 javítás](seeded-fast-probes.md) ismert W-mintánál kihagyja a kezdő
+modellkeresést, és a probe teljes SAT-modelljeit más célokhoz is megőrzi.
+Az alap invoice combined hívásszáma 10-ről 7-re csökkent (0,69 s).
+A díjkatalógusos kontroll combined futása 139 helyett 138 hívás, 261,86 s,
+mind a 21 domain teljes. A közvetlen maradékkizárás még timeoutol, ezért a
+99 jelöltvizsgálat megmarad. Egyszeri mérések, nem általános gyorsulási ígéretek.
+
+## Teljes Modellminták Megosztása
+
+A [jelenlegi jelöltellenőrzés](shared-model-samples.md) más célcellák értékeit
+is megőrzi ugyanazon teljes SAT-modellekből. Az alap invoice új egyszeri
+release-próbája 0,74 s / 10 hívás / 19 teljes domain, a H=21 feláras változaté
+2,43 s / 16 hívás / 21 teljes domain. A díjkatalógusos kontroll 89,33 s,
+48 hívás, 18 teljes domain és 12 bizonyítottan nem egyedi cél eredményt adott;
+továbbra is részleges. Az alábbi adatok korábbi keresési szabályzatok mérései.
+
+## Meglévő Lefedés Újrahasználata
+
+A [jelenlegi refinement](established-domain-refinement.md) átveszi a valódi
+Delta-domain lefedését, teljességtől függetlenül. Az alap invoice egyszeri
+release-próbája 0,81 s / 14 hívás / 19 teljes domain, a H=21 feláras változaté
+2,59 s / 24 hívás / 21 teljes domain. A díjkatalógusos kontroll ugyanannyi,
+48 hívásból 7 helyett 15 teljes domaint és 1 helyett 10 nem egyedi célt igazolt,
+de az idő nem csökkent: 88,92 s helyett 92,42 s lett. A futás továbbra is részleges.
+
+## Kis Domainek Újrahasználata
+
+A [domainekkel segített keresés](domain-assisted-search.md) már a kis lefedő
+halmazokat is átadja a recovery SMT-kérdéseinek. Új egyszeri release-próbák:
+alap invoice 1,05 s / 16 hívás / 19 teljes domain; H=21 feláras invoice
+2,90 s / 28 hívás / 21 teljes domain. A díjkatalógusos H=25 kontroll
+104,46 s helyett 88,92 s alatt, erősebb, de még részleges eredménnyel futott.
+Az alábbi pontos-tényes és régebbi cache-mérések korábbi verziók eredményei.
+
+## Korábbi Pontos Tényekkel Segített Lefedés
+
+A pontos-tényes változat a lefedési kérdésekhez is hozzáadja a már igazolt pontos
+értékeket, az eredeti snapshot módosítása nélkül. A külön független validálás
+nem használja ezeket premisszaként. A felár nélküli invoice egyszeri release-próbája
+az alapértelmezett 3 s/hívás kerettel 1,72 s, 16 SMT-hívás és 19 teljes cél-domain
+lett (16 pontos érték, három többértékű domain). UCP: 0,48 s; SMT: 1,20 s.
+A korábbi, pontos tények nélküli lefedés release-próbája 60 s/hívás mellett
+120,69 s és két lefedési timeout volt. A lentebb szereplő debugmérések történeti
+eredmények; nem hasonlíthatók közvetlenül az új release-időhöz.
+
+## Korábbi Következtetési És Cache-mérések
+
 Az alábbi cache-mérések a korábbi, még sikertelen visszaállítás történetét
 rögzítik. Az új lineáris/intervallumos következtetés már **16 konkrét célértéket**
-visszaállít ugyanazon circuitből. A jelenlegi teljes ellenőrzött futás **10,52 s,
+visszaállít ugyanazon circuitből. Az akkori teljes ellenőrzött futás **10,52 s,
 8 SMT-hívás, `Analyzed`** eredményt adott; a végső újramérés és az általános
 szabály leírása a [relációs következtetés dokumentációjában](ucp-relational-propagation.md)
 és a [számlapélda útmutatójában](../korrekt/src/circuit_analyzer/ucp/thesis_examples/README.md)
 található. A régi `0 exact / QueryLimitReached` eredmények nem a jelenlegi
 következtetési képességet jellemzik.
 
-## Jelenlegi Visszaállítás
+## Korábbi Visszaállítás
 
 | Mutató | Csak cache-gyorsítás után | Új következtetés, kötelező baseline | Publikus értékekkel induló visszaállítás |
 | --- | ---: | ---: | ---: |
