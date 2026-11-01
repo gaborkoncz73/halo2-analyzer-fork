@@ -8,6 +8,13 @@ import Proofs.DomainMerge
 import Proofs.FieldNormalization
 import Proofs.CanonicalMerge
 import Proofs.CertificationControl
+import Proofs.Certification
+import Proofs.RecoveryCore
+import Proofs.EngineFixpoint
+import Proofs.RecoveryDriver
+import Proofs.RuleLink
+import Proofs.PrivateRecovery
+import Proofs.Examples
 import Lean
 
 /- A gepi ellenorzes a tetelfuggosegekben sem enged hianyzo bizonyitast vagy sajat axiomat. -/
@@ -52,3 +59,27 @@ run_cmd do
 #print axioms SourceProof.rust_certification_missing_domain_keeps_state
 #print axioms SourceProof.rust_certification_domain_value_failure_keeps_state
 #print axioms SourceProof.rust_certification_records_normalized_candidate
+#print axioms SourceProof.rust_certification_preserves_knowledge
+#print axioms SourceProof.rust_merge_evidence_sound
+#print axioms SourceProof.rust_finish_merge_sound
+#print axioms SourceProof.engine_execution_sound
+#print axioms SourceProof.core_machine_contracts
+#print axioms SourceProof.rust_private_recovery_sound
+#print axioms SourceProof.rust_recovered_value_is_forced
+#print axioms SourceProof.core_refines_model
+#print axioms SourceProof.all_but_one_rule_evidence
+#print axioms SourceProof.linear_system_rule_evidence
+#print axioms SourceProof.base_conversion_rule_evidence
+#print axioms SourceProof.fast_probe_evidence
+#print axioms SourceProof.refinement_evidence
+#print axioms SourceProof.qed2_fixpoint_soundness
+#print axioms SourceProof.private_cells_determined_by_public
+#print axioms SourceProof.rust_recovery_reveals_secret
+#print axioms SourceProof.rust_recovery_proves_overconstrained
+#print axioms SourceProof.recovery_is_witness_independent
+#print axioms SourceProof.rust_rules_reject_cube_equation
+#print axioms SourceProof.cube_is_determined_without_rule
+#print axioms SourceProof.example_run
+#print axioms SourceProof.example_recovers_secret
+#print axioms SourceProof.example_is_overconstrained
+#print axioms SourceProof.public_value_claim

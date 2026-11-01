@@ -21,6 +21,7 @@ import Recovery.ConditionalReasoning
 import Recovery.Cache
 import Recovery.PropagationView
 import Recovery.GlobalChecks
+import Recovery.Lookup
 import Lean
 
 /-!
@@ -63,3 +64,5 @@ run_cmd do
 #print axioms Recovery.global_recovery_reports_sound
 #print axioms Recovery.hinted_exclusion_proves_original_coverage
 #print axioms Recovery.cached_expression_domain_sound
+#print axioms Recovery.lookup_column_covers
+#print axioms Recovery.lookup_empty_is_unsat
