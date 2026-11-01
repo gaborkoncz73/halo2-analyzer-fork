@@ -282,13 +282,13 @@ fn thesis_invoice_approval_ucp_fixpoint() {
         .iter()
         .filter(|c| result.value_facts.known_value(c).is_some())
         .count();
-    assert_eq!(exact, 5);
-    assert!(result.value_facts.known_value(&cell(SURCHARGE)).is_none());
-    assert!(entries(result.value_facts.domain(&cell(APPROVAL_MODE)).unwrap()).contains(&5.into()));
-    assert!(result
-        .value_facts
-        .known_value(&CellId::advice(0, 0))
-        .is_none());
+    // A korlatos felsorolas ota a UCP a korabbi 5 helyett 17 celerteket SMT nelkul is visszaallit.
+    // A segedfuggveny minden tartomanyt a kimerito referenciaval vet ossze.
+    assert_eq!(exact, 17);
+    assert_eq!(
+        result.value_facts.known_value(&cell(SURCHARGE)),
+        Some(&BigInt::from(0))
+    );
 }
 
 #[test]
@@ -431,33 +431,19 @@ fn thesis_invoice_approval_recovery_feedback() {
             target.cell
         );
     }
-    let [RecoveryPhase::Ucp { counts: first, .. }, RecoveryPhase::Smt { steps, .. }, RecoveryPhase::Ucp {
-        counts: second,
-        updates,
-        ..
-    }, ..] = report.phases.as_slice()
-    else {
-        panic!("A példa valódi UCP--SMT--UCP átadást igényel");
+    // A korlatos felsorolas ota a 17 pontos ertekhez mar az elso UCP-fixpont is elegendo.
+    let Some(RecoveryPhase::Ucp { counts: first, .. }) = report.phases.first() else {
+        panic!("A visszaallitas UCP-fixponttal indul");
     };
-    assert_eq!(first.exact_values, 5);
-    assert_eq!(second.exact_values, 17);
-    assert!(steps.iter().any(|step| step.propagation_requested
-        && step
-            .updates
+    assert_eq!(first.exact_values, 17);
+    assert_eq!(
+        report
+            .cells
             .iter()
-            .any(|update| update.cell == cell(APPROVAL_MODE)
-                && update
-                    .domain
-                    .as_ref()
-                    .is_some_and(|d| !entries(d).contains(&5.into())))));
-    assert!(updates.iter().any(|update| update.cell == cell(SURCHARGE)
-        && update.domain == Some(UcpValueDomain::exact(0.into()))));
-    for row in 0..4 {
-        assert!(updates
-            .iter()
-            .any(|update| update.cell == CellId::advice(0, row)
-                && matches!(update.domain, Some(UcpValueDomain::Exact(_)))));
-    }
+            .find(|target| target.cell == cell(SURCHARGE))
+            .and_then(|target| target.domain.as_ref()),
+        Some(&UcpValueDomain::exact(0.into()))
+    );
 }
 
 #[test]

@@ -2204,6 +2204,8 @@ fn demo_linear_masking_independent_masks_keep_secret_ambiguous() {
 // SMT narrows a private input to two feasible values; UCP then recovers a dependent cell.
 #[test]
 fn demo_finite_domain_refinement_restarts_ucp_without_guessing_the_secret() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     use super::{
         privacy_domain_tests::{
             finite_projection_demo_input, finite_projection_demo_options,

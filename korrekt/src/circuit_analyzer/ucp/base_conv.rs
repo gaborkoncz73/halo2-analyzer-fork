@@ -10,7 +10,7 @@ use super::{
     value::{bounded_value, UcpValueFacts},
 };
 use num_bigint::BigInt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseConvInference {
@@ -156,6 +156,123 @@ fn base_conversion_candidate(
         digits,
         digit_values,
     })
+}
+
+/// A nullaegyenletek linearis alakjai; egy propagacios korben egyszer kesziti el oket.
+pub(crate) struct BaseEquations(Vec<LinearExpr>);
+
+pub(crate) fn base_equations(expressions: &[UcpExpr], modulus: &BigInt) -> BaseEquations {
+    BaseEquations(
+        expressions
+            .iter()
+            .filter_map(|expr| linearize_zero_equation(expr, modulus))
+            .collect(),
+    )
+}
+
+/// Egy nagy tablaba tartozo x es az x = sum(c^i * y_i) felbontas egyuttes kovetkezmenye.
+/// A no-wrap es szamjegykorlat feltetelet ugyanaz az ellenorzes adja, mint a Base-Conv szabalynal,
+/// ezert x minden megoldasban pontosan a szamjegyek erteke; minden szurt sor biztosan lehetetlen.
+pub(crate) fn infer_table_digits(
+    input: &UcpExpr,
+    table: &[BigInt],
+    equations: &BaseEquations,
+    values: &UcpValueFacts,
+    modulus: &BigInt,
+) -> Vec<(CellId, super::value::UcpValueDomain)> {
+    use super::value::{normalize_field_value, UcpValueDomain};
+    if modulus <= &BigInt::from(1) {
+        return Vec::new();
+    }
+    let Some(linear_input) = linearize(input) else {
+        return Vec::new();
+    };
+    if linear_input.constant != BigInt::from(0) || linear_input.terms.len() != 1 {
+        return Vec::new();
+    }
+    let (packed, coefficient) = linear_input.terms.iter().next().unwrap();
+    if coefficient != &BigInt::from(1) {
+        return Vec::new();
+    }
+    let mut results = Vec::new();
+    for linear in &equations.0 {
+        let Some(packed_coefficient) = linear.terms.get(packed) else {
+            continue;
+        };
+        if !is_plus_or_minus_one(packed_coefficient) {
+            continue;
+        }
+        let Some(candidate) =
+            base_conversion_candidate(linear, packed, packed_coefficient, values, modulus)
+        else {
+            continue;
+        };
+        let domains: Option<Vec<BTreeSet<BigInt>>> = candidate
+            .digits
+            .iter()
+            .map(|digit| {
+                values.domain(digit).map(|domain| match domain {
+                    UcpValueDomain::Exact(value) => [value.clone()].into(),
+                    UcpValueDomain::FiniteSet(values) => values.clone(),
+                })
+            })
+            .collect();
+        let Some(domains) = domains else {
+            continue;
+        };
+        let packed_domain = values.domain(packed).map(|domain| match domain {
+            UcpValueDomain::Exact(value) => BTreeSet::from([value.clone()]),
+            UcpValueDomain::FiniteSet(values) => values.clone(),
+        });
+        let mut kept_digits = vec![BTreeSet::new(); candidate.digits.len()];
+        let mut kept_packed = BTreeSet::new();
+        for value in table {
+            let residue = ((value % modulus) + modulus) % modulus;
+            let Some(digits) = exact_digits(&residue, &candidate.base, candidate.digits.len())
+            else {
+                continue;
+            };
+            let Some(canonical) = normalize_field_value(residue, modulus) else {
+                continue;
+            };
+            if packed_domain
+                .as_ref()
+                .is_some_and(|domain| !domain.contains(&canonical))
+            {
+                continue;
+            }
+            let normalized: Option<Vec<_>> = digits
+                .into_iter()
+                .map(|digit| normalize_field_value(digit, modulus))
+                .collect();
+            let Some(normalized) = normalized else {
+                continue;
+            };
+            if normalized
+                .iter()
+                .zip(&domains)
+                .any(|(digit, domain)| !domain.contains(digit))
+            {
+                continue;
+            }
+            for (kept, digit) in kept_digits.iter_mut().zip(normalized) {
+                kept.insert(digit);
+            }
+            kept_packed.insert(canonical);
+        }
+        if kept_packed.is_empty() {
+            continue;
+        }
+        for (digit, kept) in candidate.digits.iter().zip(kept_digits) {
+            if let Some(domain) = UcpValueDomain::finite_set(kept) {
+                results.push((digit.clone(), domain));
+            }
+        }
+        if let Some(domain) = UcpValueDomain::finite_set(kept_packed) {
+            results.push((packed.clone(), domain));
+        }
+    }
+    results
 }
 
 pub(crate) struct FiniteBaseCandidate {

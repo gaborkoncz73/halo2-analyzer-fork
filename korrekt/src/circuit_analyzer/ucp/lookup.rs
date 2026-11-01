@@ -1,6 +1,7 @@
 //! A véges rendezett n-esek tagsági feltételeivel megőrzi az oszlopok közötti korrelációkat.
 
 use super::{
+    base_conv::{infer_table_digits, BaseEquations},
     cell::CellId,
     expr::UcpExpr,
     value::{
@@ -9,14 +10,17 @@ use super::{
     },
 };
 use num_bigint::BigInt;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 pub(crate) const MAX_LOOKUP_ARITY: usize = 16;
+// A nagy egyoszlopos tablat csak helyierteki felbontason keresztul szuri, soha nem tarolja domainkent.
+pub(crate) const MAX_LARGE_TABLE_ROWS: usize = 1 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UcpLookup {
     inputs: Vec<UcpExpr>,
     tuples: Vec<Vec<BigInt>>,
+    large_column: Option<Arc<Vec<BigInt>>>,
 }
 
 impl UcpLookup {
@@ -35,7 +39,34 @@ impl UcpLookup {
         Some(Self {
             inputs,
             tuples: tuples.into_iter().collect(),
+            large_column: None,
         })
+    }
+
+    /// A domainkorlatnal nagyobb egyoszlopos tablat kozos, valtoztathatatlan listakent tartja meg.
+    pub(crate) fn large(input: UcpExpr, column: Arc<Vec<BigInt>>) -> Self {
+        Self {
+            inputs: vec![input],
+            tuples: Vec::new(),
+            large_column: Some(column),
+        }
+    }
+
+    pub(crate) fn is_large(&self) -> bool {
+        self.large_column.is_some()
+    }
+
+    // A tabla ertekeit szamjegyekre bontja, es a tobbi cella domainje alapjan szuri a sorokat.
+    pub(crate) fn infer_large(
+        &self,
+        equations: &BaseEquations,
+        values: &UcpValueFacts,
+        modulus: &BigInt,
+    ) -> Vec<(CellId, UcpValueDomain)> {
+        match &self.large_column {
+            Some(column) => infer_table_digits(&self.inputs[0], column, equations, values, modulus),
+            None => Vec::new(),
+        }
     }
 
     pub fn inputs(&self) -> &[UcpExpr] {
@@ -44,6 +75,9 @@ impl UcpLookup {
 
     // A teljes sorokat szűri a jelenlegi bemeneti domainekkel; ismeretlen domainnel nem zár ki sort.
     fn supported_rows(&self, values: &UcpValueFacts, modulus: &BigInt) -> Option<Vec<Vec<BigInt>>> {
+        if self.is_large() {
+            return None;
+        }
         let domains: Vec<_> = self
             .inputs
             .iter()

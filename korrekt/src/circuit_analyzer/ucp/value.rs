@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 mod inference;
 pub(crate) use inference::LinearDomains;
 #[cfg(test)]
+pub(crate) use inference::without_zero_enumeration;
+#[cfg(test)]
 use inference::{
     infer_base_conv_value_domains, infer_root_expression_domain, mod_field,
     MAX_LINEAR_SYSTEM_CELLS, MAX_LINEAR_SYSTEM_EQUATIONS,
@@ -31,7 +33,7 @@ pub(crate) const MAX_FINITE_DOMAIN_SIZE: usize = 256;
 pub const MAX_VALUE_BITS: u64 = 4096;
 
 //Minden valóban lehetséges értéket lefed, de tartalmazhat még kizáratlan jelölteket is.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum UcpValueDomain {
     Exact(BigInt),
     //Explicit halmaz, nem intervallum: például {1,3} nem tartalmazza a 2-t.
@@ -429,49 +431,212 @@ fn expression_domain_with_optional_modulus(
     values: &UcpValueFacts,
     field_modulus: Option<&BigInt>,
 ) -> Option<UcpValueDomain> {
+    evaluate_expression_facts(expr, values, field_modulus).into_requested_domain()
+}
+
+// Egy részkifejezés kiértékelésének minden eredménye; a szülő újraszámolás nélkül használja.
+// A nulla-rövidzárhoz a modulus nélküli típus kell, ezért azt testbeli számításnál is megőrzi.
+struct ExpressionFacts {
+    plain_domain: Option<UcpValueDomain>,
+    plain_kind: ValueKind,
+    field: Option<FieldFacts>,
+}
+
+struct FieldFacts {
+    domain: Option<UcpValueDomain>,
+    kind: ValueKind,
+}
+
+impl ExpressionFacts {
+    fn into_requested_domain(self) -> Option<UcpValueDomain> {
+        match self.field {
+            Some(field) => field.domain,
+            None => self.plain_domain,
+        }
+    }
+
+    fn requested_kind(&self) -> ValueKind {
+        match &self.field {
+            Some(field) => field.kind,
+            None => self.plain_kind,
+        }
+    }
+}
+
+// Az algebrai nulla/nemnulla szabály; csak akkor fut, ha a teljes domain nem számolható ki.
+fn algebraic_value_kind<'a>(
+    expr: &UcpExpr,
+    modulus: Option<&BigInt>,
+    children: impl Fn(&'a ExpressionFacts) -> ValueKind,
+    first: Option<&'a ExpressionFacts>,
+    second: Option<&'a ExpressionFacts>,
+) -> ValueKind {
+    match expr {
+        UcpExpr::Const(UcpScalar::Zero) => ValueKind::Zero,
+        UcpExpr::Const(UcpScalar::NonZero) => ValueKind::NonZero,
+        UcpExpr::Const(UcpScalar::Known(value)) => match modulus {
+            Some(modulus) if value % modulus == BigInt::from(0) => ValueKind::Zero,
+            Some(_) => ValueKind::NonZero,
+            None => ValueKind::Unknown,
+        },
+        UcpExpr::Scale(_, scalar) => {
+            let inner_kind = first.map_or(ValueKind::Unknown, &children);
+            if scalar.is_zero()
+                || matches!(scalar, UcpScalar::Known(value)
+                    if modulus.is_some_and(|modulus| value % modulus == BigInt::from(0)))
+                || inner_kind == ValueKind::Zero
+            {
+                ValueKind::Zero
+            } else if scalar.is_non_zero_with_modulus(modulus) {
+                inner_kind
+            } else {
+                ValueKind::Unknown
+            }
+        }
+        UcpExpr::Neg(_) => first.map_or(ValueKind::Unknown, &children),
+        UcpExpr::Mul(_, _) => match (
+            first.map_or(ValueKind::Unknown, &children),
+            second.map_or(ValueKind::Unknown, &children),
+        ) {
+            (ValueKind::Zero, _) | (_, ValueKind::Zero) => ValueKind::Zero,
+            (ValueKind::NonZero, ValueKind::NonZero) => ValueKind::NonZero,
+            _ => ValueKind::Unknown,
+        },
+        _ => ValueKind::Unknown,
+    }
+}
+
+// Egy műveleti csomópont domainje a gyerekek már kiszámolt domainjeiből és nulla-típusából.
+fn combine_expression_domain(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    modulus: Option<&BigInt>,
+    first: Option<(&Option<UcpValueDomain>, ValueKind)>,
+    second: Option<(&Option<UcpValueDomain>, ValueKind)>,
+) -> Option<UcpValueDomain> {
     match expr {
         UcpExpr::Var(cell) => {
             let domain = values.domain(cell)?;
-            match field_modulus {
-                Some(_) => finite_domain_from_values(domain_values(domain), field_modulus),
+            match modulus {
+                Some(_) => finite_domain_from_values(domain_values(domain), modulus),
                 None => Some(domain.clone()),
             }
         }
-        UcpExpr::Const(scalar) => finite_domain_from_values([scalar.as_known()?], field_modulus),
-        UcpExpr::Neg(inner) => {
-            let inner = expression_domain_with_optional_modulus(inner, values, field_modulus)?;
-            map_domain_values(&inner, field_modulus, |value| -value)
+        UcpExpr::Const(scalar) => finite_domain_from_values([scalar.as_known()?], modulus),
+        UcpExpr::Neg(_) => {
+            let inner = first?.0.as_ref()?;
+            map_domain_values(inner, modulus, |value| -value)
         }
-        UcpExpr::Add(left, right) => {
-            let left = expression_domain_with_optional_modulus(left, values, field_modulus)?;
-            let right = expression_domain_with_optional_modulus(right, values, field_modulus)?;
-            combine_domain_values(&left, &right, field_modulus, |left, right| left + right)
+        UcpExpr::Add(_, _) => {
+            let left = first?.0.as_ref()?;
+            let right = second?.0.as_ref()?;
+            combine_domain_values(left, right, modulus, |left, right| left + right)
         }
-        UcpExpr::Mul(left, right) => {
-            if value_kind(left, values) == ValueKind::Zero
-                || value_kind(right, values) == ValueKind::Zero
-            {
+        UcpExpr::Mul(_, _) => {
+            let (left, left_kind) = first?;
+            let (right, right_kind) = second?;
+            if left_kind == ValueKind::Zero || right_kind == ValueKind::Zero {
                 return Some(UcpValueDomain::exact(BigInt::from(0)));
             }
-
-            let left = expression_domain_with_optional_modulus(left, values, field_modulus)?;
-            let right = expression_domain_with_optional_modulus(right, values, field_modulus)?;
-            combine_domain_values(&left, &right, field_modulus, |left, right| left * right)
+            let left = left.as_ref()?;
+            let right = right.as_ref()?;
+            combine_domain_values(left, right, modulus, |left, right| left * right)
         }
-        UcpExpr::Scale(inner, scalar) => match scalar {
+        UcpExpr::Scale(_, scalar) => match scalar {
             UcpScalar::Zero => Some(UcpValueDomain::exact(BigInt::from(0))),
             UcpScalar::Known(scale) => {
-                let inner = expression_domain_with_optional_modulus(inner, values, field_modulus)?;
-                map_domain_values(&inner, field_modulus, |value| value * scale)
+                let inner = first?.0.as_ref()?;
+                map_domain_values(inner, modulus, |value| value * scale)
             }
             UcpScalar::NonZero | UcpScalar::Unknown => {
-                if value_kind(inner, values) == ValueKind::Zero {
+                if first?.1 == ValueKind::Zero {
                     Some(UcpValueDomain::exact(BigInt::from(0)))
                 } else {
                     None
                 }
             }
         },
+    }
+}
+
+fn plain_view(child: &Option<ExpressionFacts>) -> Option<(&Option<UcpValueDomain>, ValueKind)> {
+    child
+        .as_ref()
+        .map(|child| (&child.plain_domain, child.plain_kind))
+}
+
+// A nulla-rövidzár a korábbi szemantika szerint a modulus nélküli típust használja.
+fn field_view(child: &Option<ExpressionFacts>) -> Option<(&Option<UcpValueDomain>, ValueKind)> {
+    child.as_ref().map(|child| {
+        let field = child
+            .field
+            .as_ref()
+            .expect("A gyerekek ugyanazzal a modulussal értékelődnek ki");
+        (&field.domain, child.plain_kind)
+    })
+}
+
+// Alulról felfelé, részkifejezésenként egyszer számol, így a mélység nem okoz exponenciális újraszámolást.
+fn evaluate_expression_facts(
+    expr: &UcpExpr,
+    values: &UcpValueFacts,
+    modulus: Option<&BigInt>,
+) -> ExpressionFacts {
+    let (first, second) = match expr {
+        UcpExpr::Var(_) | UcpExpr::Const(_) => (None, None),
+        UcpExpr::Neg(inner) | UcpExpr::Scale(inner, _) => (
+            Some(evaluate_expression_facts(inner, values, modulus)),
+            None,
+        ),
+        UcpExpr::Add(left, right) | UcpExpr::Mul(left, right) => (
+            Some(evaluate_expression_facts(left, values, modulus)),
+            Some(evaluate_expression_facts(right, values, modulus)),
+        ),
+    };
+    let plain_domain =
+        combine_expression_domain(expr, values, None, plain_view(&first), plain_view(&second));
+    let plain_kind = match &plain_domain {
+        Some(domain) => domain.value_kind(),
+        None => algebraic_value_kind(
+            expr,
+            None,
+            |child| child.plain_kind,
+            first.as_ref(),
+            second.as_ref(),
+        ),
+    };
+    let field = modulus.map(|field_modulus| {
+        let domain = combine_expression_domain(
+            expr,
+            values,
+            modulus,
+            field_view(&first),
+            field_view(&second),
+        );
+        let kind = if field_modulus <= &BigInt::from(1) {
+            ValueKind::Unknown
+        } else if let Some(domain) = &domain {
+            domain.value_kind()
+        } else {
+            algebraic_value_kind(
+                expr,
+                modulus,
+                |child| {
+                    child
+                        .field
+                        .as_ref()
+                        .map_or(ValueKind::Unknown, |field| field.kind)
+                },
+                first.as_ref(),
+                second.as_ref(),
+            )
+        };
+        FieldFacts { domain, kind }
+    });
+    ExpressionFacts {
+        plain_domain,
+        plain_kind,
+        field,
     }
 }
 
@@ -590,46 +755,7 @@ fn value_kind_with_optional_modulus(
     if modulus.is_some_and(|modulus| modulus <= &BigInt::from(1)) {
         return ValueKind::Unknown;
     }
-    //Ha a teljes domain nem számolható ki, az algebrai nulla/nemnulla tulajdonság még felismerhető.
-    if let Some(domain) = expression_domain_with_optional_modulus(expr, values, modulus) {
-        domain.value_kind()
-    } else {
-        match expr {
-            UcpExpr::Const(UcpScalar::Zero) => ValueKind::Zero,
-            UcpExpr::Const(UcpScalar::NonZero) => ValueKind::NonZero,
-            UcpExpr::Const(UcpScalar::Known(value)) => match modulus {
-                Some(modulus) if value % modulus == BigInt::from(0) => ValueKind::Zero,
-                Some(_) => ValueKind::NonZero,
-                None => ValueKind::Unknown,
-            },
-            UcpExpr::Scale(inner, scalar) => {
-                let inner_kind = value_kind_with_optional_modulus(inner, values, modulus);
-                if scalar.is_zero()
-                    || matches!(scalar, UcpScalar::Known(value)
-                        if modulus.is_some_and(|modulus| value % modulus == BigInt::from(0)))
-                    || inner_kind == ValueKind::Zero
-                {
-                    ValueKind::Zero
-                } else if scalar.is_non_zero_with_modulus(modulus) {
-                    inner_kind
-                } else {
-                    ValueKind::Unknown
-                }
-            }
-            UcpExpr::Neg(inner) => value_kind_with_optional_modulus(inner, values, modulus),
-            UcpExpr::Mul(left, right) => {
-                match (
-                    value_kind_with_optional_modulus(left, values, modulus),
-                    value_kind_with_optional_modulus(right, values, modulus),
-                ) {
-                    (ValueKind::Zero, _) | (_, ValueKind::Zero) => ValueKind::Zero,
-                    (ValueKind::NonZero, ValueKind::NonZero) => ValueKind::NonZero,
-                    _ => ValueKind::Unknown,
-                }
-            }
-            _ => ValueKind::Unknown,
-        }
-    }
+    evaluate_expression_facts(expr, values, modulus).requested_kind()
 }
 
 pub(crate) fn parse_cell_id(name: &str) -> Option<CellId> {
@@ -649,6 +775,10 @@ pub(crate) fn parse_cell_id(name: &str) -> Option<CellId> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "tests/expression_evaluation_tests.rs"]
+mod expression_evaluation_tests;
 
 #[cfg(test)]
 mod tests {

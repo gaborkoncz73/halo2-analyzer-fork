@@ -72,6 +72,7 @@ impl Profile {
     fn options(self, timeout_ms: u64) -> PrivacyAnalysisOptions {
         PrivacyAnalysisOptions {
             compute_structural_baseline: false,
+            construct_models: false,
             max_semantic_queries: 32,
             solver_timeout_ms: Some(timeout_ms),
             initial_sat_timeout_ms: None,
@@ -979,6 +980,8 @@ fn privacy_profile_options_isolate_paths_and_keep_solver_timeouts_equal() {
 
 #[test]
 fn privacy_profile_smoke_compares_unseeded_and_seeded_projections() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     for id in ["expanded_two_roots", "lookup_seeded_two_roots"] {
         let measured = measure_case(id, 1, 2_000).unwrap();
         assert_eq!(measured.trials.len(), 8);

@@ -22,6 +22,8 @@ import Recovery.Cache
 import Recovery.PropagationView
 import Recovery.GlobalChecks
 import Recovery.Lookup
+import Recovery.BoundedEnumeration
+import Recovery.ModelConstruction
 import Lean
 
 /-!
@@ -66,3 +68,10 @@ run_cmd do
 #print axioms Recovery.cached_expression_domain_sound
 #print axioms Recovery.lookup_column_covers
 #print axioms Recovery.lookup_empty_is_unsat
+#print axioms Recovery.enumeration_keeps_every_solution
+#print axioms Recovery.table_filter_keeps_actual_row
+#print axioms Recovery.strengthened_model_is_feasible
+#print axioms Recovery.hypothesis_conflict_refutes
+#print axioms Recovery.case_split_refutes
+#print axioms Recovery.refutation_preserves_coverage
+#print axioms Recovery.constructed_samples_complete

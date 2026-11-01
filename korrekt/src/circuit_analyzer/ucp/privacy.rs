@@ -10,6 +10,7 @@ use super::{
     cell::{CellId, CellKind},
     engine::UcpResult,
     extractor::{extract_ucp_problem, UcpProblem},
+    model_construction::{construct_model, construct_unassumed_model, ModelConstruction},
     facts::UcpFacts,
     privacy_discovery::{
         full_discovery_response, DiscoveryProbe, DiscoveryResponse, DomainDiscoveryState,
@@ -94,6 +95,8 @@ pub struct PrivacyAnalysisOptions {
     pub domain_refinement: PrivacyDomainRefinementOptions,
     /// Domain nélküli cellákra opcionális eredeti modellbeli értékfelsorolást engedélyez.
     pub domain_discovery: PrivacyDomainDiscoveryOptions,
+    /// A jeloltvizsgalat elott UCP-vel modellt epit, es szabalyokkal kizarja a lehetetlen jelolteket.
+    pub construct_models: bool,
 }
 
 impl Default for PrivacyAnalysisOptions {
@@ -112,6 +115,7 @@ impl Default for PrivacyAnalysisOptions {
                 max_solver_checks: 64,
                 ..PrivacyDomainDiscoveryOptions::default()
             },
+            construct_models: true,
         }
     }
 }
@@ -160,6 +164,10 @@ impl PrivacyAnalysisOptions {
             PrivacyAnalysisProfile::Standard | PrivacyAnalysisProfile::DiscoveryOnly
         ) {
             self.domain_discovery.max_solver_checks = 0;
+        }
+        // A gyorsproba-profil a solveres probat meri, ezert nem helyettesiti modellepitessel.
+        if profile == PrivacyAnalysisProfile::FastProbeOnly {
+            self.construct_models = false;
         }
         self
     }
@@ -580,6 +588,11 @@ fn initialize_knowledge(
     (facts, values)
 }
 
+// Ennyi egymas utani sikertelen modellepites utan a futas a solverre hagyatkozik.
+const MAX_MODEL_CONSTRUCTION_FAILURES: usize = 8;
+// Egy gyorsproba ennyi jeloltet vizsgal szabalyokkal, mielott a solverhez fordulna.
+const MAX_PROBE_CONSTRUCTIONS: usize = 8;
+
 fn propagate_to_fixpoint(
     problem: &UcpProblem,
     facts: UcpFacts,
@@ -951,6 +964,7 @@ impl<F: AnalyzableField, Q: RecoveryProbe<F>> RecoveryMachine for RecoveryDriver
         };
         let recovered = {
             let mut operations = RecoveryOperations {
+                problem: Some(self.problem),
                 analyzer: self.analyzer,
                 analyzer_input: self.analyzer_input,
                 original: self.original,
@@ -1268,6 +1282,7 @@ where
 // A kiválasztott műveletet kapcsolja az SMT-backendhez. Nem választ következő cellát.
 // A domainalgoritmusok saját moduljaikban kezelik a jelölteket és a keresési kereteket.
 struct RecoveryOperations<'a, F: AnalyzableField, Q> {
+    problem: Option<&'a UcpProblem>,
     analyzer: &'a mut Analyzer<F>,
     analyzer_input: &'a AnalyzerInput,
     original: Option<&'a OriginalPrivateQueryContext>,
@@ -1324,6 +1339,69 @@ where
                         !exclude,
                         "Established recovery domain unexpectedly requested coverage"
                     );
+                    if let (Some(problem), Some(value), true) = (
+                        self.problem,
+                        domain.exact_value(),
+                        self.options.construct_models
+                            && self.search.model_construction_failures
+                                < MAX_MODEL_CONSTRUCTION_FAILURES,
+                    ) {
+                        let seen_samples = &model_samples;
+                        let construction = construct_model(
+                            problem,
+                            self.knowledge,
+                            cell,
+                            value,
+                            &|other, entry| {
+                                !evidence.samples(other).contains(entry)
+                                    && !seen_samples
+                                        .get(other)
+                                        .is_some_and(|known| known.contains(entry))
+                            },
+                        );
+                        let mut proposal = None;
+                        match construction {
+                            ModelConstruction::Refuted => {
+                                self.search.statistics.ucp_refuted_candidates += 1;
+                                self.search.model_construction_failures = 0;
+                                return Ok(Satisfiability::Unsatisfiable);
+                            }
+                            ModelConstruction::Candidate(values) => proposal = Some(values),
+                            ModelConstruction::GaveUp => {}
+                        }
+                        // A javaslat csak az eredeti kodolas SAT-valaszaval valik mintava.
+                        // UNSAT vagy idotullepes a javaslatrol szol, ezert a teljes kerdes kovetkezik.
+                        let answer = proposal
+                            .and_then(|values| original.search_facts(&*self.analyzer, &values).ok())
+                            .and_then(|hints| {
+                                measure_check(
+                                    &mut checks,
+                                    RecoverySmtCheckKind::ConstructedModel,
+                                    || {
+                                        original.query_candidate_with_search_facts::<F>(
+                                            cell,
+                                            domain,
+                                            self.options.solver_timeout_ms,
+                                            &hints,
+                                            &sample_cells,
+                                        )
+                                    },
+                                )
+                                .ok()
+                            })
+                            .filter(|answer| answer.sat == Satisfiability::Satisfiable);
+                        if let Some(answer) = answer {
+                            self.search.statistics.constructed_models += 1;
+                            self.search.model_construction_failures = 0;
+                            learned.push(value.clone());
+                            for (sample_cell, entry) in answer.samples {
+                                model_samples.entry(sample_cell).or_default().insert(entry);
+                            }
+                            return Ok(Satisfiability::Satisfiable);
+                        }
+                        self.search.statistics.failed_model_constructions += 1;
+                        self.search.model_construction_failures += 1;
+                    }
                     let answer = measure_check(
                         &mut checks,
                         RecoverySmtCheckKind::CandidateFeasibility,
@@ -1414,6 +1492,40 @@ where
                                     Err(error) => Err(error),
                                 }
                             } else {
+                                // Az UCP javaslatabol kapott SAT valodi uj ertek; mas valasz csak a javaslatrol szol.
+                                let hinted = (self.options.construct_models
+                                    && self.search.model_construction_failures
+                                        < MAX_MODEL_CONSTRUCTION_FAILURES)
+                                    .then_some(self.problem)
+                                    .flatten()
+                                    .and_then(|problem| {
+                                        let construction = construct_unassumed_model(
+                                            problem,
+                                            self.knowledge,
+                                            &|other, entry| !evidence.samples(other).contains(entry),
+                                        );
+                                        let ModelConstruction::Candidate(values) = construction
+                                        else {
+                                            return None;
+                                        };
+                                        let hints =
+                                            original.search_facts(&*self.analyzer, &values).ok()?;
+                                        original
+                                            .query_unseen_value_with_search_facts::<F>(
+                                                cell, blocked, timeout, &hints,
+                                            )
+                                            .ok()
+                                            .flatten()
+                                    });
+                                if let Some(value) = hinted {
+                                    self.search.statistics.constructed_models += 1;
+                                    self.search.model_construction_failures = 0;
+                                    return full_discovery_response(Ok(Some(value)));
+                                }
+                                if self.options.construct_models && self.problem.is_some() {
+                                    self.search.statistics.failed_model_constructions += 1;
+                                    self.search.model_construction_failures += 1;
+                                }
                                 full_discovery_response(
                                     original.query_unseen_value_with_search_facts::<F>(
                                         cell,
@@ -1468,6 +1580,32 @@ where
             .chain(std::iter::once(cell.clone()))
             .collect();
         let mut checks = Vec::new();
+        let (constructed, refuted) =
+            self.constructed_probe_models(cell, &samples, &sample_cells, timeout_ms, &mut checks);
+        // A szabalyokkal kizart jeloltek eltavolitasa lefedo marad, es uj propagaciot indit.
+        let narrowed = match self.knowledge.value_facts.domain(cell) {
+            Some(UcpValueDomain::FiniteSet(entries)) if !refuted.is_empty() => {
+                UcpValueDomain::finite_set(entries.difference(&refuted).cloned())
+            }
+            _ => None,
+        };
+        let constructed_values: BTreeSet<_> = constructed
+            .iter()
+            .filter_map(|model| model.get(cell).cloned())
+            .chain(samples.iter().cloned())
+            .collect();
+        // Ket kulonbozo igazolt modell vagy igazolt szukites utan a solveres keresesre nincs szukseg.
+        if constructed_values.len() >= 2 || narrowed.is_some() {
+            let mut recovered = RecoveryStepResult::new(cell);
+            for model in constructed {
+                recovered.remember_model(model);
+            }
+            recovered.non_unique = constructed_values.len() >= 2;
+            recovered.domain = narrowed;
+            recovered.checks = checks;
+            return Ok(recovered);
+        }
+        let seed = constructed_values.into_iter().next();
         let mut recovered = measure_check(&mut checks, RecoverySmtCheckKind::FastProbe, || {
             self.query.run(
                 self.analyzer,
@@ -1476,7 +1614,7 @@ where
                 FastProbeRequest {
                     original: self.original,
                     facts: self.search_facts,
-                    seed: samples.iter().next(),
+                    seed: seed.as_ref(),
                     sample_cells: &sample_cells,
                     timeout_ms,
                     #[cfg(test)]
@@ -1484,8 +1622,102 @@ where
                 },
             )
         })?;
+        for model in constructed {
+            recovered.remember_model(model);
+        }
         recovered.checks = checks;
         Ok(recovered)
+    }
+
+    // Legfeljebb ket kulonbozo modellt kerdez az eredeti kodolastol, megoldo keresese nelkul.
+    // A sikertelen javaslat nem allit semmit: a hivo ilyenkor a solveres probara hagyatkozik.
+    fn constructed_probe_models(
+        &mut self,
+        cell: &CellId,
+        known: &BTreeSet<BigInt>,
+        sample_cells: &BTreeSet<CellId>,
+        timeout_ms: Option<u64>,
+        checks: &mut Vec<RecoverySmtCalls>,
+    ) -> (Vec<BTreeMap<CellId, BigInt>>, BTreeSet<BigInt>) {
+        let mut models: Vec<BTreeMap<CellId, BigInt>> = Vec::new();
+        let mut refuted = BTreeSet::new();
+        let (Some(problem), Some(original), true) =
+            (self.problem, self.original, self.options.construct_models)
+        else {
+            return (models, refuted);
+        };
+        for _ in 0..MAX_PROBE_CONSTRUCTIONS {
+            if models.len() >= 2
+                || self.search.model_construction_failures >= MAX_MODEL_CONSTRUCTION_FAILURES
+            {
+                break;
+            }
+            let seen = |other: &CellId, entry: &BigInt| {
+                models.iter().any(|model| model.get(other) == Some(entry))
+                    || (other == cell && known.contains(entry))
+            };
+            let construction = match self.knowledge.value_facts.domain(cell) {
+                Some(UcpValueDomain::FiniteSet(entries)) => {
+                    let Some(value) = entries
+                        .iter()
+                        .find(|entry| !seen(cell, entry) && !refuted.contains(*entry))
+                    else {
+                        break;
+                    };
+                    let answer =
+                        construct_model(problem, self.knowledge, cell, value, &|other, entry| {
+                            !seen(other, entry)
+                        });
+                    if answer == ModelConstruction::Refuted {
+                        self.search.statistics.ucp_refuted_candidates += 1;
+                        self.search.model_construction_failures = 0;
+                        refuted.insert(value.clone());
+                        continue;
+                    }
+                    answer
+                }
+                _ => construct_unassumed_model(problem, self.knowledge, &|other, entry| {
+                    !seen(other, entry)
+                }),
+            };
+            let ModelConstruction::Candidate(values) = construction else {
+                self.search.statistics.failed_model_constructions += 1;
+                self.search.model_construction_failures += 1;
+                break;
+            };
+            let answer = original
+                .search_facts(&*self.analyzer, &values)
+                .ok()
+                .and_then(|hints| {
+                    measure_check(checks, RecoverySmtCheckKind::ConstructedModel, || {
+                        original.query_probe_model_with_search_facts::<F>(
+                            cell,
+                            None,
+                            timeout_ms,
+                            &hints,
+                            sample_cells,
+                        )
+                    })
+                    .ok()
+                })
+                .filter(|answer| answer.sat == Satisfiability::Satisfiable);
+            let Some(answer) = answer else {
+                self.search.statistics.failed_model_constructions += 1;
+                self.search.model_construction_failures += 1;
+                break;
+            };
+            self.search.statistics.constructed_models += 1;
+            self.search.model_construction_failures = 0;
+            let repeated = models
+                .iter()
+                .any(|model| model.get(cell) == answer.samples.get(cell));
+            models.push(answer.samples);
+            // Ugyanaz a cellaertek masodszor nem visz kozelebb a nemegyertelmuseghez.
+            if repeated {
+                break;
+            }
+        }
+        (models, refuted)
     }
 }
 
@@ -1954,6 +2186,7 @@ mod tests {
             let mut query = SnapshotRecoveryProbe;
             let before = crate::smt_solver::process::invocation_count();
             let recovered = RecoveryOperations {
+                problem: None,
                 analyzer: &mut context.analyzer,
                 analyzer_input: &context.analyzer_input,
                 original: original.as_ref(),
@@ -2284,6 +2517,7 @@ mod tests {
             );
             let recovered = {
                 let mut operations = RecoveryOperations {
+                    problem: None,
                     analyzer: &mut context.analyzer,
                     analyzer_input: &context.analyzer_input,
                     original: None,
@@ -3767,6 +4001,8 @@ mod tests {
 
     #[test]
     fn refinement_shortlist_reopens_partial_work_only_after_global_progress() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
         let target = CellId::advice(0, 0);
         let helper = CellId::advice(1, 0);
         let targets = [target.clone()];

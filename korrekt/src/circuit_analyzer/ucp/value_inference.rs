@@ -12,6 +12,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 #[path = "finite_projection.rs"]
 mod finite_projection;
+#[path = "zero_enumeration.rs"]
+mod zero_enumeration;
+#[cfg(test)]
+pub(crate) use zero_enumeration::without_zero_enumeration;
+#[cfg(test)]
+#[path = "tests/zero_enumeration_tests.rs"]
+mod zero_enumeration_tests;
 #[path = "linear_domains.rs"]
 mod linear_domains;
 pub(crate) use linear_domains::LinearDomains;
@@ -79,6 +86,13 @@ fn infer_value_domains_from_zero_equation_with_optional_modulus(
     // A Base-Conv alak számjegykorlátaiból a csomagolt cella domainjére következtet.
     for (cell, domain) in infer_base_conv_value_domains(expr, values, field_modulus) {
         push_domain_inference(&mut inferences, cell, domain);
+    }
+
+    // A kis véges domainek kombinációit végigpróbálja, és a biztosan hamisakat kizárja.
+    if let Some(modulus) = field_modulus {
+        for (cell, domain) in zero_enumeration::infer(expr, values, modulus) {
+            push_domain_inference(&mut inferences, cell, domain);
+        }
     }
 
     inferences

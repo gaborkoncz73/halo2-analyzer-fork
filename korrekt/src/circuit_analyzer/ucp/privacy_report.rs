@@ -49,6 +49,12 @@ pub enum PrivateCellUniqueness {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrivacySearchStatistics {
+    /// Az UCP altal epitett es az eredeti SMT-kodolason SAT-kent igazolt modelleket szamolja.
+    pub constructed_models: usize,
+    /// A szabalyokkal, solverhivas nelkul kizart jelolteket szamolja.
+    pub ucp_refuted_candidates: usize,
+    /// Az eredmeny nelkuli modellepitesi kiserleteket szamolja.
+    pub failed_model_constructions: usize,
     pub target_queries: usize,
     pub bridge_queries: usize,
     /// A köztes advice cellák tényleges domainkeresési hívásait számolja a köztes keret terhére.

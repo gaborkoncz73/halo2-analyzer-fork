@@ -5,7 +5,7 @@ use num_bigint::BigInt;
 
 //Skalár/konstans érték absztrakt reprezentációja UCP-hez
 //A NonZero csak tulajdonságot közöl, a Known konkrét számot is. Ez nem celladomain.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum UcpScalar {
     //Biztosan nulla érték
     Zero,
@@ -72,7 +72,7 @@ impl UcpScalar {
 // A Halo2-kifejezéseket egyszerű UCP-kifejezésfával reprezentálja.
 //A Box miatt a csomópont tárolhat újabb UcpExpr-t anélkül, hogy a típus mérete végtelen lenne.
 //Például 2*x + y egy Add csomópont, benne egy skálázott Var(x) és egy Var(y).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum UcpExpr {
     //Cella/változó hivatkozás
     Var(CellId),

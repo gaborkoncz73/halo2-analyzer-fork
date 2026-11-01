@@ -580,6 +580,8 @@ fn settlement_audit_constraints_and_secure_control() {
 
 #[test]
 fn settlement_audit_ucp_stalls_before_nonlinear_bridge() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     type Demo = SettlementAudit<9, 4, true, true>;
     let circuit = Demo::new();
     let analyzable = Analyzable::config_and_synthesize(&circuit, K).unwrap();
@@ -660,6 +662,8 @@ fn settlement_audit_ucp_stalls_before_nonlinear_bridge() {
 
 #[test]
 fn settlement_audit_refinement_restarts_long_ucp_chain() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     type Demo = SettlementAudit<9, 4, true, true>;
     let circuit = Demo::new();
     let report = run(&circuit, Profile::Refinement);

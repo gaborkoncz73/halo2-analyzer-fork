@@ -119,7 +119,7 @@ structure recovery_core.RecoveryEvidence where
 def recovery_core.UnsupportedSample := Unit
 
 /-- [ucp_verified::domains::CompleteDomainError]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 60:0-65:1 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 62:0-67:1 -/
 @[discriminant isize]
 inductive domains.CompleteDomainError where
 | DomainValue : domains.CompleteDomainError
@@ -143,26 +143,26 @@ inductive recovery_core.CertificationError where
 def recovery_core.RecoveryEvidence.try_remember_model.closure := Unit
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 309:32-309:70 -/
 @[reducible]
 def domains.UcpValueFacts.try_mark_complete_from_samples.closure_2 :=
   alloc.collections.btree.map.BTreeMap num_bigint.bigint.BigInt
   num_bigint.bigint.BigInt alloc.alloc.Global
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 304:17-307:13 -/
 @[reducible]
 def domains.UcpValueFacts.try_mark_complete_from_samples.closure_1 :=
   num_bigint.bigint.BigInt
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 298:32-298:48 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 300:32-300:48 -/
 @[reducible]
 def domains.UcpValueFacts.try_mark_complete_from_samples.closure :=
   num_bigint.bigint.BigInt
 
 /-- [ucp_verified::domains::UcpValueDomain]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 35:0-39:1
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 37:0-41:1
     Visibility: public -/
 @[discriminant isize]
 inductive domains.UcpValueDomain where
@@ -173,7 +173,7 @@ inductive domains.UcpValueDomain where
   domains.UcpValueDomain
 
 /-- [ucp_verified::domains::UcpValueFacts]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 44:0-47:1
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 46:0-49:1
     Visibility: public -/
 structure domains.UcpValueFacts where
   domains : std.collections.hash.map.HashMap cells.CellId
@@ -194,12 +194,12 @@ structure recovery_core.EstablishedEvidence where
   non_unique : Bool
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{closure}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 258:25-258:95 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 260:25-260:95 -/
 def domains.UcpValueFacts.domain_is_complete.closure :=
   domains.UcpValueFacts × cells.CellId
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 143:62-143:83 -/
 @[reducible]
 def domains.UcpValueDomain.intersect.closure := Unit
 

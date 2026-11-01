@@ -10,6 +10,7 @@ pub mod expr;
 pub mod extractor;
 pub mod facts;
 pub mod lookup;
+pub(crate) mod model_construction;
 pub mod pipeline;
 pub mod plonkish;
 pub mod profiling;
@@ -35,6 +36,12 @@ mod settlement_audit_demo_tests;
 
 #[cfg(all(test, feature = "use_zcash_halo2_proofs"))]
 mod thesis_examples;
+
+#[cfg(all(
+    test,
+    any(feature = "use_zcash_halo2_proofs", feature = "use_pse_halo2_proofs")
+))]
+mod external_examples;
 
 #[cfg(test)]
 #[path = "tests/relational_propagation_tests.rs"]

@@ -1,6 +1,6 @@
 use super::{
     all_but_one::{infer_all_but_one_zero, infer_all_but_one_zero_with_modulus},
-    base_conv::{finite_base_candidates, infer_base_conversions_with_modulus},
+    base_conv::{base_equations, finite_base_candidates, infer_base_conversions_with_modulus},
     bigint_mul::infer_bigint_mul_with_modulus,
     cell::CellId,
     expr::UcpExpr,
@@ -208,6 +208,25 @@ pub(crate) fn simulate_expressions_with_relations_and_modulus(
     .0
 }
 
+/// Feltetelezett tenyekbol propagal, es minden korben ellenorzi az eredeti kenyszereket.
+/// A logikai ertek igaz, ha a feltevesek mellett bizonyitott az ellentmondas.
+pub(crate) fn propagate_hypothesis(
+    problem: &super::extractor::UcpProblem,
+    facts: UcpFacts,
+    values: UcpValueFacts,
+) -> (UcpResult, bool) {
+    run(
+        &problem.expressions,
+        &problem.expression_domains,
+        &problem.lookups,
+        facts,
+        values,
+        Some(&problem.field_modulus),
+        false,
+        Some(MAX_HYPOTHESIS_ROUNDS),
+    )
+}
+
 fn analyze_expressions_with_optional_modulus(
     expressions: &[UcpExpr],
     expression_domains: &[(UcpExpr, UcpValueDomain)],
@@ -232,6 +251,7 @@ fn analyze_expressions_with_optional_modulus(
 // A feltételes vizsgálatot korlátozza; nem indít rekurzív próbákat, és félbeszakadásból nem állapít meg cáfolatot.
 const MAX_PACKED_PROBES: usize = 256;
 const MAX_CONDITIONAL_ROUNDS: usize = 16;
+const MAX_HYPOTHESIS_ROUNDS: usize = 64;
 
 fn run(
     expressions: &[UcpExpr],
@@ -400,6 +420,26 @@ fn run_cached(
                         );
                         if value_facts.known_value(&cell).is_some() {
                             changed |= facts.mark_unique(cell);
+                        }
+                    }
+                }
+                // A nagy táblákat csak helyiértékes felbontáson keresztül szűri; az egyenleteket körönként egyszer bontja.
+                if lookups.iter().any(UcpLookup::is_large) {
+                    let equations = base_equations(expressions, field_modulus);
+                    for lookup in lookups.iter().filter(|lookup| lookup.is_large()) {
+                        for (cell, domain) in
+                            lookup.infer_large(&equations, &value_facts, field_modulus)
+                        {
+                            changed |= learn_domain(
+                                cell.clone(),
+                                domain,
+                                &mut value_facts,
+                                Some(field_modulus),
+                                &mut inconsistent,
+                            );
+                            if value_facts.known_value(&cell).is_some() {
+                                changed |= facts.mark_unique(cell);
+                            }
                         }
                     }
                 }

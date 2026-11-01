@@ -249,6 +249,8 @@ fn conditional_probe_budget_preserves_unvisited_candidates() {
 
 #[test]
 fn conditional_round_limit_is_not_a_proof_of_infeasibility() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     let (mut expressions, mut values) = packed_fixture(2, 2);
     let mut chain = vec![UcpExpr::add(var(10), UcpExpr::neg(var(0)))];
     for i in 11..=90 {

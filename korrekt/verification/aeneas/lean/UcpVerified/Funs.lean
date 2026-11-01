@@ -581,12 +581,12 @@ def knowledge.UcpFacts.impl.is_unique
     cells.CellId.Insts.CoreCmpEq self.unique_cells cell
 
 /-- [ucp_verified::domains::MAX_VALUE_BITS]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 31:0-31:37
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 33:0-33:37
     Visibility: public -/
 @[global_simps, irreducible] def domains.MAX_VALUE_BITS : Std.U64 := 4096#u64
 
 /-- [ucp_verified::domains::bounded_value]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 479:0-485:1 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 644:0-650:1 -/
 def domains.bounded_value
   (value : num_bigint.bigint.BigInt) :
   Result (Option num_bigint.bigint.BigInt)
@@ -597,7 +597,7 @@ def domains.bounded_value
   else ok Option.none
 
 /-- [ucp_verified::domains::normalize_field_value]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 494:0-511:1 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 659:0-676:1 -/
 def domains.normalize_field_value
   (value : num_bigint.bigint.BigInt) (modulus : num_bigint.bigint.BigInt) :
   Result (Option num_bigint.bigint.BigInt)
@@ -868,7 +868,7 @@ def recovery_core.RecoveryEvidence.impl.try_remember_model
   recovery_core.RecoveryEvidence.impl.try_remember_model_loop iter self modulus
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}::call_mut]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 309:32-309:70 -/
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool.call_mut
   (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_2)
@@ -885,7 +885,7 @@ def
   ok (b, c)
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 309:32-309:70 -/
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool.call_once
   (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_2)
@@ -898,7 +898,7 @@ def
   ok b
 
 /-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 309:32-309:70 -/
 @[reducible]
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool
@@ -910,7 +910,7 @@ def
 }
 
 /-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 309:32-309:70 -/
 @[reducible]
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool
@@ -924,7 +924,7 @@ def
 }
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}::call_mut]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 304:17-307:13 -/
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError.call_mut
   (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_1)
@@ -939,7 +939,7 @@ def
   ok (r, c)
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 304:17-307:13 -/
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError.call_once
   (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_1)
@@ -953,7 +953,7 @@ def
   ok r
 
 /-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 304:17-307:13 -/
 @[reducible]
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError
@@ -966,7 +966,7 @@ def
 }
 
 /-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 304:17-307:13 -/
 @[reducible]
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError
@@ -981,7 +981,7 @@ def
 }
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure}<'_0>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 298:32-298:48 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 300:32-300:48 -/
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt.call_once
   (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure) 
@@ -991,7 +991,7 @@ def
   num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone c
 
 /-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure}<'_0>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 298:32-298:48 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 300:32-300:48 -/
 @[reducible]
 def
   domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt
@@ -1003,12 +1003,12 @@ def
 }
 
 /-- [ucp_verified::domains::MAX_FINITE_DOMAIN_SIZE]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 29:0-29:53 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 31:0-31:53 -/
 @[global_simps, irreducible]
 def domains.MAX_FINITE_DOMAIN_SIZE : Std.Usize := 256#usize
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]: loop body 0:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 82:8-94:5
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 84:8-96:5
     Visibility: public -/
 @[rust_loop_body]
 def domains.UcpValueDomain.impl.finite_set_loop.body
@@ -1064,7 +1064,7 @@ def domains.UcpValueDomain.impl.finite_set_loop.body
       ok (done o2)
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]: loop 0:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 82:8-94:5
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 84:8-96:5
     Visibility: public -/
 @[rust_loop]
 def domains.UcpValueDomain.impl.finite_set_loop
@@ -1082,7 +1082,7 @@ def domains.UcpValueDomain.impl.finite_set_loop
     (iter, set)
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 75:4-94:5
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 77:4-96:5
     Visibility: public -/
 def domains.UcpValueDomain.impl.finite_set
   {I : Type} {Clause0_IntoIter : Type}
@@ -1101,7 +1101,7 @@ def domains.UcpValueDomain.impl.finite_set
     coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst iter set
 
 /-- [ucp_verified::domains::{impl core::cmp::PartialEq<ucp_verified::domains::UcpValueDomain> for ucp_verified::domains::UcpValueDomain}::eq]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:27-34:36
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 36:33-36:42
     Visibility: public -/
 def domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
   (self : domains.UcpValueDomain) (other : domains.UcpValueDomain) :
@@ -1128,7 +1128,7 @@ def domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
   else ok false
 
 /-- Trait implementation: [ucp_verified::domains::{impl core::cmp::PartialEq<ucp_verified::domains::UcpValueDomain> for ucp_verified::domains::UcpValueDomain}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:27-34:36 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 36:33-36:42 -/
 @[reducible]
 impl_def domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain :
   core.cmp.PartialEq domains.UcpValueDomain domains.UcpValueDomain := {
@@ -1138,7 +1138,7 @@ impl_def domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain :
 }
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]: loop body 0:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 293:8-318:5 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 295:8-320:5 -/
 @[rust_loop_body]
 def domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop.body
   (hm : std.collections.hash.map.HashMap cells.CellId domains.UcpValueDomain
@@ -1293,7 +1293,7 @@ def domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop.body
       ok (done (r1, hm, hs))
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]: loop 0:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 293:8-318:5 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 295:8-320:5 -/
 @[rust_loop]
 def domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop
   (iter : alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
@@ -1318,7 +1318,7 @@ def domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop
     (iter, candidates)
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 274:4-318:5 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 276:4-320:5 -/
 def domains.UcpValueFacts.impl.try_mark_complete_from_samples
   (self : domains.UcpValueFacts) (cell : cells.CellId)
   (samples : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
@@ -1358,7 +1358,7 @@ def domains.UcpValueFacts.impl.try_mark_complete_from_samples
     ok (r, { domains := hm, complete_domains := hs })
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::exact_value]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 97:4-102:5
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 99:4-104:5
     Visibility: public -/
 def domains.UcpValueDomain.impl.exact_value
   (self : domains.UcpValueDomain) :
@@ -1369,7 +1369,7 @@ def domains.UcpValueDomain.impl.exact_value
   | domains.UcpValueDomain.FiniteSet _ => ok Option.none
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::known_value]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 243:4-245:5
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 245:4-247:5
     Visibility: public -/
 def domains.UcpValueFacts.impl.known_value
   (self : domains.UcpValueFacts) (cell : cells.CellId) :
@@ -1564,7 +1564,7 @@ def recovery_core.RecoveryEvidence.impl.record_non_unique_cells
     non_unique
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::is_singleton]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 105:4-107:5
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 107:4-109:5
     Visibility: public -/
 def domains.UcpValueDomain.impl.is_singleton
   (self : domains.UcpValueDomain) : Result Bool := do
@@ -1573,7 +1573,7 @@ def domains.UcpValueDomain.impl.is_singleton
   | domains.UcpValueDomain.FiniteSet _ => ok false
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{impl core::ops::function::FnOnce<(&'_0 ucp_verified::domains::UcpValueDomain,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{closure}<'_0, '_1, '_2>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 258:25-258:95 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 260:25-260:95 -/
 def
   domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool.call_once
   (c : domains.UcpValueFacts.domain_is_complete.closure)
@@ -1592,7 +1592,7 @@ def
       cells.CellId.Insts.CoreCmpEq uvf.complete_domains ci
 
 /-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{impl core::ops::function::FnOnce<(&'_0 ucp_verified::domains::UcpValueDomain,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{closure}<'_0, '_1, '_2>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 258:25-258:95 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 260:25-260:95 -/
 @[reducible]
 def
   domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool
@@ -1603,7 +1603,7 @@ def
 }
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 255:4-259:5
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 257:4-261:5
     Visibility: public -/
 def domains.UcpValueFacts.impl.domain_is_complete
   (self : domains.UcpValueFacts) (cell : cells.CellId) : Result Bool := do
@@ -1618,7 +1618,7 @@ def domains.UcpValueFacts.impl.domain_is_complete
     o (self, cell)
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}::call_mut]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 143:62-143:83 -/
 def
   domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
   (c : domains.UcpValueDomain.intersect.closure)
@@ -1629,7 +1629,7 @@ def
   ok (bi, ())
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 143:62-143:83 -/
 def
   domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt.call_once
   (c : domains.UcpValueDomain.intersect.closure)
@@ -1642,7 +1642,7 @@ def
   ok bi1
 
 /-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 143:62-143:83 -/
 @[reducible]
 def
   domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt
@@ -1653,7 +1653,7 @@ def
 }
 
 /-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 143:62-143:83 -/
 @[reducible]
 def
   domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt
@@ -1666,7 +1666,7 @@ def
 }
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 129:4-145:5 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 131:4-147:5 -/
 def domains.UcpValueDomain.impl.intersect
   (self : domains.UcpValueDomain) (other : domains.UcpValueDomain) :
   Result (Option domains.UcpValueDomain)
@@ -1730,7 +1730,7 @@ def domains.UcpValueDomain.impl.intersect
         m
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::mark_domain]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 197:4-240:5
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 199:4-242:5
     Visibility: public -/
 def domains.UcpValueFacts.impl.mark_domain
   (self : domains.UcpValueFacts) (cell : cells.CellId)
@@ -2329,7 +2329,7 @@ def rules.infer_assigned_cell_from_zero_equation_with_modulus
     rules.infer_assigned_cell_with_optional_modulus expr facts (Option.some modulus)
 
 /-- [ucp_verified::domains::{impl core::clone::Clone for ucp_verified::domains::UcpValueDomain}::clone]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:9-34:14
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 36:9-36:14
     Visibility: public -/
 def domains.UcpValueDomain.Insts.CoreCloneClone.clone
   (self : domains.UcpValueDomain) : Result domains.UcpValueDomain := do
@@ -2345,7 +2345,7 @@ def domains.UcpValueDomain.Insts.CoreCloneClone.clone
     ok (domains.UcpValueDomain.FiniteSet bs)
 
 /-- Trait implementation: [ucp_verified::domains::{impl core::clone::Clone for ucp_verified::domains::UcpValueDomain}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:9-34:14 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 36:9-36:14 -/
 @[reducible]
 def domains.UcpValueDomain.Insts.CoreCloneClone : core.clone.Clone
   domains.UcpValueDomain := {
@@ -2353,7 +2353,7 @@ def domains.UcpValueDomain.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::for_hypothetical_reasoning]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 324:4-330:5 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 326:4-332:5 -/
 def domains.UcpValueFacts.impl.for_hypothetical_reasoning
   (self : domains.UcpValueFacts) : Result domains.UcpValueFacts := do
   let hm ←

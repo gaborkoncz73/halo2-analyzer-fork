@@ -39,6 +39,7 @@ pub(super) struct RecoverySearchState {
     previous_facts: UcpFacts,
     previous_values: UcpValueFacts,
     pub(super) generation: usize,
+    pub(super) model_construction_failures: usize,
 }
 
 impl RecoverySearchState {
@@ -49,6 +50,7 @@ impl RecoverySearchState {
             previous_facts: facts.clone(),
             previous_values: values.clone(),
             generation: 0,
+            model_construction_failures: 0,
         }
     }
 

@@ -47,6 +47,8 @@ pub enum RecoverySmtCheckKind {
     FastProbe,
     Coverage,
     CandidateFeasibility,
+    /// Az UCP altal felepitett ertekadast ellenorzi az eredeti SMT-kodolason.
+    ConstructedModel,
     Enumeration,
     SubsetExclusion,
 }

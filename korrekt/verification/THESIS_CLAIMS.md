@@ -48,7 +48,10 @@ A fo tetel feltetelei explicit tetelpremisszak (`OracleContracts`, `EvidenceClai
    `bigint_mul.rs` es `lookup.rs` kodja nincs bizonyitva. Ezek matematikai
    helyesseget modellszintu tetelek igazoljak: `all_but_one_rule_evidence`,
    `linear_system_rule_evidence`, `base_conversion_rule_evidence`,
-   `Recovery.lookup_column_covers`, `Recovery.root_cell_domain_sound`.
+   `Recovery.lookup_column_covers`, `Recovery.root_cell_domain_sound`. A `model_construction.rs`
+   modellt javasol es jelolteket zar ki. Kinyert kod helyett a `Recovery/ModelConstruction.lean`
+   tetelei igazoljak a matematikat: a javaslatbol csak az eredeti SMT-kodolas SAT-valasza
+   lesz minta, a kizaras pedig ugyanarra a szabalyhelyessegre epul, mint a K es a Delta.
 4. **Adapter.** A `privacy.rs` `RecoveryDriver` tipusa a kinyert fuggvenyeket hivja, a
    `coreMachine` definicioja ezt a sorrendet koveti. A megfeleles kezi ellenorzes,
    nem tetel. Az utemezes es a riport kiirasa nincs bizonyitva.

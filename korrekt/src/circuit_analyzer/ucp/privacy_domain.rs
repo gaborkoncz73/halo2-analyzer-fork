@@ -1001,6 +1001,8 @@ mod tests {
 
     #[test]
     fn critical_exclusion_yields_then_resumes_without_rechecking_coverage_or_values() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
         for root in [2, 5, 8] {
             let targets = [
                 CellId::advice(9, 4),

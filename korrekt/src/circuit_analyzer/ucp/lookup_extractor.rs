@@ -5,7 +5,7 @@
 use super::super::{
     cell::CellKind,
     expr::UcpExpr,
-    lookup::{UcpLookup, MAX_LOOKUP_ARITY},
+    lookup::{UcpLookup, MAX_LARGE_TABLE_ROWS, MAX_LOOKUP_ARITY},
     plonkish::{expression_to_ucp_expr_with_fixed_values, field_to_bigint},
     value::{
         infer_domains_from_expression_domain_with_modulus, UcpValueDomain, UcpValueFacts,
@@ -18,7 +18,7 @@ use crate::circuit_analyzer::{
     halo2_proofs_libs::*,
 };
 use num_bigint::BigInt;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 // Az egyoszlopos vetületeket a teljes reláció reprezentálhatatlansága mellett is megtartja.
 //Lookup argumentekből kezdeti Delta domaineket tanul.
@@ -121,7 +121,7 @@ pub(super) fn extract_lookup_relations<F: AnalyzableField>(
 ) -> Vec<UcpLookup> {
     let mut relations = Vec::new();
     for lookup in &analyzable.cs.lookups {
-        if lookup.input_expressions.len() < 2
+        if lookup.input_expressions.is_empty()
             || lookup.input_expressions.len() > MAX_LOOKUP_ARITY
             || lookup.input_expressions.len() != lookup.table_expressions.len()
         {
@@ -170,7 +170,13 @@ pub(super) fn extract_lookup_relations<F: AnalyzableField>(
                 break;
             };
             tuples.insert(tuple);
-            if tuples.len() > MAX_FINITE_DOMAIN_SIZE {
+            // A tobboszlopos relaciot a domainkorlatnal, az egyoszlopost a nagy tabla keretnel allitja meg.
+            let limit = if columns.len() == 1 {
+                MAX_LARGE_TABLE_ROWS
+            } else {
+                MAX_FINITE_DOMAIN_SIZE
+            };
+            if tuples.len() > limit {
                 supported = false;
                 break;
             }
@@ -178,7 +184,19 @@ pub(super) fn extract_lookup_relations<F: AnalyzableField>(
         if !supported {
             continue;
         }
+        // A kis egyoszlopos tablat a kifejezesdomainek mar teljesen kezelik.
+        if columns.len() == 1 && tuples.len() <= MAX_FINITE_DOMAIN_SIZE {
+            continue;
+        }
         let tuples: Vec<_> = tuples.into_iter().collect();
+        let large_column = (tuples.len() > MAX_FINITE_DOMAIN_SIZE).then(|| {
+            Arc::new(
+                tuples
+                    .iter()
+                    .map(|tuple| tuple[0].clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
         for region in &analyzable.regions {
             if !region_has_advice_cell(region) {
                 continue;
@@ -206,8 +224,12 @@ pub(super) fn extract_lookup_relations<F: AnalyzableField>(
                         wrap_query_rows(&mut input, analyzable.k);
                         input
                     })
-                    .collect();
-                if let Some(relation) = UcpLookup::new(inputs, tuples.clone()) {
+                    .collect::<Vec<_>>();
+                if let Some(column) = &large_column {
+                    if let [input] = inputs.as_slice() {
+                        relations.push(UcpLookup::large(input.clone(), column.clone()));
+                    }
+                } else if let Some(relation) = UcpLookup::new(inputs, tuples.clone()) {
                     relations.push(relation);
                 }
             }

@@ -219,8 +219,32 @@ fn analyze<const NEGATIVE: bool>(
     .unwrap()
 }
 
+// A teljes alapbeallitas: a UCP a kifejtett masodfoku egyenletet is megoldja, solverhivas nelkul.
+#[test]
+fn expanded_quadratic_is_solved_by_ucp_without_domain_refinement() {
+    let circuit = FiniteProjectionCircuit::<false>::new(3);
+    let report = analyze_private_recoverability::<Fr, _, _>(
+        &circuit,
+        5,
+        &finite_projection_demo_input(),
+        finite_projection_demo_targets(),
+        finite_projection_demo_options(),
+    )
+    .unwrap();
+    assert_eq!(
+        report.cells[0].domain,
+        UcpValueDomain::finite_set([3, 7].map(BigInt::from))
+    );
+    assert_eq!(
+        report.cells[1].domain,
+        Some(UcpValueDomain::exact(BigInt::from(0)))
+    );
+}
+
 #[test]
 fn finite_projection_recovers_two_values_then_ucp_recovers_a_different_cell() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     let coarse = analyze::<false>(3, 21, 0);
     assert_eq!(
         coarse.cells[0].domain,
@@ -269,6 +293,8 @@ fn finite_projection_recovers_two_values_then_ucp_recovers_a_different_cell() {
 
 #[test]
 fn partial_refinement_preserves_unchecked_values_and_reports_its_cost() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     let report = analyze::<false>(3, 21, 4); // Az 5 kizárása után a 0, 1 és 2 jelöltet vizsgálja.
     assert_eq!(
         report.cells[0].domain,
@@ -314,6 +340,8 @@ fn projections_use_the_actual_public_observation_and_signed_field_representative
 
 #[test]
 fn a_newly_small_domain_is_refined_in_the_next_ucp_round_under_the_same_total_cap() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     let circuit = FiniteProjectionCircuit::<false, true>::new(3);
     MockProver::run(K, &circuit, vec![vec![Fr::from(21)]])
         .unwrap()
@@ -360,6 +388,8 @@ fn a_newly_small_domain_is_refined_in_the_next_ucp_round_under_the_same_total_ca
 
 #[test]
 fn finite_refinement_can_recover_an_exact_private_input_then_propagate_it() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     // The other quadratic root is -1, outside this circuit's nonnegative lookup table.
     let report = analyze::<false>(11, -11, 17);
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
@@ -520,6 +550,8 @@ impl Circuit<Fr> for RefinementPriorityCircuit {
 
 #[test]
 fn refinement_priority_recovers_a_dependent_cell_before_spending_the_budget_on_an_idle_cell() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     let circuit = RefinementPriorityCircuit;
     MockProver::run(K, &circuit, vec![])
         .unwrap()
@@ -537,9 +569,13 @@ fn refinement_priority_recovers_a_dependent_cell_before_spending_the_budget_on_a
         CellId::advice(1, 0),
         CellId::advice(2, 0),
     ];
+    // Az utemezes szerepet csak a modellepites nelkuli solverkeret mutatja meg.
+    let budget = PrivacyAnalysisOptions {
+        construct_models: false,
+        ..options(3)
+    };
     let report =
-        analyze_private_recoverability::<Fr, _, _>(&circuit, K, &input, targets, options(3))
-            .unwrap();
+        analyze_private_recoverability::<Fr, _, _>(&circuit, K, &input, targets, budget).unwrap();
     assert_eq!(report.status, PrivacyAnalysisStatus::QueryLimitReached);
     assert_eq!(report.domain_refinement_statistics.solver_checks, 3);
     assert_eq!(report.domain_refinement_statistics.attempted_cells, 1);
@@ -563,6 +599,8 @@ fn refinement_priority_recovers_a_dependent_cell_before_spending_the_budget_on_a
 
 #[test]
 fn finite_target_uses_an_internal_probe_with_or_without_candidate_search() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     let circuit = FiniteProjectionCircuit::<false>::new(11);
     for checks in [0, 32] {
         let mut options = options(checks);
@@ -593,6 +631,8 @@ fn finite_target_uses_an_internal_probe_with_or_without_candidate_search() {
 
 #[test]
 fn shared_semantic_samples_save_two_refinement_solver_invocations() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     let circuit = FiniteProjectionCircuit::<false>::new(3);
     let mut options = options(17);
     options.max_semantic_queries = 1;
@@ -627,6 +667,8 @@ fn shared_semantic_samples_save_two_refinement_solver_invocations() {
 
 #[test]
 fn domain_refinement_can_use_a_non_target_bridge_without_exceeding_its_allowance() {
+    // Ez a teszt a kereso reteget vizsgalja, ezert a UCP korlatos felsorolasa nelkul fut.
+    let _layered = crate::circuit_analyzer::ucp::value::without_zero_enumeration();
     let circuit = RefinementPriorityCircuit;
     let input = AnalyzerInput {
         verification_method: VerificationMethod::None,
