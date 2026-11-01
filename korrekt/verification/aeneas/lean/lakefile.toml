@@ -11,3 +11,7 @@ name = "UcpVerified"
 
 [[lean_lib]]
 name = "Proofs"
+
+[[lean_lib]]
+name = "Recovery"
+srcDir = "../.."
