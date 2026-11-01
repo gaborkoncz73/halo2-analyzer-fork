@@ -18,10 +18,11 @@ use super::{
     recovery_core::{CertificationError, UnsupportedSample},
     value::{complete_domain_error_message, normalize_field_value, UcpValueDomain, UcpValueFacts},
 };
-pub(crate) use super::recovery_core::RecoveryEvidence;
 use anyhow::Result;
 use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+pub(crate) use super::recovery_core::RecoveryEvidence;
 
 // Csak valódi K/Delta-előrelépéskor vált keresési generációt; a teljes kereteket nem nullázza.
 #[derive(Default)]

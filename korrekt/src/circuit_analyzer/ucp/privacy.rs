@@ -17,9 +17,8 @@ use super::{
     },
     privacy_domain::{DomainRefinementState, PrivacyDomainRefinementOptions},
     privacy_search::{
-        certification_error_message, choose_action, shortlist_actions,
-        unsupported_sample_message, ProbePlan, RecoveryAction, RecoveryEvidence,
-        RecoverySearchState, RecoveryStrategy,
+        certification_error_message, choose_action, shortlist_actions, unsupported_sample_message,
+        ProbePlan, RecoveryAction, RecoveryEvidence, RecoverySearchState, RecoveryStrategy,
     },
     recovery_core::{finish_merge, merge_established_evidence, EstablishedEvidence},
     recovery_loop::{run_recovery, RecoveryMachine, Selection},
