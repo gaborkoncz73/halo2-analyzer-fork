@@ -225,8 +225,9 @@ tarhelyet igenyelhet. A `Recovery` modellcsomag ugyanezt a Lean 4.35.0 eszkozt h
 A `verify.sh` mindig ujra kinyeri az eles Rust-forrast, ujrageneralja a
 Lean-kodot, majd osszehasonlitja a rogzitett kodot, LLBC-t es forrashasheket.
 Elavult kinyeresnel hibaval leall, nem csak a regi Lean-fajlokat epiti ujra.
-A koztes JSON osszehasonlitasakor csak a Charon ideiglenes kimeneti utjat
-hagyja figyelmen kivul; az Aeneas mindig a valtozatlan Charon-kimenetet olvassa.
+A koztes JSON osszehasonlitasakor a Charon ideiglenes kimeneti utjat es a
+forraspozicio-metaadatokat hagyja figyelmen kivul, mert a standard konyvtari makrok
+pozicioi gepenkent elterhetnek. Az Aeneas mindig a valtozatlan Charon-kimenetet olvassa.
 A forras szandekos modositasa utan:
 
 ```bash

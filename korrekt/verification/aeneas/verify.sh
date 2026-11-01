@@ -62,11 +62,16 @@ else
         diff -u "$here/lean/UcpVerified/$file" "$work/lean/$file"
     done
     diff -u "$here/generated/SOURCES.sha256" "$work/SOURCES.sha256"
-    # A Charon deduplikalt JSON-formatumat valtozatlanul adja az Aeneasnak.
-    # Csak az osszehasonlitasban hagyja figyelmen kivul az ideiglenes kimeneti utat.
-    jq -c '.translated.options.dest_file = null' "$here/generated/ucp_verified.llbc" > "$work/recorded.json"
-    jq -c '.translated.options.dest_file = null' "$work/ucp_verified.llbc" > "$work/current.json"
-    cmp "$work/recorded.json" "$work/current.json"
+    # Az LLBC-t a kimeneti ut es a forraspozicio-metaadatok nelkul veti ossze.
+    # A standard konyvtari makrok pozicioi gepenkent elterhetnek; a program tartalma nem.
+    # A pozicioval kepzett Source-sorok a Funs.lean fenti osszevetesebe tovabbra is beleszamitanak.
+    normalize='.translated.options.dest_file = null | walk(if type == "object" then del(.span) else . end)'
+    jq -c "$normalize" "$here/generated/ucp_verified.llbc" > "$work/recorded.json"
+    jq -c "$normalize" "$work/ucp_verified.llbc" > "$work/current.json"
+    if ! cmp "$work/recorded.json" "$work/current.json"; then
+        diff <(jq . "$work/recorded.json") <(jq . "$work/current.json") | head -60 || true
+        exit 1
+    fi
 fi
 
 cd "$here/lean"
