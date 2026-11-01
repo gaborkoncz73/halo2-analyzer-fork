@@ -1,0 +1,18 @@
+[package]
+name = "external-permutation-evaluation"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+korrekt = { path = "../../korrekt" }
+zk_halo2_playground = { git = "https://github.com/LibeccioLabs/Halo2-Playground.git", rev = "78c193ef92bb82312f871b74dfe5871cb00b2263" }
+num-bigint = "0.4"
+
+[patch."https://github.com/zcash/halo2.git"]
+halo2_proofs = { git = "https://github.com/Analyzable-Halo2/zcash-halo2.git", rev = "7fc5e14d53c19cc4e09f0af2ed4b87440e1bb4fb" }
+
+[patch."https://github.com/privacy-scaling-explorations/halo2curves.git"]
+halo2curves = { git = "https://github.com/quantstamp/halo2curves.git", rev = "2ef5a9a60e02f4ae567e24725a5b27b2dce1bc07" }

@@ -1,0 +1,18 @@
+[package]
+name = "external-soundness-evaluation"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+korrekt = { path = "../../korrekt", default-features = false, features = ["use_pse_halo2_proofs"] }
+backend = { package = "halo2_proofs", git = "https://github.com/Analyzable-Halo2/pse-halo2.git", rev = "c23f6b74d621da4ca9b5526256a7b5b5cf72dece" }
+num-bigint = "0.4"
+
+[patch."https://github.com/privacy-scaling-explorations/halo2.git"]
+halo2_proofs = { git = "https://github.com/Analyzable-Halo2/pse-halo2.git", rev = "c23f6b74d621da4ca9b5526256a7b5b5cf72dece" }
+
+[patch."https://github.com/privacy-scaling-explorations/halo2curves.git"]
+halo2curves = { git = "https://github.com/quantstamp/halo2curves.git", rev = "2ef5a9a60e02f4ae567e24725a5b27b2dce1bc07" }

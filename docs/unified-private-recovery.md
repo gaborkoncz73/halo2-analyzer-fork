@@ -8,6 +8,12 @@ bounded conditional filtering of finite radix domains. See
 effort limits. Earlier invocation measurements below predate these stronger
 rules and are not measurements of the new propagation engine.
 
+The equation/domain fixpoint also supports [bounded affine projection through
+nonlinear finite-domain expressions](finite-domain-projection.md). A selected
+cell may be affine even when the complete equation is nonlinear. Full covering
+sets and invertible coefficient sets permit sound projection without solver
+queries; inconclusive or over-budget projections produce no new domain.
+
 `recover_private_inputs` in `privacy.rs` selects a cell and an operation together,
 instead of exhausting refinement, then discovery, then uniqueness queries.
 `privacy_search.rs` contains the attempt/retry state, action shortlisting,

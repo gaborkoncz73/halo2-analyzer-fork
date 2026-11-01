@@ -1,0 +1,26 @@
+[package]
+name = "external-voting-evaluation"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A kulon munkaterulet nem valtoztatja meg a fo projekt fuggosegeit.
+[workspace]
+
+[dependencies]
+korrekt = { path = "../../korrekt" }
+voting-circuits = "=0.9.0"
+halo2_poseidon = "=0.1.0"
+pasta_curves = "=0.5.2"
+group = "=0.13.0"
+num-bigint = "0.4"
+
+[patch.crates-io]
+halo2_proofs = { path = "target/halo2_proofs-0.3.5" }
+
+[patch."https://github.com/zcash/halo2.git"]
+halo2_proofs = { path = "target/halo2_proofs-0.3.5" }
+
+[patch."https://github.com/privacy-scaling-explorations/halo2curves.git"]
+halo2curves = { git = "https://github.com/quantstamp/halo2curves.git", rev = "2ef5a9a60e02f4ae567e24725a5b27b2dce1bc07" }
+

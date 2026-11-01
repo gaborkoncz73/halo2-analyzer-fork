@@ -39,6 +39,15 @@ guard the expected region shape, cell types, and number of inputs; derived
 intermediates and their advice copies are not counted as additional secrets.
 Independent validation returns `NoDomainClaims`, not a privacy certificate.
 
+The original-circuit recovery test uses the invoice examples' shared Standard
+configuration, including their timeout and search-budget environment overrides
+(`UCP_INVOICE_*`). All search strategies are enabled; it is not a fast-probe-only
+ablation. Initial existence is established through MockProver, without using
+private witness values as recovery premises. The displayed phase report covers
+the first recovery run; the alternate-witness and validation assertions are
+separate correctness checks outside its reported elapsed time. Historical
+measurements below describe an earlier configuration, not this Standard run.
+
 ## Local Additional-Publication Control
 
 The adapter uses the same upstream chip and multiplication gates, but adds public
@@ -74,6 +83,15 @@ From the repository root, run the circuit checks and same-target SMT comparison:
 ```sh
 HALO2_ANALYZER_SMT_TIMEOUT_MS=2000 \
 cargo test --offline -p korrekt --lib external_halo2_book -- --nocapture --test-threads=1
+```
+
+To run only the unchanged original with the invoice Standard configuration and
+the same phase-by-phase display:
+
+```sh
+cargo test --release -p korrekt --lib \
+  external_halo2_book_original_keeps_private_inputs_non_unique \
+  -- --nocapture --test-threads=1
 ```
 
 The [measurement suite](private-recovery-measurements.md) includes

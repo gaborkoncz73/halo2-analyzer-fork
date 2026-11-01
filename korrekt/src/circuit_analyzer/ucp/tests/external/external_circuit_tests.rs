@@ -4,8 +4,9 @@
 use super::{
     cell::CellId,
     privacy::{
-        analyze_private_recoverability, PrivacyAnalysisOptions, PrivacyAnalysisStatus,
-        PrivateCellUniqueness,
+        analyze_private_recoverability, analyze_private_recoverability_with_witness,
+        PrivacyAnalysisOptions, PrivacyAnalysisProfile, PrivacyAnalysisStatus,
+        PrivateCellUniqueness, SatisfiabilityEvidence,
     },
     privacy_validation::{
         validate_private_recovery_report, DomainValidationStatus, RecoveryValidationStatus,
@@ -150,27 +151,42 @@ fn external_halo2_book_original_keeps_private_inputs_non_unique() {
     let targets = private_inputs(&circuit);
     assert_eq!(targets, private_inputs(&alternate));
     let input = observations(&[252]);
-    let report = analyze_private_recoverability::<Fr, _, _>(
+    let options =
+        super::thesis_examples::recovery_options().with_profile(PrivacyAnalysisProfile::Standard);
+    let report = analyze_private_recoverability_with_witness::<Fr, _, _>(
         &circuit,
         4,
         &input,
         targets.clone(),
-        PrivacyAnalysisOptions::fast_probe_only(),
+        options.clone(),
     )
     .unwrap();
-    println!("Unmodified Halo2 Book example, c=252:\n{report}");
+    let phase_report = report.phase_report_with_names(|cell| {
+        targets
+            .iter()
+            .position(|target| target == cell)
+            .map(|index| ["a", "b"][index].to_string())
+    });
+    println!("Unmodified Halo2 Book example, c=252: Standard (combined)\n{phase_report}");
+    assert!(phase_report.contains("1. UCP ("));
+    assert!(phase_report.contains("1. SMT ("));
+    for name in ["a", "b"] {
+        assert!(phase_report.contains(&format!("{name}; non-unique proven")));
+    }
     assert_eq!(report.status, PrivacyAnalysisStatus::Analyzed);
+    assert_eq!(report.options, options);
+    assert_eq!(
+        report.satisfiability_evidence,
+        Some(SatisfiabilityEvidence::VerifiedWitness)
+    );
+    assert_eq!(report.satisfiability_checks, 0);
     assert_eq!(report.summary.non_unique_cells, 2);
     assert_eq!(report.summary.exact_values, 0);
     assert!(report.cells.iter().all(|cell| {
         cell.uniqueness == PrivateCellUniqueness::NonUnique && cell.domain.is_none()
     }));
-    let alternate_report = analyze_private_recoverability::<Fr, _, _>(
-        &alternate,
-        4,
-        &input,
-        targets,
-        PrivacyAnalysisOptions::fast_probe_only(),
+    let alternate_report = analyze_private_recoverability_with_witness::<Fr, _, _>(
+        &alternate, 4, &input, targets, options,
     )
     .unwrap();
     assert_eq!(report.cells, alternate_report.cells);

@@ -4,6 +4,10 @@ General relational rules strengthen the existing equation/domain fixpoint. None
 uses circuit names, cell indices, application-specific constants, witness
 assignments, or solver queries.
 
+Az egyenletenkénti [véges-domain affin visszavetítés](finite-domain-projection.md)
+akkor is következtethet egy célcellára, ha a többi cellában nemlineáris a kifejezés.
+Ez különbözik az alábbi, több lineáris sort kombináló eljárástól.
+
 ## Lineáris Elimináció És Intervallumos Következtetés
 
 A `linear_domains.rs` az alulhatározott lineáris rendszer hasznos következményeit

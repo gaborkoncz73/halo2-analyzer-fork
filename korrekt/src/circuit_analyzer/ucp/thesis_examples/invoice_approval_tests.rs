@@ -12,8 +12,9 @@ use crate::circuit_analyzer::{
         engine::UcpResult,
         extractor::extract_ucp_problem,
         privacy::{
-            analyze_private_recoverability_with_witness, PrivacyAnalysisProfile,
-            PrivacyAnalysisReport, PrivacyAnalysisStatus, PrivateCellUniqueness, RecoveryPhase,
+            analyze_private_recoverability_with_witness, PrivacyAnalysisOptions,
+            PrivacyAnalysisProfile, PrivacyAnalysisReport, PrivacyAnalysisStatus,
+            PrivateCellUniqueness, RecoveryPhase,
         },
         value::UcpValueDomain,
     },
@@ -299,6 +300,57 @@ fn thesis_invoice_approval_ucp_control_keeps_real_ambiguity() {
     assert!(result.value_facts.known_value(&cell(SURCHARGE)).is_none());
 }
 
+fn recovery_heading(
+    catalog: bool,
+    h: u64,
+    label: &str,
+    options: &PrivacyAnalysisOptions,
+    verbose: bool,
+) -> String {
+    let title = if catalog {
+        "Surcharge catalogue invoice"
+    } else {
+        "Approval invoice"
+    };
+    // A részletes konfigurációt csak a kért diagnosztikai kiírásban jeleníti meg.
+    if verbose {
+        format!("{title} (H={h}, surcharge_catalog={catalog}): {label}; timeout={:?} ms/call; semantic_attempts={}; refinement_checks={}; discovery_checks={}",
+            options.solver_timeout_ms, options.max_semantic_queries,
+            options.domain_refinement.max_solver_checks, options.domain_discovery.max_solver_checks)
+    } else {
+        format!("{title}: {label}")
+    }
+}
+
+#[test]
+fn invoice_recovery_headings_keep_configuration_in_verbose_output_only() {
+    let options = super::recovery_options();
+    for (catalog, title) in [
+        (false, "Approval invoice"),
+        (true, "Surcharge catalogue invoice"),
+    ] {
+        assert_eq!(
+            recovery_heading(catalog, 25, "Standard (combined)", &options, false),
+            format!("{title}: Standard (combined)")
+        );
+        let verbose = recovery_heading(catalog, 25, "Standard (combined)", &options, true);
+        assert!(verbose.contains(&format!("H=25, surcharge_catalog={catalog}")));
+        assert!(verbose.contains(&format!("timeout={:?} ms/call", options.solver_timeout_ms)));
+        assert!(verbose.contains(&format!(
+            "semantic_attempts={}",
+            options.max_semantic_queries
+        )));
+        assert!(verbose.contains(&format!(
+            "refinement_checks={}",
+            options.domain_refinement.max_solver_checks
+        )));
+        assert!(verbose.contains(&format!(
+            "discovery_checks={}",
+            options.domain_discovery.max_solver_checks
+        )));
+    }
+}
+
 fn run_recovery<const CATALOG: bool>(mode: u64) -> PrivacyAnalysisReport {
     let circuit =
         InvoiceAudit::<ALL, true, CATALOG>::with_approval(CartWitness::default(), mode, 0);
@@ -307,17 +359,16 @@ fn run_recovery<const CATALOG: bool>(mode: u64) -> PrivacyAnalysisReport {
     let profile =
         std::env::var("UCP_INVOICE_APPROVAL_PROFILE").unwrap_or_else(|_| "standard".into());
     let (profile, label) = match profile.as_str() {
-        "standard" | "combined" => (PrivacyAnalysisProfile::Standard, "standard (combined)"),
+        "standard" | "combined" => (PrivacyAnalysisProfile::Standard, "Standard (combined)"),
         "refinement" | "ablation-refinement" => (
             PrivacyAnalysisProfile::RefinementOnly,
-            "ablation:refinement",
+            "Ablation/refinement",
         ),
         _ => panic!("Unknown invoice recovery profile: {profile}"),
     };
     let options = super::recovery_options().with_profile(profile);
-    println!("Approval invoice (H={h}, surcharge_catalog={CATALOG}): {label}; timeout={:?} ms/call; semantic_attempts={}; refinement_checks={}; discovery_checks={}",
-        options.solver_timeout_ms, options.max_semantic_queries,
-        options.domain_refinement.max_solver_checks, options.domain_discovery.max_solver_checks);
+    let verbose = std::env::var("UCP_DEMO_VERBOSE").is_ok_and(|v| v == "1");
+    println!("{}", recovery_heading(CATALOG, h, label, &options, verbose));
     let before = crate::smt_solver::process::invocation_count();
     let report = analyze_private_recoverability_with_witness::<Fr, _, _>(
         &circuit,

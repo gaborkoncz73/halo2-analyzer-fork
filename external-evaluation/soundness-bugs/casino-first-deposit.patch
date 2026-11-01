@@ -1,0 +1,11 @@
+--- a/casino2.rs
++++ b/casino2.rs
+@@ -116,7 +116,7 @@
+ 
+                 for deposit in self.deposits.iter() {
+                     // we enable the running sum selector
+-                    if i > 1 {
++                    if i > 0 {
+                         config.selector_running_sum.enable(&mut region, i)?;
+                     }
+ 

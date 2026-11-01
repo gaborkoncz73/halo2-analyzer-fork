@@ -1012,7 +1012,8 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                     feature = "use_scroll_halo2_proofs",
                     feature = "use_pse_v1_halo2_proofs"
                 ))]
-                let (reg_column, rotation) = (cell.0 .0, cell.1);
+                // A terkep kulcsa az oszlop es sor; az erteke a hozzarendelesek szama.
+                let ((reg_column, assigned_row), _) = cell;
                 #[cfg(feature = "use_zcash_halo2_proofs")]
                 let (reg_column, assigned_row) = (cell.0, cell.1);
 
@@ -1024,7 +1025,17 @@ impl<'b, F: AnalyzableField> Analyzer<F> {
                 //non-trivial permutation cycle must therefore not be reported as wholly
                 //unconstrained even when it is not queried directly by a custom gate.
                 let column_prefix = match reg_column.column_type {
+                    #[cfg(any(
+                        feature = "use_zcash_halo2_proofs",
+                        feature = "use_pse_v1_halo2_proofs"
+                    ))]
                     Any::Advice => 'A',
+                    #[cfg(any(
+                        feature = "use_pse_halo2_proofs",
+                        feature = "use_axiom_halo2_proofs",
+                        feature = "use_scroll_halo2_proofs"
+                    ))]
+                    Any::Advice(_) => 'A',
                     Any::Instance => 'I',
                     Any::Fixed => unreachable!(),
                 };

@@ -1,0 +1,11 @@
+--- a/casino2.rs
++++ b/casino2.rs
+@@ -82,7 +82,7 @@
+         layouter.assign_table(
+             || "assign lookup table",
+             |mut table| {
+-                for (i, v) in (0..1000).into_iter().enumerate() {
++                for (i, v) in (0..16).into_iter().enumerate() {
+                     table.assign_cell(
+                         || "assign cell in lookup table",
+                         config.lookup_table,

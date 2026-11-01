@@ -299,6 +299,11 @@ A részletes profilozás és a korábbi gépi sorok kapcsolója:
 UCP_DEMO_VERBOSE=1 cargo test --offline -p korrekt --lib thesis_invoice_recovery_smoke -- --ignored --nocapture --test-threads=1
 ```
 
+A jóváhagyásos és a díjkatalógusos teszt szintén rövid fejléccel és közös
+UCP/SMT-fázisriporttal indul. Ezeknél a `UCP_DEMO_VERBOSE=1` kapcsoló a
+jóváhagyási statisztikát és a részletes erőforráskereteket is megjeleníti;
+a visszaállítás működését nem módosítja.
+
 Ebben a részletes nézetben az `INVOICE_SAT evidence=Some(VerifiedWitness)` sor jelzi a tényleges tanúellenőrzést;
 ilyenkor `sat_checks=0`. Ez nem a SAT-előfeltétel ellenőrizetlen kihagyása.
 Az `INVOICE_BASELINE computed=false` sor jelzi a rendes, külön szerkezeti

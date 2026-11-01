@@ -10,6 +10,8 @@ use super::{
 use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
+#[path = "finite_projection.rs"]
+mod finite_projection;
 #[path = "linear_domains.rs"]
 mod linear_domains;
 pub(crate) use linear_domains::LinearDomains;
@@ -354,7 +356,7 @@ fn infer_domains_from_expression_domain_with_optional_modulus(
     field_modulus: Option<&BigInt>,
 ) -> Vec<(CellId, UcpValueDomain)> {
     let Some(linear) = linearize(expr, values) else {
-        return Vec::new();
+        return finite_projection::infer(expr, expr_domain, values, field_modulus);
     };
 
     let mut inferences = Vec::new();
@@ -519,7 +521,12 @@ fn infer_linear_domains(
     field_modulus: Option<&BigInt>,
 ) -> Vec<(CellId, UcpValueDomain)> {
     let Some(linear) = linearize(expr, values) else {
-        return Vec::new();
+        return finite_projection::infer(
+            expr,
+            &UcpValueDomain::exact(BigInt::from(0)),
+            values,
+            field_modulus,
+        );
     };
 
     let mut inferences = Vec::new();
