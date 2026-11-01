@@ -15,9 +15,11 @@ use super::{
     privacy_discovery::{DomainDiscoveryState, PrivateDomainDiscoveryStatus},
     privacy_domain::refinement_has_target_gain,
     privacy_domain::DomainRefinementState,
-    value::{normalize_field_value, UcpValueDomain, UcpValueFacts},
+    recovery_core::{CertificationError, UnsupportedSample},
+    value::{complete_domain_error_message, normalize_field_value, UcpValueDomain, UcpValueFacts},
 };
-use anyhow::{ensure, Context, Result};
+pub(crate) use super::recovery_core::RecoveryEvidence;
+use anyhow::Result;
 use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -406,22 +408,9 @@ impl RecoveryAction {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct RecoveryEvidence {
-    feasible: BTreeMap<CellId, BTreeSet<BigInt>>,
-}
-
 impl RecoveryEvidence {
     pub fn samples(&self, cell: &CellId) -> BTreeSet<BigInt> {
         self.feasible.get(cell).cloned().unwrap_or_default()
-    }
-
-    /// Két különböző teljes modellérték domainlefedés nélkül is bizonyítja a nemegyértelműséget.
-    pub fn non_unique_cells(&self) -> impl Iterator<Item = CellId> + '_ {
-        self.feasible
-            .iter()
-            .filter(|(_, samples)| samples.len() >= 2)
-            .map(|(cell, _)| cell.clone())
     }
 
     pub fn remember_feasible_samples(
@@ -431,9 +420,8 @@ impl RecoveryEvidence {
         modulus: &BigInt,
     ) -> Result<()> {
         for sample in samples {
-            let value =
-                normalize_field_value(sample, modulus).context("Unsupported recovery sample")?;
-            self.feasible.entry(cell.clone()).or_default().insert(value);
+            self.try_remember_sample(cell, sample, modulus)
+                .map_err(unsupported_sample_message)?;
         }
         Ok(())
     }
@@ -445,20 +433,21 @@ impl RecoveryEvidence {
         knowledge: &mut UcpResult,
         modulus: &BigInt,
     ) -> Result<bool> {
-        let mut exact_added = false;
-        for (cell, samples) in &self.feasible {
-            ensure!(
-                samples.len() < 2 || !knowledge.facts.is_unique(cell),
-                "Uniqueness contradicts feasible samples for {}",
-                cell
-            );
-            let was_exact = knowledge.value_facts.known_value(cell).is_some();
-            knowledge
-                .value_facts
-                .mark_complete_from_samples(cell, samples, modulus)?;
-            exact_added |= !was_exact && knowledge.value_facts.known_value(cell).is_some();
+        self.try_certify_complete_domains(&knowledge.facts, &mut knowledge.value_facts, modulus)
+            .map_err(certification_error_message)
+    }
+}
+
+pub(super) fn unsupported_sample_message(_: UnsupportedSample) -> anyhow::Error {
+    anyhow::anyhow!("Unsupported recovery sample")
+}
+
+pub(super) fn certification_error_message(error: CertificationError) -> anyhow::Error {
+    match error {
+        CertificationError::UniqueWithSamples(cell) => {
+            anyhow::anyhow!("Uniqueness contradicts feasible samples for {}", cell)
         }
-        Ok(exact_added)
+        CertificationError::Domain(cell, error) => complete_domain_error_message(&cell, error),
     }
 }
 

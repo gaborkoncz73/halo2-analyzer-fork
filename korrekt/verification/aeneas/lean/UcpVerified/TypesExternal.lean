@@ -18,6 +18,7 @@ abbrev alloc.collections.btree.map.entry.VacantEntry (K V A : Type) : Type :=
   alloc.collections.btree.map.BTreeMap K V A × K
 abbrev alloc.collections.btree.map.entry.OccupiedEntry (K V A : Type) : Type :=
   alloc.collections.btree.map.BTreeMap K V A × K × V
+abbrev alloc.collections.btree.map.Iter (K V : Type) : Type := List (K × V)
 abbrev alloc.collections.btree.map.IntoValues (_K V _A : Type) : Type := List V
 abbrev std.hash.random.RandomState : Type := Unit
 abbrev std.hash.random.DefaultHasher : Type := Unit

@@ -158,6 +158,28 @@ impl UcpValueDomain {
     }
 }
 
+// A strukturalt hibaokbol kesziti a felhasznaloi uzenetet.
+pub(crate) fn complete_domain_error_message(
+    cell: &CellId,
+    error: CompleteDomainError,
+) -> anyhow::Error {
+    match error {
+        CompleteDomainError::DomainValue => {
+            anyhow::anyhow!("Unsupported complete-domain field value")
+        }
+        CompleteDomainError::SampleValue => {
+            anyhow::anyhow!("Unsupported complete-domain sample")
+        }
+        CompleteDomainError::ExcludedFeasibleValue => anyhow::anyhow!(
+            "Recorded domain for {} excludes a proven feasible value",
+            cell
+        ),
+        CompleteDomainError::RepresentationLimit => {
+            anyhow::anyhow!("Complete domain exceeds representation limits")
+        }
+    }
+}
+
 impl UcpValueFacts {
     pub fn new() -> Self {
         Self::default()
@@ -245,21 +267,7 @@ impl UcpValueFacts {
         modulus: &BigInt,
     ) -> Result<bool> {
         self.try_mark_complete_from_samples(cell, samples, modulus)
-            .map_err(|error| match error {
-                CompleteDomainError::DomainValue => {
-                    anyhow::anyhow!("Unsupported complete-domain field value")
-                }
-                CompleteDomainError::SampleValue => {
-                    anyhow::anyhow!("Unsupported complete-domain sample")
-                }
-                CompleteDomainError::ExcludedFeasibleValue => anyhow::anyhow!(
-                    "Recorded domain for {} excludes a proven feasible value",
-                    cell
-                ),
-                CompleteDomainError::RepresentationLimit => {
-                    anyhow::anyhow!("Complete domain exceeds representation limits")
-                }
-            })
+            .map_err(|error| complete_domain_error_message(cell, error))
     }
 
     // A teljességet normalizált mintákból igazolja, diagnosztikai formázás nélkül.

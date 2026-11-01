@@ -83,7 +83,7 @@ theorem boolean_affine_example_recovers_zero :
     (by intro assignment valid; simp [valid]) (by decide) (by decide)
   intro assignment valid
   have member := recovered assignment valid
-  simpa only [ListDomain, List.mem_singleton] using member
+  simpa only [ListDomain, List.mem_singleton, Singleton] using member
 
 theorem boolean_affine_example_satisfiable :
     Satisfiable (fun assignment => evaluate booleanArithmetic assignment affineExample = true) := by

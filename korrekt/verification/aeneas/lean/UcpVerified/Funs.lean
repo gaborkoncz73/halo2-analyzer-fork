@@ -204,6 +204,19 @@ def
     coreallocAllocatorCloneInst
 }
 
+/-- Trait implementation: [alloc::collections::btree::set::{impl core::default::Default for alloc::collections::btree::set::BTreeSet<T, alloc::alloc::Global>}]
+    Source: '/rustc/library/alloc/src/collections/btree/set.rs', lines 1640:0-1640:31
+    Name pattern: [core::default::Default<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>] -/
+@[reducible, rust_trait_impl
+  "core::default::Default<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>"]
+def alloc.collections.btree.set.BTreeSetTGlobal.Insts.CoreDefaultDefault (T :
+  Type) : core.default.Default (alloc.collections.btree.set.BTreeSet T
+  alloc.alloc.Global) := {
+  default :=
+    alloc.collections.btree.set.BTreeSetTGlobal.Insts.CoreDefaultDefault.default
+    T
+}
+
 /-- Trait implementation: [alloc::collections::btree::set::{impl core::iter::traits::iterator::Iterator<&'a T> for alloc::collections::btree::set::Iter<'a, T>}]
     Source: '/rustc/library/alloc/src/collections/btree/set.rs', lines 1762:0-1762:36
     Name pattern: [core::iter::traits::iterator::Iterator<alloc::collections::btree::set::Iter<'a, @T>, &'a @T>] -/
@@ -315,6 +328,15 @@ def cells.CellKind.Insts.CoreHashHash.hash
   let self1 := read_discriminant self
   Isize.Insts.CoreHashHash.hash corehashHasherInst self1 state
 
+/-- [ucp_verified::cells::{impl core::cmp::Ord for ucp_verified::cells::CellKind}::cmp]:
+    Source: '../../../src/circuit_analyzer/ucp/cell.rs', lines 6:33-6:36
+    Visibility: public -/
+def cells.CellKind.Insts.CoreCmpOrd.cmp
+  (self : cells.CellKind) (other : cells.CellKind) : Result Ordering := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (core.cmp.impls.OrdIsize.cmp self1 other1)
+
 /-- [ucp_verified::cells::{impl core::cmp::PartialEq<ucp_verified::cells::CellKind> for ucp_verified::cells::CellKind}::eq]:
     Source: '../../../src/circuit_analyzer/ucp/cell.rs', lines 6:38-6:47
     Visibility: public -/
@@ -400,6 +422,54 @@ def cells.CellId.Insts.CoreHashHash.hash
 def cells.CellId.Insts.CoreHashHash : core.hash.Hash cells.CellId := {
   hash := fun {H : Type} (corehashHasherInst : core.hash.Hasher H) =>
     cells.CellId.Insts.CoreHashHash.hash corehashHasherInst
+}
+
+/-- [ucp_verified::cells::{impl core::cmp::Ord for ucp_verified::cells::CellId}::cmp]:
+    Source: '../../../src/circuit_analyzer/ucp/cell.rs', lines 18:33-18:36
+    Visibility: public -/
+def cells.CellId.Insts.CoreCmpOrd.cmp
+  (self : cells.CellId) (other : cells.CellId) : Result Ordering := do
+  let o ← cells.CellKind.Insts.CoreCmpOrd.cmp self.kind other.kind
+  match o with
+  | Ordering.lt => ok Ordering.lt
+  | Ordering.eq =>
+    let o1 ← lift (core.cmp.impls.OrdUsize.cmp self.column other.column)
+    match o1 with
+    | Ordering.lt => ok Ordering.lt
+    | Ordering.eq => ok (core.cmp.impls.OrdI32.cmp self.row other.row)
+    | Ordering.gt => ok Ordering.gt
+  | Ordering.gt => ok Ordering.gt
+
+/-- [ucp_verified::cells::{impl core::cmp::PartialOrd<ucp_verified::cells::CellId> for ucp_verified::cells::CellId}::partial_cmp]:
+    Source: '../../../src/circuit_analyzer/ucp/cell.rs', lines 18:49-18:59
+    Visibility: public -/
+def cells.CellId.Insts.CoreCmpPartialOrdCellId.partial_cmp
+  (self : cells.CellId) (other : cells.CellId) : Result (Option Ordering) := do
+  let o ← cells.CellId.Insts.CoreCmpOrd.cmp self other
+  ok (Option.some o)
+
+/-- Trait implementation: [ucp_verified::cells::{impl core::cmp::PartialOrd<ucp_verified::cells::CellId> for ucp_verified::cells::CellId}]
+    Source: '../../../src/circuit_analyzer/ucp/cell.rs', lines 18:49-18:59 -/
+@[reducible]
+impl_def cells.CellId.Insts.CoreCmpPartialOrdCellId : core.cmp.PartialOrd
+  cells.CellId cells.CellId := {
+  partialEqInst := cells.CellId.Insts.CoreCmpPartialEqCellId
+  partial_cmp := cells.CellId.Insts.CoreCmpPartialOrdCellId.partial_cmp
+  lt := core.cmp.PartialOrd.lt.trait_default
+    cells.CellId.Insts.CoreCmpPartialOrdCellId
+  le := core.cmp.PartialOrd.le.trait_default
+    cells.CellId.Insts.CoreCmpPartialOrdCellId
+  gt := core.cmp.PartialOrd.gt.trait_default
+    cells.CellId.Insts.CoreCmpPartialOrdCellId
+}
+
+/-- Trait implementation: [ucp_verified::cells::{impl core::cmp::Ord for ucp_verified::cells::CellId}]
+    Source: '../../../src/circuit_analyzer/ucp/cell.rs', lines 18:33-18:36 -/
+@[reducible]
+def cells.CellId.Insts.CoreCmpOrd : core.cmp.Ord cells.CellId := {
+  eqInst := cells.CellId.Insts.CoreCmpEq
+  partialOrdInst := cells.CellId.Insts.CoreCmpPartialOrdCellId
+  cmp := cells.CellId.Insts.CoreCmpOrd.cmp
 }
 
 /-- [ucp_verified::expressions::{ucp_verified::expressions::UcpScalar}::is_statically_non_zero]:
@@ -509,6 +579,1347 @@ def knowledge.UcpFacts.impl.is_unique
     std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
     (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
     cells.CellId.Insts.CoreCmpEq self.unique_cells cell
+
+/-- [ucp_verified::domains::MAX_VALUE_BITS]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 31:0-31:37
+    Visibility: public -/
+@[global_simps, irreducible] def domains.MAX_VALUE_BITS : Std.U64 := 4096#u64
+
+/-- [ucp_verified::domains::bounded_value]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 479:0-485:1 -/
+def domains.bounded_value
+  (value : num_bigint.bigint.BigInt) :
+  Result (Option num_bigint.bigint.BigInt)
+  := do
+  let i ← num_bigint.bigint.BigInt.impl.bits value
+  if i <= domains.MAX_VALUE_BITS
+  then ok (Option.some value)
+  else ok Option.none
+
+/-- [ucp_verified::domains::normalize_field_value]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 494:0-511:1 -/
+def domains.normalize_field_value
+  (value : num_bigint.bigint.BigInt) (modulus : num_bigint.bigint.BigInt) :
+  Result (Option num_bigint.bigint.BigInt)
+  := do
+  let bi ← num_bigint.bigint.BigInt.Insts.CoreConvertFromI32.from 1#i32
+  let b ←
+    core.cmp.impls.PartialOrdShared.le
+      num_bigint.bigint.BigInt.Insts.CoreCmpPartialOrdBigInt modulus bi
+  if b
+  then ok Option.none
+  else
+    let i ← num_bigint.bigint.BigInt.impl.bits modulus
+    if i > domains.MAX_VALUE_BITS
+    then ok Option.none
+    else
+      let normalized ←
+        num_bigint.bigint.BigInt.Insts.CoreOpsArithRemShared0BigIntBigInt.rem
+          value modulus
+      let bi1 ← num_bigint.bigint.BigInt.Insts.CoreConvertFromI32.from 0#i32
+      let b1 ←
+        core.cmp.PartialOrd.lt.trait_default
+          num_bigint.bigint.BigInt.Insts.CoreCmpPartialOrdBigInt normalized bi1
+      let normalized1 ←
+        if b1
+        then
+          num_bigint.bigint.BigInt.Insts.CoreOpsArithAddAssignShared0BigInt.add_assign
+            normalized modulus
+        else ok normalized
+      let bi2 ← num_bigint.bigint.BigInt.Insts.CoreConvertFromI32.from 2#i32
+      let bi3 ←
+        Shared0BigInt.Insts.CoreOpsArithDivBigIntBigInt.div modulus bi2
+      let b2 ←
+        core.cmp.PartialOrd.gt.trait_default
+          num_bigint.bigint.BigInt.Insts.CoreCmpPartialOrdBigInt normalized1
+          bi3
+      let normalized2 ←
+        if b2
+        then
+          num_bigint.bigint.BigInt.Insts.CoreOpsArithSubAssignShared0BigInt.sub_assign
+            normalized1 modulus
+        else ok normalized1
+      domains.bounded_value normalized2
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_sample]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 28:4-37:5 -/
+def recovery_core.RecoveryEvidence.impl.try_remember_sample
+  (self : recovery_core.RecoveryEvidence) (cell : cells.CellId)
+  (sample : num_bigint.bigint.BigInt) (modulus : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result Unit recovery_core.UnsupportedSample) ×
+    recovery_core.RecoveryEvidence)
+  := do
+  let o ← domains.normalize_field_value sample modulus
+  let r ← core.option.Option.ok_or o ()
+  let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+  match cf with
+  | core.ops.control_flow.ControlFlow.Continue val =>
+    let ci ← cells.CellId.Insts.CoreCloneClone.clone cell
+    let (e, entry_back) ←
+      alloc.collections.btree.map.BTreeMap.impl.entry
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+        cells.CellId.Insts.CoreCmpOrd self.feasible ci
+    let (bs, or_default_back) ←
+      alloc.collections.btree.map.entry.Entry.impl.or_default
+        cells.CellId.Insts.CoreCmpOrd
+        (alloc.collections.btree.set.BTreeSetTGlobal.Insts.CoreDefaultDefault
+        num_bigint.bigint.BigInt)
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone e
+    let (_, bs1) ←
+      alloc.collections.btree.set.BTreeSet.impl.insert
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+        num_bigint.bigint.BigInt.Insts.CoreCmpOrd bs val
+    let e1 := or_default_back bs1
+    let bm := entry_back e1
+    ok (core.result.Result.Ok (), { feasible := bm })
+  | core.ops.control_flow.ControlFlow.Break residual =>
+    let r1 ←
+      core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+        Unit (core.convert.FromSame recovery_core.UnsupportedSample) residual
+    ok (r1, self)
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_list]: loop body 0:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 45:8-49:5 -/
+@[rust_loop_body]
+def recovery_core.RecoveryEvidence.impl.try_remember_list_loop.body
+  (cell : cells.CellId) (modulus : num_bigint.bigint.BigInt)
+  (iter : alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
+  (self : recovery_core.RecoveryEvidence) :
+  Result (ControlFlow ((alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
+    × recovery_core.RecoveryEvidence) ((core.result.Result Unit
+    recovery_core.UnsupportedSample) × recovery_core.RecoveryEvidence))
+  := do
+  let (o, iter1) ← alloc.vec.into_iter.IteratorIntoIter.next iter
+  match o with
+  | Option.none => ok (done (core.result.Result.Ok (), self))
+  | Option.some sample =>
+    let (r, self1) ←
+      recovery_core.RecoveryEvidence.impl.try_remember_sample self cell sample
+        modulus
+    let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+    match cf with
+    | core.ops.control_flow.ControlFlow.Continue _ => ok (cont (iter1, self1))
+    | core.ops.control_flow.ControlFlow.Break residual =>
+      let r1 ←
+        core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+          Unit (core.convert.FromSame recovery_core.UnsupportedSample) residual
+      ok (done (r1, self1))
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_list]: loop 0:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 45:8-49:5 -/
+@[rust_loop]
+def recovery_core.RecoveryEvidence.impl.try_remember_list_loop
+  (iter : alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
+  (self : recovery_core.RecoveryEvidence) (cell : cells.CellId)
+  (modulus : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result Unit recovery_core.UnsupportedSample) ×
+    recovery_core.RecoveryEvidence)
+  := do
+  loop
+    (fun (iter1, self1) =>
+      recovery_core.RecoveryEvidence.impl.try_remember_list_loop.body cell
+      modulus iter1 self1)
+    (iter, self)
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_list]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 39:4-49:5 -/
+def recovery_core.RecoveryEvidence.impl.try_remember_list
+  (self : recovery_core.RecoveryEvidence) (cell : cells.CellId)
+  (samples : alloc.vec.Vec num_bigint.bigint.BigInt)
+  (modulus : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result Unit recovery_core.UnsupportedSample) ×
+    recovery_core.RecoveryEvidence)
+  := do
+  let iter ← alloc.vec.IntoIteratorVec.into_iter samples
+  recovery_core.RecoveryEvidence.impl.try_remember_list_loop iter self cell
+    modulus
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model::{closure}<'_0>}::call_mut]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 57:57-57:78 -/
+def
+  recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
+  (c : recovery_core.RecoveryEvidence.try_remember_model.closure)
+  (tupled_args : num_bigint.bigint.BigInt) :
+  Result (num_bigint.bigint.BigInt ×
+    recovery_core.RecoveryEvidence.try_remember_model.closure)
+  := do
+  let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone tupled_args
+  ok (bi, ())
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model::{closure}<'_0>}::call_once]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 57:57-57:78 -/
+def
+  recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt.call_once
+  (c : recovery_core.RecoveryEvidence.try_remember_model.closure)
+  (bi : num_bigint.bigint.BigInt) :
+  Result num_bigint.bigint.BigInt
+  := do
+  let (bi1, _) ←
+    recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
+      () bi
+  ok bi1
+
+/-- Trait implementation: [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model::{closure}<'_0>}]
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 57:57-57:78 -/
+@[reducible]
+def
+  recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt
+  : core.ops.function.FnOnce
+  recovery_core.RecoveryEvidence.try_remember_model.closure
+  num_bigint.bigint.BigInt num_bigint.bigint.BigInt := {
+  call_once :=
+    recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt.call_once
+}
+
+/-- Trait implementation: [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model::{closure}<'_0>}]
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 57:57-57:78 -/
+@[reducible]
+def
+  recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt
+  : core.ops.function.FnMut
+  recovery_core.RecoveryEvidence.try_remember_model.closure
+  num_bigint.bigint.BigInt num_bigint.bigint.BigInt := {
+  FnOnceInst :=
+    recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt
+  call_mut :=
+    recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
+}
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model]: loop body 0:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 56:8-61:5 -/
+@[rust_loop_body]
+def recovery_core.RecoveryEvidence.impl.try_remember_model_loop.body
+  (modulus : num_bigint.bigint.BigInt)
+  (iter : alloc.collections.btree.map.Iter cells.CellId
+  (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global)) (self : recovery_core.RecoveryEvidence) :
+  Result (ControlFlow ((alloc.collections.btree.map.Iter cells.CellId
+    (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+    alloc.alloc.Global)) × recovery_core.RecoveryEvidence)
+    ((core.result.Result Unit recovery_core.UnsupportedSample) ×
+    recovery_core.RecoveryEvidence))
+  := do
+  let (o, iter1) ←
+    alloc.collections.btree.map.Iter.Insts.CoreIterTraitsIteratorIteratorPairSharedAKSharedAV.next
+      iter
+  match o with
+  | Option.none => ok (done (core.result.Result.Ok (), self))
+  | Option.some p =>
+    let (cell, values) := p
+    let i ←
+      alloc.collections.btree.set.BTreeSet.impl.iter
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone values
+    let m ←
+      core.iter.traits.iterator.Iterator.map.default
+        (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
+        num_bigint.bigint.BigInt)
+        recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt
+        i ()
+    let samples ←
+      core.iter.traits.iterator.Iterator.collect.default
+        (core.iter.adapters.map.Map.Insts.CoreIterTraitsIteratorIterator
+        (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
+        num_bigint.bigint.BigInt)
+        recovery_core.RecoveryEvidence.try_remember_model.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt)
+        (core.iter.traits.collect.FromIteratorVec num_bigint.bigint.BigInt) m
+    let (r, self1) ←
+      recovery_core.RecoveryEvidence.impl.try_remember_list self cell samples
+        modulus
+    let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+    match cf with
+    | core.ops.control_flow.ControlFlow.Continue _ => ok (cont (iter1, self1))
+    | core.ops.control_flow.ControlFlow.Break residual =>
+      let r1 ←
+        core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+          Unit (core.convert.FromSame recovery_core.UnsupportedSample) residual
+      ok (done (r1, self1))
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model]: loop 0:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 56:8-61:5 -/
+@[rust_loop]
+def recovery_core.RecoveryEvidence.impl.try_remember_model_loop
+  (iter : alloc.collections.btree.map.Iter cells.CellId
+  (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global)) (self : recovery_core.RecoveryEvidence)
+  (modulus : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result Unit recovery_core.UnsupportedSample) ×
+    recovery_core.RecoveryEvidence)
+  := do
+  loop
+    (fun (iter1, self1) =>
+      recovery_core.RecoveryEvidence.impl.try_remember_model_loop.body modulus
+      iter1 self1)
+    (iter, self)
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_remember_model]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 51:4-61:5 -/
+def recovery_core.RecoveryEvidence.impl.try_remember_model
+  (self : recovery_core.RecoveryEvidence)
+  (models : alloc.collections.btree.map.BTreeMap cells.CellId
+  (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global) alloc.alloc.Global) (modulus : num_bigint.bigint.BigInt)
+  :
+  Result ((core.result.Result Unit recovery_core.UnsupportedSample) ×
+    recovery_core.RecoveryEvidence)
+  := do
+  let iter ←
+    SharedABTreeMap.Insts.CoreIterTraitsCollectIntoIteratorPairSharedAKSharedAVIter.into_iter
+      alloc.alloc.Global.Insts.CoreAllocAllocatorClone models
+  recovery_core.RecoveryEvidence.impl.try_remember_model_loop iter self modulus
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}::call_mut]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool.call_mut
+  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_2)
+  (tupled_args : num_bigint.bigint.BigInt) :
+  Result (Bool ×
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2)
+  := do
+  let b ←
+    alloc.collections.btree.map.BTreeMap.impl.contains_key
+      alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+      (core.borrow.Borrow.Blanket num_bigint.bigint.BigInt)
+      num_bigint.bigint.BigInt.Insts.CoreCmpOrd
+      num_bigint.bigint.BigInt.Insts.CoreCmpOrd c tupled_args
+  ok (b, c)
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}::call_once]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool.call_once
+  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_2)
+  (bi : num_bigint.bigint.BigInt) :
+  Result Bool
+  := do
+  let (b, _) ←
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool.call_mut
+      c bi
+  ok b
+
+/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+@[reducible]
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool
+  : core.ops.function.FnOnce
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2
+  num_bigint.bigint.BigInt Bool := {
+  call_once :=
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool.call_once
+}
+
+/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 307:32-307:70 -/
+@[reducible]
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool
+  : core.ops.function.FnMut
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2
+  num_bigint.bigint.BigInt Bool := {
+  FnOnceInst :=
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool
+  call_mut :=
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool.call_mut
+}
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}::call_mut]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError.call_mut
+  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_1)
+  (tupled_args : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result num_bigint.bigint.BigInt
+    domains.CompleteDomainError) ×
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1)
+  := do
+  let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone tupled_args
+  let o ← domains.normalize_field_value bi c
+  let r ← core.option.Option.ok_or o domains.CompleteDomainError.SampleValue
+  ok (r, c)
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}::call_once]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError.call_once
+  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_1)
+  (bi : num_bigint.bigint.BigInt) :
+  Result (core.result.Result num_bigint.bigint.BigInt
+    domains.CompleteDomainError)
+  := do
+  let (r, _) ←
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError.call_mut
+      c bi
+  ok r
+
+/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+@[reducible]
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError
+  : core.ops.function.FnOnce
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1
+  num_bigint.bigint.BigInt (core.result.Result num_bigint.bigint.BigInt
+  domains.CompleteDomainError) := {
+  call_once :=
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError.call_once
+}
+
+/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 302:17-305:13 -/
+@[reducible]
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError
+  : core.ops.function.FnMut
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1
+  num_bigint.bigint.BigInt (core.result.Result num_bigint.bigint.BigInt
+  domains.CompleteDomainError) := {
+  FnOnceInst :=
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError
+  call_mut :=
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError.call_mut
+}
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure}<'_0>}::call_once]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 298:32-298:48 -/
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt.call_once
+  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure) 
+  (_ : Unit) :
+  Result num_bigint.bigint.BigInt
+  := do
+  num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone c
+
+/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure}<'_0>}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 298:32-298:48 -/
+@[reducible]
+def
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt
+  : core.ops.function.FnOnce
+  domains.UcpValueFacts.try_mark_complete_from_samples.closure Unit
+  num_bigint.bigint.BigInt := {
+  call_once :=
+    domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt.call_once
+}
+
+/-- [ucp_verified::domains::MAX_FINITE_DOMAIN_SIZE]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 29:0-29:53 -/
+@[global_simps, irreducible]
+def domains.MAX_FINITE_DOMAIN_SIZE : Std.Usize := 256#usize
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]: loop body 0:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 82:8-94:5
+    Visibility: public -/
+@[rust_loop_body]
+def domains.UcpValueDomain.impl.finite_set_loop.body
+  {I : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst :
+  core.iter.traits.collect.IntoIterator I num_bigint.bigint.BigInt
+  Clause0_IntoIter) (iter : Clause0_IntoIter)
+  (set : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global) :
+  Result (ControlFlow (Clause0_IntoIter ×
+    (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+    alloc.alloc.Global)) (Option domains.UcpValueDomain))
+  := do
+  let (o, iter1) ←
+    coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst.iteratorInst.next
+      iter
+  match o with
+  | Option.none =>
+    let i ←
+      alloc.collections.btree.set.BTreeSet.impl.len
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone set
+    match i.val with
+    | 0 => ok (done Option.none)
+    | 1 =>
+      let ii ←
+        alloc.collections.btree.set.BTreeSet.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone set
+      let (o1, _) ←
+        alloc.collections.btree.set.IntoIter.Insts.CoreIterTraitsIteratorIterator.next
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone ii
+      let bi ← core.option.Option.unwrap o1
+      ok (done (Option.some (domains.UcpValueDomain.Exact bi)))
+    | _ => ok (done (Option.some (domains.UcpValueDomain.FiniteSet set)))
+  | Option.some value =>
+    let o1 ← domains.bounded_value value
+    let cf ← core.option.Option.Insts.CoreOpsTry_traitTry.branch o1
+    match cf with
+    | core.ops.control_flow.ControlFlow.Continue val =>
+      let (_, set1) ←
+        alloc.collections.btree.set.BTreeSet.impl.insert
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd set val
+      let i ←
+        alloc.collections.btree.set.BTreeSet.impl.len
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone set1
+      if i > domains.MAX_FINITE_DOMAIN_SIZE
+      then ok (done Option.none)
+      else ok (cont (iter1, set1))
+    | core.ops.control_flow.ControlFlow.Break residual =>
+      let o2 ←
+        core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionNever.from_residual
+          domains.UcpValueDomain residual
+      ok (done o2)
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]: loop 0:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 82:8-94:5
+    Visibility: public -/
+@[rust_loop]
+def domains.UcpValueDomain.impl.finite_set_loop
+  {I : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst :
+  core.iter.traits.collect.IntoIterator I num_bigint.bigint.BigInt
+  Clause0_IntoIter) (iter : Clause0_IntoIter)
+  (set : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global) :
+  Result (Option domains.UcpValueDomain)
+  := do
+  loop
+    (fun (iter1, set1) => domains.UcpValueDomain.impl.finite_set_loop.body
+      coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst iter1 set1)
+    (iter, set)
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 75:4-94:5
+    Visibility: public -/
+def domains.UcpValueDomain.impl.finite_set
+  {I : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst :
+  core.iter.traits.collect.IntoIterator I num_bigint.bigint.BigInt
+  Clause0_IntoIter) (values : I) :
+  Result (Option domains.UcpValueDomain)
+  := do
+  let set ←
+    alloc.collections.btree.set.BTreeSetTGlobal.impl.new
+      num_bigint.bigint.BigInt
+  let iter ←
+    coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst.into_iter
+      values
+  domains.UcpValueDomain.impl.finite_set_loop
+    coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst iter set
+
+/-- [ucp_verified::domains::{impl core::cmp::PartialEq<ucp_verified::domains::UcpValueDomain> for ucp_verified::domains::UcpValueDomain}::eq]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:27-34:36
+    Visibility: public -/
+def domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
+  (self : domains.UcpValueDomain) (other : domains.UcpValueDomain) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  if self1 = other1
+  then
+    match self with
+    | domains.UcpValueDomain.Exact __self_0 =>
+      match other with
+      | domains.UcpValueDomain.Exact __arg1_0 =>
+        num_bigint.bigint.BigInt.Insts.CoreCmpPartialEqBigInt.eq __self_0
+          __arg1_0
+      | domains.UcpValueDomain.FiniteSet _ => fail panic
+    | domains.UcpValueDomain.FiniteSet __self_0 =>
+      match other with
+      | domains.UcpValueDomain.Exact _ => fail panic
+      | domains.UcpValueDomain.FiniteSet __arg1_0 =>
+        alloc.collections.btree.set.BTreeSet.Insts.CoreCmpPartialEqBTreeSet.eq
+          num_bigint.bigint.BigInt.Insts.CoreCmpPartialEqBigInt
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone __self_0 __arg1_0
+  else ok false
+
+/-- Trait implementation: [ucp_verified::domains::{impl core::cmp::PartialEq<ucp_verified::domains::UcpValueDomain> for ucp_verified::domains::UcpValueDomain}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:27-34:36 -/
+@[reducible]
+impl_def domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain :
+  core.cmp.PartialEq domains.UcpValueDomain domains.UcpValueDomain := {
+  eq := domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
+  ne := core.cmp.PartialEq.ne.trait_default
+    domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain
+}
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]: loop body 0:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 293:8-318:5 -/
+@[rust_loop_body]
+def domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop.body
+  (hm : std.collections.hash.map.HashMap cells.CellId domains.UcpValueDomain
+  std.hash.random.RandomState alloc.alloc.Global)
+  (hs : std.collections.hash.set.HashSet cells.CellId
+  std.hash.random.RandomState alloc.alloc.Global) (cell : cells.CellId)
+  (samples : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global) (modulus : num_bigint.bigint.BigInt)
+  (iter : alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
+  (candidates : alloc.collections.btree.map.BTreeMap num_bigint.bigint.BigInt
+  num_bigint.bigint.BigInt alloc.alloc.Global) :
+  Result (ControlFlow ((alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
+    × (alloc.collections.btree.map.BTreeMap num_bigint.bigint.BigInt
+    num_bigint.bigint.BigInt alloc.alloc.Global)) ((core.result.Result Bool
+    domains.CompleteDomainError) × (std.collections.hash.map.HashMap
+    cells.CellId domains.UcpValueDomain std.hash.random.RandomState
+    alloc.alloc.Global) × (std.collections.hash.set.HashSet cells.CellId
+    std.hash.random.RandomState alloc.alloc.Global)))
+  := do
+  let (o, iter1) ← alloc.vec.into_iter.IteratorIntoIter.next iter
+  match o with
+  | Option.none =>
+    let i ←
+      alloc.collections.btree.set.BTreeSet.impl.iter
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone samples
+    let m ←
+      core.iter.traits.iterator.Iterator.map.default
+        (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
+        num_bigint.bigint.BigInt)
+        domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError
+        i modulus
+    let r ←
+      core.iter.traits.iterator.Iterator.collect.default
+        (core.iter.adapters.map.Map.Insts.CoreIterTraitsIteratorIterator
+        (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
+        num_bigint.bigint.BigInt)
+        domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError)
+        (core.result.Result.Insts.CoreIterTraitsCollectFromIteratorResult
+        domains.CompleteDomainError
+        (alloc.collections.btree.set.BTreeSetTGlobal.Insts.CoreIterTraitsCollectFromIterator
+        num_bigint.bigint.BigInt.Insts.CoreCmpOrd)) m
+    let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+    match cf with
+    | core.ops.control_flow.ControlFlow.Continue val =>
+      let i1 ←
+        alloc.collections.btree.set.BTreeSet.impl.iter
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone val
+      let (b, _) ←
+        core.iter.traits.iterator.Iterator.all.default
+          (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
+          num_bigint.bigint.BigInt)
+          domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool
+          i1 candidates
+      if b
+      then
+        let i2 ←
+          alloc.collections.btree.set.BTreeSet.impl.len
+            alloc.alloc.Global.Insts.CoreAllocAllocatorClone val
+        let i3 ←
+          alloc.collections.btree.map.BTreeMap.impl.len
+            alloc.alloc.Global.Insts.CoreAllocAllocatorClone candidates
+        if i2 != i3
+        then ok (done (core.result.Result.Ok false, hm, hs))
+        else
+          let b1 ←
+            alloc.collections.btree.set.BTreeSet.impl.is_empty
+              alloc.alloc.Global.Insts.CoreAllocAllocatorClone val
+          if b1
+          then ok (done (core.result.Result.Ok false, hm, hs))
+          else
+            let iv ←
+              alloc.collections.btree.map.BTreeMap.impl.into_values
+                alloc.alloc.Global.Insts.CoreAllocAllocatorClone candidates
+            let o1 ←
+              domains.UcpValueDomain.impl.finite_set
+                (core.iter.traits.collect.IntoIterator.Blanket
+                (alloc.collections.btree.map.IntoValues.Insts.CoreIterTraitsIteratorIterator
+                num_bigint.bigint.BigInt num_bigint.bigint.BigInt
+                alloc.alloc.Global.Insts.CoreAllocAllocatorClone)) iv
+            let r1 ←
+              core.option.Option.ok_or o1
+                domains.CompleteDomainError.RepresentationLimit
+            let cf1 ← core.result.Result.Insts.CoreOpsTry.branch r1
+            match cf1 with
+            | core.ops.control_flow.ControlFlow.Continue val1 =>
+              let o2 ←
+                std.collections.hash.map.HashMap.impl.get
+                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+                  (core.borrow.Borrow.Blanket cells.CellId)
+                  cells.CellId.Insts.CoreHashHash cells.CellId.Insts.CoreCmpEq
+                  hm cell
+              let changed ←
+                core.cmp.PartialEq.ne.trait_default
+                  (core.option.Option.Insts.CoreCmpPartialEqOption
+                  (core.cmp.PartialEqShared
+                  domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain))
+                  o2 (Option.some val1)
+              let ci ← cells.CellId.Insts.CoreCloneClone.clone cell
+              let (_, hm1) ←
+                std.collections.hash.map.HashMap.impl.insert
+                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+                  hm ci val1
+              let (b2, hs1) ←
+                std.collections.hash.set.HashSet.impl.insert
+                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+                  hs ci
+              if b2
+              then ok (done (core.result.Result.Ok true, hm1, hs1))
+              else ok (done (core.result.Result.Ok changed, hm1, hs1))
+            | core.ops.control_flow.ControlFlow.Break residual =>
+              let r2 ←
+                core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+                  Bool (core.convert.FromSame domains.CompleteDomainError)
+                  residual
+              ok (done (r2, hm, hs))
+      else
+        ok (done (core.result.Result.Err
+          domains.CompleteDomainError.ExcludedFeasibleValue, hm, hs))
+    | core.ops.control_flow.ControlFlow.Break residual =>
+      let r1 ←
+        core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+          Bool (core.convert.FromSame domains.CompleteDomainError) residual
+      ok (done (r1, hm, hs))
+  | Option.some value =>
+    let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone value
+    let o1 ← domains.normalize_field_value bi modulus
+    let r ←
+      core.option.Option.ok_or o1 domains.CompleteDomainError.DomainValue
+    let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+    match cf with
+    | core.ops.control_flow.ControlFlow.Continue val =>
+      let (e, entry_back) ←
+        alloc.collections.btree.map.BTreeMap.impl.entry
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd candidates val
+      let (bi1, or_insert_with_back) ←
+        alloc.collections.btree.map.entry.Entry.impl.or_insert_with
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+          domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt
+          e value
+      let e1 := or_insert_with_back bi1
+      let bm := entry_back e1
+      ok (cont (iter1, bm))
+    | core.ops.control_flow.ControlFlow.Break residual =>
+      let r1 ←
+        core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+          Bool (core.convert.FromSame domains.CompleteDomainError) residual
+      ok (done (r1, hm, hs))
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]: loop 0:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 293:8-318:5 -/
+@[rust_loop]
+def domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop
+  (iter : alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
+  (hm : std.collections.hash.map.HashMap cells.CellId domains.UcpValueDomain
+  std.hash.random.RandomState alloc.alloc.Global)
+  (hs : std.collections.hash.set.HashSet cells.CellId
+  std.hash.random.RandomState alloc.alloc.Global) (cell : cells.CellId)
+  (samples : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global) (modulus : num_bigint.bigint.BigInt)
+  (candidates : alloc.collections.btree.map.BTreeMap num_bigint.bigint.BigInt
+  num_bigint.bigint.BigInt alloc.alloc.Global) :
+  Result ((core.result.Result Bool domains.CompleteDomainError) ×
+    (std.collections.hash.map.HashMap cells.CellId domains.UcpValueDomain
+    std.hash.random.RandomState alloc.alloc.Global) ×
+    (std.collections.hash.set.HashSet cells.CellId std.hash.random.RandomState
+    alloc.alloc.Global))
+  := do
+  loop
+    (fun (iter1, candidates1) =>
+      domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop.body hm hs
+      cell samples modulus iter1 candidates1)
+    (iter, candidates)
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 274:4-318:5 -/
+def domains.UcpValueFacts.impl.try_mark_complete_from_samples
+  (self : domains.UcpValueFacts) (cell : cells.CellId)
+  (samples : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global) (modulus : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result Bool domains.CompleteDomainError) ×
+    domains.UcpValueFacts)
+  := do
+  let o ←
+    std.collections.hash.map.HashMap.impl.get cells.CellId.Insts.CoreCmpEq
+      cells.CellId.Insts.CoreHashHash
+      std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+      (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
+      cells.CellId.Insts.CoreCmpEq self.domains cell
+  match o with
+  | Option.none => ok (core.result.Result.Ok false, self)
+  | Option.some domain =>
+    let entries ←
+      match domain with
+      | domains.UcpValueDomain.Exact value =>
+        alloc.vec.Vec.push (alloc.vec.Vec.new num_bigint.bigint.BigInt) value
+      | domains.UcpValueDomain.FiniteSet values =>
+        do
+        let i ←
+          alloc.collections.btree.set.BTreeSet.impl.iter
+            alloc.alloc.Global.Insts.CoreAllocAllocatorClone values
+        core.iter.traits.iterator.Iterator.collect.default
+          (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
+          num_bigint.bigint.BigInt) (core.iter.traits.collect.FromIteratorVec
+          num_bigint.bigint.BigInt) i
+    let candidates ←
+      alloc.collections.btree.map.BTreeMapKVGlobal.impl.new
+        num_bigint.bigint.BigInt num_bigint.bigint.BigInt
+    let iter ← alloc.vec.IntoIteratorVec.into_iter entries
+    let (r, hm, hs) ←
+      domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop iter
+        self.domains self.complete_domains cell samples modulus candidates
+    ok (r, { domains := hm, complete_domains := hs })
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::exact_value]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 97:4-102:5
+    Visibility: public -/
+def domains.UcpValueDomain.impl.exact_value
+  (self : domains.UcpValueDomain) :
+  Result (Option num_bigint.bigint.BigInt)
+  := do
+  match self with
+  | domains.UcpValueDomain.Exact value => ok (Option.some value)
+  | domains.UcpValueDomain.FiniteSet _ => ok Option.none
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::known_value]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 243:4-245:5
+    Visibility: public -/
+def domains.UcpValueFacts.impl.known_value
+  (self : domains.UcpValueFacts) (cell : cells.CellId) :
+  Result (Option num_bigint.bigint.BigInt)
+  := do
+  let o ←
+    std.collections.hash.map.HashMap.impl.get cells.CellId.Insts.CoreCmpEq
+      cells.CellId.Insts.CoreHashHash
+      std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+      (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
+      cells.CellId.Insts.CoreCmpEq self.domains cell
+  let cf ← core.option.Option.Insts.CoreOpsTry_traitTry.branch o
+  match cf with
+  | core.ops.control_flow.ControlFlow.Continue val =>
+    domains.UcpValueDomain.impl.exact_value val
+  | core.ops.control_flow.ControlFlow.Break residual =>
+    core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionNever.from_residual
+      num_bigint.bigint.BigInt residual
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_certify_complete_domains]: loop body 0:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 72:8-85:5 -/
+@[rust_loop_body]
+def recovery_core.RecoveryEvidence.impl.try_certify_complete_domains_loop.body
+  (facts : knowledge.UcpFacts) (modulus : num_bigint.bigint.BigInt)
+  (iter : alloc.collections.btree.map.Iter cells.CellId
+  (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global)) (values : domains.UcpValueFacts) (exact_added : Bool) :
+  Result (ControlFlow ((alloc.collections.btree.map.Iter cells.CellId
+    (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+    alloc.alloc.Global)) × domains.UcpValueFacts × Bool) ((core.result.Result
+    Bool recovery_core.CertificationError) × domains.UcpValueFacts))
+  := do
+  let (o, iter1) ←
+    alloc.collections.btree.map.Iter.Insts.CoreIterTraitsIteratorIteratorPairSharedAKSharedAV.next
+      iter
+  match o with
+  | Option.none => ok (done (core.result.Result.Ok exact_added, values))
+  | Option.some p =>
+    let (cell, samples) := p
+    let i ←
+      alloc.collections.btree.set.BTreeSet.impl.len
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone samples
+    if i >= 2#usize
+    then
+      let b ← knowledge.UcpFacts.impl.is_unique facts cell
+      if b
+      then
+        let ci ← cells.CellId.Insts.CoreCloneClone.clone cell
+        ok (done (core.result.Result.Err
+          (recovery_core.CertificationError.UniqueWithSamples ci), values))
+      else
+        let o1 ← domains.UcpValueFacts.impl.known_value values cell
+        let was_exact := core.option.Option.is_some o1
+        let (r, values1) ←
+          domains.UcpValueFacts.impl.try_mark_complete_from_samples values cell
+            samples modulus
+        match r with
+        | core.result.Result.Ok _ =>
+          if was_exact
+          then ok (cont (iter1, values1, exact_added))
+          else
+            let o2 ← domains.UcpValueFacts.impl.known_value values1 cell
+            let b1 := core.option.Option.is_some o2
+            if b1
+            then ok (cont (iter1, values1, true))
+            else ok (cont (iter1, values1, exact_added))
+        | core.result.Result.Err error =>
+          let ci ← cells.CellId.Insts.CoreCloneClone.clone cell
+          ok (done (core.result.Result.Err
+            (recovery_core.CertificationError.Domain ci error), values1))
+    else
+      let o1 ← domains.UcpValueFacts.impl.known_value values cell
+      let was_exact := core.option.Option.is_some o1
+      let (r, values1) ←
+        domains.UcpValueFacts.impl.try_mark_complete_from_samples values cell
+          samples modulus
+      match r with
+      | core.result.Result.Ok _ =>
+        if was_exact
+        then ok (cont (iter1, values1, exact_added))
+        else
+          let o2 ← domains.UcpValueFacts.impl.known_value values1 cell
+          let b := core.option.Option.is_some o2
+          if b
+          then ok (cont (iter1, values1, true))
+          else ok (cont (iter1, values1, exact_added))
+      | core.result.Result.Err error =>
+        let ci ← cells.CellId.Insts.CoreCloneClone.clone cell
+        ok (done (core.result.Result.Err
+          (recovery_core.CertificationError.Domain ci error), values1))
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_certify_complete_domains]: loop 0:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 72:8-85:5 -/
+@[rust_loop]
+def recovery_core.RecoveryEvidence.impl.try_certify_complete_domains_loop
+  (iter : alloc.collections.btree.map.Iter cells.CellId
+  (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global)) (facts : knowledge.UcpFacts)
+  (values : domains.UcpValueFacts) (modulus : num_bigint.bigint.BigInt)
+  (exact_added : Bool) :
+  Result ((core.result.Result Bool recovery_core.CertificationError) ×
+    domains.UcpValueFacts)
+  := do
+  loop
+    (fun (iter1, values1, exact_added1) =>
+      recovery_core.RecoveryEvidence.impl.try_certify_complete_domains_loop.body
+      facts modulus iter1 values1 exact_added1)
+    (iter, values, exact_added)
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::try_certify_complete_domains]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 65:4-85:5 -/
+def recovery_core.RecoveryEvidence.impl.try_certify_complete_domains
+  (self : recovery_core.RecoveryEvidence) (facts : knowledge.UcpFacts)
+  (values : domains.UcpValueFacts) (modulus : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result Bool recovery_core.CertificationError) ×
+    domains.UcpValueFacts)
+  := do
+  let iter ←
+    SharedABTreeMap.Insts.CoreIterTraitsCollectIntoIteratorPairSharedAKSharedAVIter.into_iter
+      alloc.alloc.Global.Insts.CoreAllocAllocatorClone self.feasible
+  recovery_core.RecoveryEvidence.impl.try_certify_complete_domains_loop iter
+    facts values modulus false
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::record_non_unique_cells]: loop body 0:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 89:8-93:9 -/
+@[rust_loop_body]
+def recovery_core.RecoveryEvidence.impl.record_non_unique_cells_loop.body
+  (iter : alloc.collections.btree.map.Iter cells.CellId
+  (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global))
+  (non_unique : std.collections.hash.set.HashSet cells.CellId
+  std.hash.random.RandomState alloc.alloc.Global) :
+  Result (ControlFlow ((alloc.collections.btree.map.Iter cells.CellId
+    (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+    alloc.alloc.Global)) × (std.collections.hash.set.HashSet cells.CellId
+    std.hash.random.RandomState alloc.alloc.Global))
+    (std.collections.hash.set.HashSet cells.CellId std.hash.random.RandomState
+    alloc.alloc.Global))
+  := do
+  let (o, iter1) ←
+    alloc.collections.btree.map.Iter.Insts.CoreIterTraitsIteratorIteratorPairSharedAKSharedAV.next
+      iter
+  match o with
+  | Option.none => ok (done non_unique)
+  | Option.some p =>
+    let (cell, samples) := p
+    let i ←
+      alloc.collections.btree.set.BTreeSet.impl.len
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone samples
+    if i >= 2#usize
+    then
+      let ci ← cells.CellId.Insts.CoreCloneClone.clone cell
+      let (_, non_unique1) ←
+        std.collections.hash.set.HashSet.impl.insert
+          cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+          std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+          non_unique ci
+      ok (cont (iter1, non_unique1))
+    else ok (cont (iter1, non_unique))
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::record_non_unique_cells]: loop 0:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 89:8-93:9 -/
+@[rust_loop]
+def recovery_core.RecoveryEvidence.impl.record_non_unique_cells_loop
+  (iter : alloc.collections.btree.map.Iter cells.CellId
+  (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
+  alloc.alloc.Global))
+  (non_unique : std.collections.hash.set.HashSet cells.CellId
+  std.hash.random.RandomState alloc.alloc.Global) :
+  Result (std.collections.hash.set.HashSet cells.CellId
+    std.hash.random.RandomState alloc.alloc.Global)
+  := do
+  loop
+    (fun (iter1, non_unique1) =>
+      recovery_core.RecoveryEvidence.impl.record_non_unique_cells_loop.body
+      iter1 non_unique1)
+    (iter, non_unique)
+
+/-- [ucp_verified::recovery_core::{ucp_verified::recovery_core::RecoveryEvidence}::record_non_unique_cells]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 88:4-94:5 -/
+def recovery_core.RecoveryEvidence.impl.record_non_unique_cells
+  (self : recovery_core.RecoveryEvidence)
+  (non_unique : std.collections.hash.set.HashSet cells.CellId
+  std.hash.random.RandomState alloc.alloc.Global) :
+  Result (std.collections.hash.set.HashSet cells.CellId
+    std.hash.random.RandomState alloc.alloc.Global)
+  := do
+  let iter ←
+    SharedABTreeMap.Insts.CoreIterTraitsCollectIntoIteratorPairSharedAKSharedAVIter.into_iter
+      alloc.alloc.Global.Insts.CoreAllocAllocatorClone self.feasible
+  recovery_core.RecoveryEvidence.impl.record_non_unique_cells_loop iter
+    non_unique
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::is_singleton]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 105:4-107:5
+    Visibility: public -/
+def domains.UcpValueDomain.impl.is_singleton
+  (self : domains.UcpValueDomain) : Result Bool := do
+  match self with
+  | domains.UcpValueDomain.Exact _ => ok true
+  | domains.UcpValueDomain.FiniteSet _ => ok false
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{impl core::ops::function::FnOnce<(&'_0 ucp_verified::domains::UcpValueDomain,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{closure}<'_0, '_1, '_2>}::call_once]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 258:25-258:95 -/
+def
+  domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool.call_once
+  (c : domains.UcpValueFacts.domain_is_complete.closure)
+  (tupled_args : domains.UcpValueDomain) :
+  Result Bool
+  := do
+  let (uvf, ci) := c
+  let b ← domains.UcpValueDomain.impl.is_singleton tupled_args
+  if b
+  then ok true
+  else
+    std.collections.hash.set.HashSet.impl.contains cells.CellId.Insts.CoreCmpEq
+      cells.CellId.Insts.CoreHashHash
+      std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+      (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
+      cells.CellId.Insts.CoreCmpEq uvf.complete_domains ci
+
+/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{impl core::ops::function::FnOnce<(&'_0 ucp_verified::domains::UcpValueDomain,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{closure}<'_0, '_1, '_2>}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 258:25-258:95 -/
+@[reducible]
+def
+  domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool
+  : core.ops.function.FnOnce domains.UcpValueFacts.domain_is_complete.closure
+  domains.UcpValueDomain Bool := {
+  call_once :=
+    domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool.call_once
+}
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 255:4-259:5
+    Visibility: public -/
+def domains.UcpValueFacts.impl.domain_is_complete
+  (self : domains.UcpValueFacts) (cell : cells.CellId) : Result Bool := do
+  let o ←
+    std.collections.hash.map.HashMap.impl.get cells.CellId.Insts.CoreCmpEq
+      cells.CellId.Insts.CoreHashHash
+      std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+      (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
+      cells.CellId.Insts.CoreCmpEq self.domains cell
+  core.option.Option.is_some_and
+    domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool
+    o (self, cell)
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}::call_mut]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+def
+  domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
+  (c : domains.UcpValueDomain.intersect.closure)
+  (tupled_args : num_bigint.bigint.BigInt) :
+  Result (num_bigint.bigint.BigInt × domains.UcpValueDomain.intersect.closure)
+  := do
+  let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone tupled_args
+  ok (bi, ())
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}::call_once]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+def
+  domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt.call_once
+  (c : domains.UcpValueDomain.intersect.closure)
+  (bi : num_bigint.bigint.BigInt) :
+  Result num_bigint.bigint.BigInt
+  := do
+  let (bi1, _) ←
+    domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
+      () bi
+  ok bi1
+
+/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+@[reducible]
+def
+  domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt
+  : core.ops.function.FnOnce domains.UcpValueDomain.intersect.closure
+  num_bigint.bigint.BigInt num_bigint.bigint.BigInt := {
+  call_once :=
+    domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt.call_once
+}
+
+/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}]
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
+@[reducible]
+def
+  domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt
+  : core.ops.function.FnMut domains.UcpValueDomain.intersect.closure
+  num_bigint.bigint.BigInt num_bigint.bigint.BigInt := {
+  FnOnceInst :=
+    domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt
+  call_mut :=
+    domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
+}
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 129:4-145:5 -/
+def domains.UcpValueDomain.impl.intersect
+  (self : domains.UcpValueDomain) (other : domains.UcpValueDomain) :
+  Result (Option domains.UcpValueDomain)
+  := do
+  match self with
+  | domains.UcpValueDomain.Exact left =>
+    match other with
+    | domains.UcpValueDomain.Exact right =>
+      let b ←
+        num_bigint.bigint.BigInt.Insts.CoreCmpPartialEqBigInt.eq left right
+      if b
+      then
+        let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone left
+        ok (Option.some (domains.UcpValueDomain.Exact bi))
+      else ok Option.none
+    | domains.UcpValueDomain.FiniteSet set =>
+      let b ←
+        alloc.collections.btree.set.BTreeSet.impl.contains
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+          (core.borrow.Borrow.Blanket num_bigint.bigint.BigInt)
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd set left
+      if b
+      then
+        let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone left
+        ok (Option.some (domains.UcpValueDomain.Exact bi))
+      else ok Option.none
+  | domains.UcpValueDomain.FiniteSet set =>
+    match other with
+    | domains.UcpValueDomain.Exact value =>
+      let b ←
+        alloc.collections.btree.set.BTreeSet.impl.contains
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+          (core.borrow.Borrow.Blanket num_bigint.bigint.BigInt)
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd set value
+      if b
+      then
+        let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone value
+        ok (Option.some (domains.UcpValueDomain.Exact bi))
+      else ok Option.none
+    | domains.UcpValueDomain.FiniteSet right =>
+      let i ←
+        alloc.collections.btree.set.BTreeSet.impl.intersection
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd set right
+      let m ←
+        core.iter.traits.iterator.Iterator.map.default
+          (alloc.collections.btree.set.Intersection.Insts.CoreIterTraitsIteratorIteratorSharedAT
+          num_bigint.bigint.BigInt.Insts.CoreCmpOrd
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone)
+          domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt
+          i ()
+      domains.UcpValueDomain.impl.finite_set
+        (core.iter.traits.collect.IntoIterator.Blanket
+        (core.iter.adapters.map.Map.Insts.CoreIterTraitsIteratorIterator
+        (alloc.collections.btree.set.Intersection.Insts.CoreIterTraitsIteratorIteratorSharedAT
+        num_bigint.bigint.BigInt.Insts.CoreCmpOrd
+        alloc.alloc.Global.Insts.CoreAllocAllocatorClone)
+        domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt))
+        m
+
+/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::mark_domain]:
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 197:4-240:5
+    Visibility: public -/
+def domains.UcpValueFacts.impl.mark_domain
+  (self : domains.UcpValueFacts) (cell : cells.CellId)
+  (domain : domains.UcpValueDomain) :
+  Result (Bool × domains.UcpValueFacts)
+  := do
+  let b ← domains.UcpValueFacts.impl.domain_is_complete self cell
+  if b
+  then ok (false, self)
+  else
+    match domain with
+    | domains.UcpValueDomain.Exact value =>
+      let o ← domains.bounded_value value
+      match o with
+      | Option.none => ok (false, self)
+      | Option.some value1 =>
+        let o1 ←
+          std.collections.hash.map.HashMap.impl.get
+            cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+            std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+            (core.borrow.Borrow.Blanket cells.CellId)
+            cells.CellId.Insts.CoreHashHash cells.CellId.Insts.CoreCmpEq
+            self.domains cell
+        match o1 with
+        | Option.none =>
+          let (_, hm) ←
+            std.collections.hash.map.HashMap.impl.insert
+              cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+              std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+              self.domains cell (domains.UcpValueDomain.Exact value1)
+          ok (true, { self with domains := hm })
+        | Option.some existing =>
+          let o2 ←
+            domains.UcpValueDomain.impl.intersect existing
+              (domains.UcpValueDomain.Exact value1)
+          match o2 with
+          | Option.none => ok (false, self)
+          | Option.some intersection =>
+            let b1 ←
+              domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
+                intersection existing
+            if b1
+            then ok (false, self)
+            else
+              let (_, hm) ←
+                std.collections.hash.map.HashMap.impl.insert
+                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+                  self.domains cell intersection
+              ok (true, { self with domains := hm })
+    | domains.UcpValueDomain.FiniteSet values =>
+      let o ←
+        domains.UcpValueDomain.impl.finite_set
+          (alloc.collections.btree.set.BTreeSet.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter
+          num_bigint.bigint.BigInt
+          alloc.alloc.Global.Insts.CoreAllocAllocatorClone) values
+      match o with
+      | Option.none => ok (false, self)
+      | Option.some domain1 =>
+        let o1 ←
+          std.collections.hash.map.HashMap.impl.get
+            cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+            std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+            (core.borrow.Borrow.Blanket cells.CellId)
+            cells.CellId.Insts.CoreHashHash cells.CellId.Insts.CoreCmpEq
+            self.domains cell
+        match o1 with
+        | Option.none =>
+          let (_, hm) ←
+            std.collections.hash.map.HashMap.impl.insert
+              cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+              std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+              self.domains cell domain1
+          ok (true, { self with domains := hm })
+        | Option.some existing =>
+          let o2 ← domains.UcpValueDomain.impl.intersect existing domain1
+          match o2 with
+          | Option.none => ok (false, self)
+          | Option.some intersection =>
+            let b1 ←
+              domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
+                intersection existing
+            if b1
+            then ok (false, self)
+            else
+              let (_, hm) ←
+                std.collections.hash.map.HashMap.impl.insert
+                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+                  self.domains cell intersection
+              ok (true, { self with domains := hm })
+
+/-- [ucp_verified::recovery_core::merge_established_evidence]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 109:0-140:1 -/
+def recovery_core.merge_established_evidence
+  (evidence : recovery_core.RecoveryEvidence) (facts : knowledge.UcpFacts)
+  (values : domains.UcpValueFacts)
+  (non_unique : std.collections.hash.set.HashSet cells.CellId
+  std.hash.random.RandomState alloc.alloc.Global)
+  (established : recovery_core.EstablishedEvidence)
+  (modulus : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result Bool recovery_core.UnsupportedSample) ×
+    recovery_core.RecoveryEvidence × knowledge.UcpFacts ×
+    domains.UcpValueFacts × (std.collections.hash.set.HashSet cells.CellId
+    std.hash.random.RandomState alloc.alloc.Global))
+  := do
+  let (r, evidence1) ←
+    recovery_core.RecoveryEvidence.impl.try_remember_list evidence
+      established.cell established.samples modulus
+  let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+  match cf with
+  | core.ops.control_flow.ControlFlow.Continue _ =>
+    let (r1, evidence2) ←
+      recovery_core.RecoveryEvidence.impl.try_remember_model evidence1
+        established.model_samples modulus
+    let cf1 ← core.result.Result.Insts.CoreOpsTry.branch r1
+    match cf1 with
+    | core.ops.control_flow.ControlFlow.Continue _ =>
+      let (facts1, changed) ←
+        if established.unique
+        then
+          do
+          let ci ← cells.CellId.Insts.CoreCloneClone.clone established.cell
+          let (changed1, facts2) ←
+            knowledge.UcpFacts.impl.mark_unique facts ci
+          ok (facts2, changed1)
+        else ok (facts, false)
+      let (values1, changed1) ←
+        match established.domain with
+        | Option.none => ok (values, changed)
+        | Option.some domain =>
+          do
+          let ci ← cells.CellId.Insts.CoreCloneClone.clone established.cell
+          let (b, values2) ←
+            domains.UcpValueFacts.impl.mark_domain values ci domain
+          let b1 ← if b
+                     then ok true
+                     else ok changed
+          ok (values2, b1)
+      if established.non_unique
+      then
+        let (_, non_unique1) ←
+          std.collections.hash.set.HashSet.impl.insert
+            cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
+            std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
+            non_unique established.cell
+        ok (core.result.Result.Ok changed1, evidence2, facts1, values1,
+          non_unique1)
+      else
+        ok (core.result.Result.Ok changed1, evidence2, facts1, values1,
+          non_unique)
+    | core.ops.control_flow.ControlFlow.Break residual =>
+      let r2 ←
+        core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+          Bool (core.convert.FromSame recovery_core.UnsupportedSample) residual
+      ok (r2, evidence2, facts, values, non_unique)
+  | core.ops.control_flow.ControlFlow.Break residual =>
+    let r1 ←
+      core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+        Bool (core.convert.FromSame recovery_core.UnsupportedSample) residual
+    ok (r1, evidence1, facts, values, non_unique)
+
+/-- [ucp_verified::recovery_core::finish_merge]:
+    Source: '../../../src/circuit_analyzer/ucp/recovery_core.rs', lines 143:0-153:1 -/
+def recovery_core.finish_merge
+  (evidence : recovery_core.RecoveryEvidence) (facts : knowledge.UcpFacts)
+  (values : domains.UcpValueFacts)
+  (non_unique : std.collections.hash.set.HashSet cells.CellId
+  std.hash.random.RandomState alloc.alloc.Global)
+  (modulus : num_bigint.bigint.BigInt) :
+  Result ((core.result.Result Bool recovery_core.CertificationError) ×
+    domains.UcpValueFacts × (std.collections.hash.set.HashSet cells.CellId
+    std.hash.random.RandomState alloc.alloc.Global))
+  := do
+  let (r, values1) ←
+    recovery_core.RecoveryEvidence.impl.try_certify_complete_domains evidence
+      facts values modulus
+  let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+  match cf with
+  | core.ops.control_flow.ControlFlow.Continue val =>
+    let non_unique1 ←
+      recovery_core.RecoveryEvidence.impl.record_non_unique_cells evidence
+        non_unique
+    ok (core.result.Result.Ok val, values1, non_unique1)
+  | core.ops.control_flow.ControlFlow.Break residual =>
+    let r1 ←
+      core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+        Bool (core.convert.FromSame recovery_core.CertificationError) residual
+    ok (r1, values1, non_unique)
 
 /-- [ucp_verified::recovery_loop::propagate_until_stable]: loop body 0:
     Source: '../../../src/circuit_analyzer/ucp/recovery_loop.rs', lines 25:4-31:5 -/
@@ -917,16 +2328,6 @@ def rules.infer_assigned_cell_from_zero_equation_with_modulus
   else
     rules.infer_assigned_cell_with_optional_modulus expr facts (Option.some modulus)
 
-/-- [ucp_verified::domains::MAX_FINITE_DOMAIN_SIZE]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 29:0-29:53 -/
-@[global_simps, irreducible]
-def domains.MAX_FINITE_DOMAIN_SIZE : Std.Usize := 256#usize
-
-/-- [ucp_verified::domains::MAX_VALUE_BITS]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 31:0-31:37
-    Visibility: public -/
-@[global_simps, irreducible] def domains.MAX_VALUE_BITS : Std.U64 := 4096#u64
-
 /-- [ucp_verified::domains::{impl core::clone::Clone for ucp_verified::domains::UcpValueDomain}::clone]:
     Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:9-34:14
     Visibility: public -/
@@ -951,841 +2352,8 @@ def domains.UcpValueDomain.Insts.CoreCloneClone : core.clone.Clone
   clone := domains.UcpValueDomain.Insts.CoreCloneClone.clone
 }
 
-/-- [ucp_verified::domains::{impl core::cmp::PartialEq<ucp_verified::domains::UcpValueDomain> for ucp_verified::domains::UcpValueDomain}::eq]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:27-34:36
-    Visibility: public -/
-def domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
-  (self : domains.UcpValueDomain) (other : domains.UcpValueDomain) :
-  Result Bool
-  := do
-  let self1 := read_discriminant self
-  let other1 := read_discriminant other
-  if self1 = other1
-  then
-    match self with
-    | domains.UcpValueDomain.Exact __self_0 =>
-      match other with
-      | domains.UcpValueDomain.Exact __arg1_0 =>
-        num_bigint.bigint.BigInt.Insts.CoreCmpPartialEqBigInt.eq __self_0
-          __arg1_0
-      | domains.UcpValueDomain.FiniteSet _ => fail panic
-    | domains.UcpValueDomain.FiniteSet __self_0 =>
-      match other with
-      | domains.UcpValueDomain.Exact _ => fail panic
-      | domains.UcpValueDomain.FiniteSet __arg1_0 =>
-        alloc.collections.btree.set.BTreeSet.Insts.CoreCmpPartialEqBTreeSet.eq
-          num_bigint.bigint.BigInt.Insts.CoreCmpPartialEqBigInt
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone __self_0 __arg1_0
-  else ok false
-
-/-- Trait implementation: [ucp_verified::domains::{impl core::cmp::PartialEq<ucp_verified::domains::UcpValueDomain> for ucp_verified::domains::UcpValueDomain}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 34:27-34:36 -/
-@[reducible]
-impl_def domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain :
-  core.cmp.PartialEq domains.UcpValueDomain domains.UcpValueDomain := {
-  eq := domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
-  ne := core.cmp.PartialEq.ne.trait_default
-    domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain
-}
-
-/-- [ucp_verified::domains::bounded_value]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 471:0-477:1 -/
-def domains.bounded_value
-  (value : num_bigint.bigint.BigInt) :
-  Result (Option num_bigint.bigint.BigInt)
-  := do
-  let i ← num_bigint.bigint.BigInt.impl.bits value
-  if i <= domains.MAX_VALUE_BITS
-  then ok (Option.some value)
-  else ok Option.none
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]: loop body 0:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 82:8-94:5
-    Visibility: public -/
-@[rust_loop_body]
-def domains.UcpValueDomain.impl.finite_set_loop.body
-  {I : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst :
-  core.iter.traits.collect.IntoIterator I num_bigint.bigint.BigInt
-  Clause0_IntoIter) (iter : Clause0_IntoIter)
-  (set : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
-  alloc.alloc.Global) :
-  Result (ControlFlow (Clause0_IntoIter ×
-    (alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
-    alloc.alloc.Global)) (Option domains.UcpValueDomain))
-  := do
-  let (o, iter1) ←
-    coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst.iteratorInst.next
-      iter
-  match o with
-  | Option.none =>
-    let i ←
-      alloc.collections.btree.set.BTreeSet.impl.len
-        alloc.alloc.Global.Insts.CoreAllocAllocatorClone set
-    match i.val with
-    | 0 => ok (done Option.none)
-    | 1 =>
-      let ii ←
-        alloc.collections.btree.set.BTreeSet.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone set
-      let (o1, _) ←
-        alloc.collections.btree.set.IntoIter.Insts.CoreIterTraitsIteratorIterator.next
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone ii
-      let bi ← core.option.Option.unwrap o1
-      ok (done (Option.some (domains.UcpValueDomain.Exact bi)))
-    | _ => ok (done (Option.some (domains.UcpValueDomain.FiniteSet set)))
-  | Option.some value =>
-    let o1 ← domains.bounded_value value
-    let cf ← core.option.Option.Insts.CoreOpsTry_traitTry.branch o1
-    match cf with
-    | core.ops.control_flow.ControlFlow.Continue val =>
-      let (_, set1) ←
-        alloc.collections.btree.set.BTreeSet.impl.insert
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd set val
-      let i ←
-        alloc.collections.btree.set.BTreeSet.impl.len
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone set1
-      if i > domains.MAX_FINITE_DOMAIN_SIZE
-      then ok (done Option.none)
-      else ok (cont (iter1, set1))
-    | core.ops.control_flow.ControlFlow.Break residual =>
-      let o2 ←
-        core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionNever.from_residual
-          domains.UcpValueDomain residual
-      ok (done o2)
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]: loop 0:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 82:8-94:5
-    Visibility: public -/
-@[rust_loop]
-def domains.UcpValueDomain.impl.finite_set_loop
-  {I : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst :
-  core.iter.traits.collect.IntoIterator I num_bigint.bigint.BigInt
-  Clause0_IntoIter) (iter : Clause0_IntoIter)
-  (set : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
-  alloc.alloc.Global) :
-  Result (Option domains.UcpValueDomain)
-  := do
-  loop
-    (fun (iter1, set1) => domains.UcpValueDomain.impl.finite_set_loop.body
-      coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst iter1 set1)
-    (iter, set)
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::finite_set]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 75:4-94:5
-    Visibility: public -/
-def domains.UcpValueDomain.impl.finite_set
-  {I : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst :
-  core.iter.traits.collect.IntoIterator I num_bigint.bigint.BigInt
-  Clause0_IntoIter) (values : I) :
-  Result (Option domains.UcpValueDomain)
-  := do
-  let set ←
-    alloc.collections.btree.set.BTreeSetTGlobal.impl.new
-      num_bigint.bigint.BigInt
-  let iter ←
-    coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst.into_iter
-      values
-  domains.UcpValueDomain.impl.finite_set_loop
-    coreitertraitscollectIntoIteratorIBigIntClause0_IntoIterInst iter set
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::exact_value]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 97:4-102:5
-    Visibility: public -/
-def domains.UcpValueDomain.impl.exact_value
-  (self : domains.UcpValueDomain) :
-  Result (Option num_bigint.bigint.BigInt)
-  := do
-  match self with
-  | domains.UcpValueDomain.Exact value => ok (Option.some value)
-  | domains.UcpValueDomain.FiniteSet _ => ok Option.none
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::is_singleton]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 105:4-107:5
-    Visibility: public -/
-def domains.UcpValueDomain.impl.is_singleton
-  (self : domains.UcpValueDomain) : Result Bool := do
-  match self with
-  | domains.UcpValueDomain.Exact _ => ok true
-  | domains.UcpValueDomain.FiniteSet _ => ok false
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}::call_mut]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
-def
-  domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
-  (c : domains.UcpValueDomain.intersect.closure)
-  (tupled_args : num_bigint.bigint.BigInt) :
-  Result (num_bigint.bigint.BigInt × domains.UcpValueDomain.intersect.closure)
-  := do
-  let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone tupled_args
-  ok (bi, ())
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
-def
-  domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt.call_once
-  (c : domains.UcpValueDomain.intersect.closure)
-  (bi : num_bigint.bigint.BigInt) :
-  Result num_bigint.bigint.BigInt
-  := do
-  let (bi1, _) ←
-    domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
-      () bi
-  ok bi1
-
-/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
-@[reducible]
-def
-  domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt
-  : core.ops.function.FnOnce domains.UcpValueDomain.intersect.closure
-  num_bigint.bigint.BigInt num_bigint.bigint.BigInt := {
-  call_once :=
-    domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt.call_once
-}
-
-/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect::{closure}<'_0>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 141:62-141:83 -/
-@[reducible]
-def
-  domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt
-  : core.ops.function.FnMut domains.UcpValueDomain.intersect.closure
-  num_bigint.bigint.BigInt num_bigint.bigint.BigInt := {
-  FnOnceInst :=
-    domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBigInt
-  call_mut :=
-    domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt.call_mut
-}
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueDomain}::intersect]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 129:4-145:5 -/
-def domains.UcpValueDomain.impl.intersect
-  (self : domains.UcpValueDomain) (other : domains.UcpValueDomain) :
-  Result (Option domains.UcpValueDomain)
-  := do
-  match self with
-  | domains.UcpValueDomain.Exact left =>
-    match other with
-    | domains.UcpValueDomain.Exact right =>
-      let b ←
-        num_bigint.bigint.BigInt.Insts.CoreCmpPartialEqBigInt.eq left right
-      if b
-      then
-        let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone left
-        ok (Option.some (domains.UcpValueDomain.Exact bi))
-      else ok Option.none
-    | domains.UcpValueDomain.FiniteSet set =>
-      let b ←
-        alloc.collections.btree.set.BTreeSet.impl.contains
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
-          (core.borrow.Borrow.Blanket num_bigint.bigint.BigInt)
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd set left
-      if b
-      then
-        let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone left
-        ok (Option.some (domains.UcpValueDomain.Exact bi))
-      else ok Option.none
-  | domains.UcpValueDomain.FiniteSet set =>
-    match other with
-    | domains.UcpValueDomain.Exact value =>
-      let b ←
-        alloc.collections.btree.set.BTreeSet.impl.contains
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
-          (core.borrow.Borrow.Blanket num_bigint.bigint.BigInt)
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd set value
-      if b
-      then
-        let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone value
-        ok (Option.some (domains.UcpValueDomain.Exact bi))
-      else ok Option.none
-    | domains.UcpValueDomain.FiniteSet right =>
-      let i ←
-        alloc.collections.btree.set.BTreeSet.impl.intersection
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd set right
-      let m ←
-        core.iter.traits.iterator.Iterator.map.default
-          (alloc.collections.btree.set.Intersection.Insts.CoreIterTraitsIteratorIteratorSharedAT
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone)
-          domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt
-          i ()
-      domains.UcpValueDomain.impl.finite_set
-        (core.iter.traits.collect.IntoIterator.Blanket
-        (core.iter.adapters.map.Map.Insts.CoreIterTraitsIteratorIterator
-        (alloc.collections.btree.set.Intersection.Insts.CoreIterTraitsIteratorIteratorSharedAT
-        num_bigint.bigint.BigInt.Insts.CoreCmpOrd
-        alloc.alloc.Global.Insts.CoreAllocAllocatorClone)
-        domains.UcpValueDomain.intersect.closure.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBigInt))
-        m
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{impl core::ops::function::FnOnce<(&'_0 ucp_verified::domains::UcpValueDomain,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{closure}<'_0, '_1, '_2>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 236:25-236:95 -/
-def
-  domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool.call_once
-  (c : domains.UcpValueFacts.domain_is_complete.closure)
-  (tupled_args : domains.UcpValueDomain) :
-  Result Bool
-  := do
-  let (uvf, ci) := c
-  let b ← domains.UcpValueDomain.impl.is_singleton tupled_args
-  if b
-  then ok true
-  else
-    std.collections.hash.set.HashSet.impl.contains cells.CellId.Insts.CoreCmpEq
-      cells.CellId.Insts.CoreHashHash
-      std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-      (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
-      cells.CellId.Insts.CoreCmpEq uvf.complete_domains ci
-
-/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{impl core::ops::function::FnOnce<(&'_0 ucp_verified::domains::UcpValueDomain,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete::{closure}<'_0, '_1, '_2>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 236:25-236:95 -/
-@[reducible]
-def
-  domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool
-  : core.ops.function.FnOnce domains.UcpValueFacts.domain_is_complete.closure
-  domains.UcpValueDomain Bool := {
-  call_once :=
-    domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool.call_once
-}
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::domain_is_complete]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 233:4-237:5
-    Visibility: public -/
-def domains.UcpValueFacts.impl.domain_is_complete
-  (self : domains.UcpValueFacts) (cell : cells.CellId) : Result Bool := do
-  let o ←
-    std.collections.hash.map.HashMap.impl.get cells.CellId.Insts.CoreCmpEq
-      cells.CellId.Insts.CoreHashHash
-      std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-      (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
-      cells.CellId.Insts.CoreCmpEq self.domains cell
-  core.option.Option.is_some_and
-    domains.UcpValueFacts.domain_is_complete.closure.Insts.CoreOpsFunctionFnOnceTupleShared0UcpValueDomainBool
-    o (self, cell)
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::mark_domain]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 175:4-218:5
-    Visibility: public -/
-def domains.UcpValueFacts.impl.mark_domain
-  (self : domains.UcpValueFacts) (cell : cells.CellId)
-  (domain : domains.UcpValueDomain) :
-  Result (Bool × domains.UcpValueFacts)
-  := do
-  let b ← domains.UcpValueFacts.impl.domain_is_complete self cell
-  if b
-  then ok (false, self)
-  else
-    match domain with
-    | domains.UcpValueDomain.Exact value =>
-      let o ← domains.bounded_value value
-      match o with
-      | Option.none => ok (false, self)
-      | Option.some value1 =>
-        let o1 ←
-          std.collections.hash.map.HashMap.impl.get
-            cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-            std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-            (core.borrow.Borrow.Blanket cells.CellId)
-            cells.CellId.Insts.CoreHashHash cells.CellId.Insts.CoreCmpEq
-            self.domains cell
-        match o1 with
-        | Option.none =>
-          let (_, hm) ←
-            std.collections.hash.map.HashMap.impl.insert
-              cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-              std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-              self.domains cell (domains.UcpValueDomain.Exact value1)
-          ok (true, { self with domains := hm })
-        | Option.some existing =>
-          let o2 ←
-            domains.UcpValueDomain.impl.intersect existing
-              (domains.UcpValueDomain.Exact value1)
-          match o2 with
-          | Option.none => ok (false, self)
-          | Option.some intersection =>
-            let b1 ←
-              domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
-                intersection existing
-            if b1
-            then ok (false, self)
-            else
-              let (_, hm) ←
-                std.collections.hash.map.HashMap.impl.insert
-                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-                  self.domains cell intersection
-              ok (true, { self with domains := hm })
-    | domains.UcpValueDomain.FiniteSet values =>
-      let o ←
-        domains.UcpValueDomain.impl.finite_set
-          (alloc.collections.btree.set.BTreeSet.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter
-          num_bigint.bigint.BigInt
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone) values
-      match o with
-      | Option.none => ok (false, self)
-      | Option.some domain1 =>
-        let o1 ←
-          std.collections.hash.map.HashMap.impl.get
-            cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-            std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-            (core.borrow.Borrow.Blanket cells.CellId)
-            cells.CellId.Insts.CoreHashHash cells.CellId.Insts.CoreCmpEq
-            self.domains cell
-        match o1 with
-        | Option.none =>
-          let (_, hm) ←
-            std.collections.hash.map.HashMap.impl.insert
-              cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-              std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-              self.domains cell domain1
-          ok (true, { self with domains := hm })
-        | Option.some existing =>
-          let o2 ← domains.UcpValueDomain.impl.intersect existing domain1
-          match o2 with
-          | Option.none => ok (false, self)
-          | Option.some intersection =>
-            let b1 ←
-              domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain.eq
-                intersection existing
-            if b1
-            then ok (false, self)
-            else
-              let (_, hm) ←
-                std.collections.hash.map.HashMap.impl.insert
-                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-                  self.domains cell intersection
-              ok (true, { self with domains := hm })
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::known_value]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 221:4-223:5
-    Visibility: public -/
-def domains.UcpValueFacts.impl.known_value
-  (self : domains.UcpValueFacts) (cell : cells.CellId) :
-  Result (Option num_bigint.bigint.BigInt)
-  := do
-  let o ←
-    std.collections.hash.map.HashMap.impl.get cells.CellId.Insts.CoreCmpEq
-      cells.CellId.Insts.CoreHashHash
-      std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-      (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
-      cells.CellId.Insts.CoreCmpEq self.domains cell
-  let cf ← core.option.Option.Insts.CoreOpsTry_traitTry.branch o
-  match cf with
-  | core.ops.control_flow.ControlFlow.Continue val =>
-    domains.UcpValueDomain.impl.exact_value val
-  | core.ops.control_flow.ControlFlow.Break residual =>
-    core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionNever.from_residual
-      num_bigint.bigint.BigInt residual
-
-/-- [ucp_verified::domains::normalize_field_value]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 486:0-503:1 -/
-def domains.normalize_field_value
-  (value : num_bigint.bigint.BigInt) (modulus : num_bigint.bigint.BigInt) :
-  Result (Option num_bigint.bigint.BigInt)
-  := do
-  let bi ← num_bigint.bigint.BigInt.Insts.CoreConvertFromI32.from 1#i32
-  let b ←
-    core.cmp.impls.PartialOrdShared.le
-      num_bigint.bigint.BigInt.Insts.CoreCmpPartialOrdBigInt modulus bi
-  if b
-  then ok Option.none
-  else
-    let i ← num_bigint.bigint.BigInt.impl.bits modulus
-    if i > domains.MAX_VALUE_BITS
-    then ok Option.none
-    else
-      let normalized ←
-        num_bigint.bigint.BigInt.Insts.CoreOpsArithRemShared0BigIntBigInt.rem
-          value modulus
-      let bi1 ← num_bigint.bigint.BigInt.Insts.CoreConvertFromI32.from 0#i32
-      let b1 ←
-        core.cmp.PartialOrd.lt.trait_default
-          num_bigint.bigint.BigInt.Insts.CoreCmpPartialOrdBigInt normalized bi1
-      let normalized1 ←
-        if b1
-        then
-          num_bigint.bigint.BigInt.Insts.CoreOpsArithAddAssignShared0BigInt.add_assign
-            normalized modulus
-        else ok normalized
-      let bi2 ← num_bigint.bigint.BigInt.Insts.CoreConvertFromI32.from 2#i32
-      let bi3 ←
-        Shared0BigInt.Insts.CoreOpsArithDivBigIntBigInt.div modulus bi2
-      let b2 ←
-        core.cmp.PartialOrd.gt.trait_default
-          num_bigint.bigint.BigInt.Insts.CoreCmpPartialOrdBigInt normalized1
-          bi3
-      let normalized2 ←
-        if b2
-        then
-          num_bigint.bigint.BigInt.Insts.CoreOpsArithSubAssignShared0BigInt.sub_assign
-            normalized1 modulus
-        else ok normalized1
-      domains.bounded_value normalized2
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}::call_mut]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 299:32-299:70 -/
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool.call_mut
-  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_2)
-  (tupled_args : num_bigint.bigint.BigInt) :
-  Result (Bool ×
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2)
-  := do
-  let b ←
-    alloc.collections.btree.map.BTreeMap.impl.contains_key
-      alloc.alloc.Global.Insts.CoreAllocAllocatorClone
-      (core.borrow.Borrow.Blanket num_bigint.bigint.BigInt)
-      num_bigint.bigint.BigInt.Insts.CoreCmpOrd
-      num_bigint.bigint.BigInt.Insts.CoreCmpOrd c tupled_args
-  ok (b, c)
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 299:32-299:70 -/
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool.call_once
-  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_2)
-  (bi : num_bigint.bigint.BigInt) :
-  Result Bool
-  := do
-  let (b, _) ←
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool.call_mut
-      c bi
-  ok b
-
-/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 299:32-299:70 -/
-@[reducible]
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool
-  : core.ops.function.FnOnce
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2
-  num_bigint.bigint.BigInt Bool := {
-  call_once :=
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool.call_once
-}
-
-/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), bool> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#2}<'_0, '_1>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 299:32-299:70 -/
-@[reducible]
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool
-  : core.ops.function.FnMut
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_2
-  num_bigint.bigint.BigInt Bool := {
-  FnOnceInst :=
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntBool
-  call_mut :=
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool.call_mut
-}
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}::call_mut]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 294:17-297:13 -/
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError.call_mut
-  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_1)
-  (tupled_args : num_bigint.bigint.BigInt) :
-  Result ((core.result.Result num_bigint.bigint.BigInt
-    domains.CompleteDomainError) ×
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1)
-  := do
-  let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone tupled_args
-  let o ← domains.normalize_field_value bi c
-  let r ← core.option.Option.ok_or o domains.CompleteDomainError.SampleValue
-  ok (r, c)
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 294:17-297:13 -/
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError.call_once
-  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure_1)
-  (bi : num_bigint.bigint.BigInt) :
-  Result (core.result.Result num_bigint.bigint.BigInt
-    domains.CompleteDomainError)
-  := do
-  let (r, _) ←
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError.call_mut
-      c bi
-  ok r
-
-/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 294:17-297:13 -/
-@[reducible]
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError
-  : core.ops.function.FnOnce
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1
-  num_bigint.bigint.BigInt (core.result.Result num_bigint.bigint.BigInt
-  domains.CompleteDomainError) := {
-  call_once :=
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError.call_once
-}
-
-/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnMut<(&'_0 num_bigint::bigint::BigInt,), core::result::Result<num_bigint::bigint::BigInt, ucp_verified::domains::CompleteDomainError>> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure#1}<'_0, '_1>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 294:17-297:13 -/
-@[reducible]
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError
-  : core.ops.function.FnMut
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure_1
-  num_bigint.bigint.BigInt (core.result.Result num_bigint.bigint.BigInt
-  domains.CompleteDomainError) := {
-  FnOnceInst :=
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnOnceTupleShared0BigIntResultBigIntCompleteDomainError
-  call_mut :=
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError.call_mut
-}
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure}<'_0>}::call_once]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 290:32-290:48 -/
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt.call_once
-  (c : domains.UcpValueFacts.try_mark_complete_from_samples.closure) 
-  (_ : Unit) :
-  Result num_bigint.bigint.BigInt
-  := do
-  num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone c
-
-/-- Trait implementation: [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{impl core::ops::function::FnOnce<(), num_bigint::bigint::BigInt> for ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples::{closure}<'_0>}]
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 290:32-290:48 -/
-@[reducible]
-def
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt
-  : core.ops.function.FnOnce
-  domains.UcpValueFacts.try_mark_complete_from_samples.closure Unit
-  num_bigint.bigint.BigInt := {
-  call_once :=
-    domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt.call_once
-}
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]: loop body 0:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 285:8-310:5 -/
-@[rust_loop_body]
-def domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop.body
-  (hm : std.collections.hash.map.HashMap cells.CellId domains.UcpValueDomain
-  std.hash.random.RandomState alloc.alloc.Global)
-  (hs : std.collections.hash.set.HashSet cells.CellId
-  std.hash.random.RandomState alloc.alloc.Global) (cell : cells.CellId)
-  (samples : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
-  alloc.alloc.Global) (modulus : num_bigint.bigint.BigInt)
-  (iter : alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
-  (candidates : alloc.collections.btree.map.BTreeMap num_bigint.bigint.BigInt
-  num_bigint.bigint.BigInt alloc.alloc.Global) :
-  Result (ControlFlow ((alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
-    × (alloc.collections.btree.map.BTreeMap num_bigint.bigint.BigInt
-    num_bigint.bigint.BigInt alloc.alloc.Global)) ((core.result.Result Bool
-    domains.CompleteDomainError) × (std.collections.hash.map.HashMap
-    cells.CellId domains.UcpValueDomain std.hash.random.RandomState
-    alloc.alloc.Global) × (std.collections.hash.set.HashSet cells.CellId
-    std.hash.random.RandomState alloc.alloc.Global)))
-  := do
-  let (o, iter1) ← alloc.vec.into_iter.IteratorIntoIter.next iter
-  match o with
-  | Option.none =>
-    let i ←
-      alloc.collections.btree.set.BTreeSet.impl.iter
-        alloc.alloc.Global.Insts.CoreAllocAllocatorClone samples
-    let m ←
-      core.iter.traits.iterator.Iterator.map.default
-        (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
-        num_bigint.bigint.BigInt)
-        domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError
-        i modulus
-    let r ←
-      core.iter.traits.iterator.Iterator.collect.default
-        (core.iter.adapters.map.Map.Insts.CoreIterTraitsIteratorIterator
-        (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
-        num_bigint.bigint.BigInt)
-        domains.UcpValueFacts.try_mark_complete_from_samples.closure_1.Insts.CoreOpsFunctionFnMutTupleShared0BigIntResultBigIntCompleteDomainError)
-        (core.result.Result.Insts.CoreIterTraitsCollectFromIteratorResult
-        domains.CompleteDomainError
-        (alloc.collections.btree.set.BTreeSetTGlobal.Insts.CoreIterTraitsCollectFromIterator
-        num_bigint.bigint.BigInt.Insts.CoreCmpOrd)) m
-    let cf ← core.result.Result.Insts.CoreOpsTry.branch r
-    match cf with
-    | core.ops.control_flow.ControlFlow.Continue val =>
-      let i1 ←
-        alloc.collections.btree.set.BTreeSet.impl.iter
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone val
-      let (b, _) ←
-        core.iter.traits.iterator.Iterator.all.default
-          (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
-          num_bigint.bigint.BigInt)
-          domains.UcpValueFacts.try_mark_complete_from_samples.closure_2.Insts.CoreOpsFunctionFnMutTupleShared0BigIntBool
-          i1 candidates
-      if b
-      then
-        let i2 ←
-          alloc.collections.btree.set.BTreeSet.impl.len
-            alloc.alloc.Global.Insts.CoreAllocAllocatorClone val
-        let i3 ←
-          alloc.collections.btree.map.BTreeMap.impl.len
-            alloc.alloc.Global.Insts.CoreAllocAllocatorClone candidates
-        if i2 != i3
-        then ok (done (core.result.Result.Ok false, hm, hs))
-        else
-          let b1 ←
-            alloc.collections.btree.set.BTreeSet.impl.is_empty
-              alloc.alloc.Global.Insts.CoreAllocAllocatorClone val
-          if b1
-          then ok (done (core.result.Result.Ok false, hm, hs))
-          else
-            let iv ←
-              alloc.collections.btree.map.BTreeMap.impl.into_values
-                alloc.alloc.Global.Insts.CoreAllocAllocatorClone candidates
-            let o1 ←
-              domains.UcpValueDomain.impl.finite_set
-                (core.iter.traits.collect.IntoIterator.Blanket
-                (alloc.collections.btree.map.IntoValues.Insts.CoreIterTraitsIteratorIterator
-                num_bigint.bigint.BigInt num_bigint.bigint.BigInt
-                alloc.alloc.Global.Insts.CoreAllocAllocatorClone)) iv
-            let r1 ←
-              core.option.Option.ok_or o1
-                domains.CompleteDomainError.RepresentationLimit
-            let cf1 ← core.result.Result.Insts.CoreOpsTry.branch r1
-            match cf1 with
-            | core.ops.control_flow.ControlFlow.Continue val1 =>
-              let o2 ←
-                std.collections.hash.map.HashMap.impl.get
-                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-                  (core.borrow.Borrow.Blanket cells.CellId)
-                  cells.CellId.Insts.CoreHashHash cells.CellId.Insts.CoreCmpEq
-                  hm cell
-              let changed ←
-                core.cmp.PartialEq.ne.trait_default
-                  (core.option.Option.Insts.CoreCmpPartialEqOption
-                  (core.cmp.PartialEqShared
-                  domains.UcpValueDomain.Insts.CoreCmpPartialEqUcpValueDomain))
-                  o2 (Option.some val1)
-              let ci ← cells.CellId.Insts.CoreCloneClone.clone cell
-              let (_, hm1) ←
-                std.collections.hash.map.HashMap.impl.insert
-                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-                  hm ci val1
-              let (b2, hs1) ←
-                std.collections.hash.set.HashSet.impl.insert
-                  cells.CellId.Insts.CoreCmpEq cells.CellId.Insts.CoreHashHash
-                  std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-                  hs ci
-              if b2
-              then ok (done (core.result.Result.Ok true, hm1, hs1))
-              else ok (done (core.result.Result.Ok changed, hm1, hs1))
-            | core.ops.control_flow.ControlFlow.Break residual =>
-              let r2 ←
-                core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
-                  Bool (core.convert.FromSame domains.CompleteDomainError)
-                  residual
-              ok (done (r2, hm, hs))
-      else
-        ok (done (core.result.Result.Err
-          domains.CompleteDomainError.ExcludedFeasibleValue, hm, hs))
-    | core.ops.control_flow.ControlFlow.Break residual =>
-      let r1 ←
-        core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
-          Bool (core.convert.FromSame domains.CompleteDomainError) residual
-      ok (done (r1, hm, hs))
-  | Option.some value =>
-    let bi ← num_bigint.bigint.BigInt.Insts.CoreCloneClone.clone value
-    let o1 ← domains.normalize_field_value bi modulus
-    let r ←
-      core.option.Option.ok_or o1 domains.CompleteDomainError.DomainValue
-    let cf ← core.result.Result.Insts.CoreOpsTry.branch r
-    match cf with
-    | core.ops.control_flow.ControlFlow.Continue val =>
-      let (e, entry_back) ←
-        alloc.collections.btree.map.BTreeMap.impl.entry
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd candidates val
-      let (bi1, or_insert_with_back) ←
-        alloc.collections.btree.map.entry.Entry.impl.or_insert_with
-          num_bigint.bigint.BigInt.Insts.CoreCmpOrd
-          alloc.alloc.Global.Insts.CoreAllocAllocatorClone
-          domains.UcpValueFacts.try_mark_complete_from_samples.closure.Insts.CoreOpsFunctionFnOnceTupleBigInt
-          e value
-      let e1 := or_insert_with_back bi1
-      let bm := entry_back e1
-      ok (cont (iter1, bm))
-    | core.ops.control_flow.ControlFlow.Break residual =>
-      let r1 ←
-        core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
-          Bool (core.convert.FromSame domains.CompleteDomainError) residual
-      ok (done (r1, hm, hs))
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]: loop 0:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 285:8-310:5 -/
-@[rust_loop]
-def domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop
-  (iter : alloc.vec.into_iter.IntoIter num_bigint.bigint.BigInt)
-  (hm : std.collections.hash.map.HashMap cells.CellId domains.UcpValueDomain
-  std.hash.random.RandomState alloc.alloc.Global)
-  (hs : std.collections.hash.set.HashSet cells.CellId
-  std.hash.random.RandomState alloc.alloc.Global) (cell : cells.CellId)
-  (samples : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
-  alloc.alloc.Global) (modulus : num_bigint.bigint.BigInt)
-  (candidates : alloc.collections.btree.map.BTreeMap num_bigint.bigint.BigInt
-  num_bigint.bigint.BigInt alloc.alloc.Global) :
-  Result ((core.result.Result Bool domains.CompleteDomainError) ×
-    (std.collections.hash.map.HashMap cells.CellId domains.UcpValueDomain
-    std.hash.random.RandomState alloc.alloc.Global) ×
-    (std.collections.hash.set.HashSet cells.CellId std.hash.random.RandomState
-    alloc.alloc.Global))
-  := do
-  loop
-    (fun (iter1, candidates1) =>
-      domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop.body hm hs
-      cell samples modulus iter1 candidates1)
-    (iter, candidates)
-
-/-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::try_mark_complete_from_samples]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 266:4-310:5 -/
-def domains.UcpValueFacts.impl.try_mark_complete_from_samples
-  (self : domains.UcpValueFacts) (cell : cells.CellId)
-  (samples : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
-  alloc.alloc.Global) (modulus : num_bigint.bigint.BigInt) :
-  Result ((core.result.Result Bool domains.CompleteDomainError) ×
-    domains.UcpValueFacts)
-  := do
-  let o ←
-    std.collections.hash.map.HashMap.impl.get cells.CellId.Insts.CoreCmpEq
-      cells.CellId.Insts.CoreHashHash
-      std.hash.random.RandomState.Insts.CoreHashBuildHasherDefaultHasher
-      (core.borrow.Borrow.Blanket cells.CellId) cells.CellId.Insts.CoreHashHash
-      cells.CellId.Insts.CoreCmpEq self.domains cell
-  match o with
-  | Option.none => ok (core.result.Result.Ok false, self)
-  | Option.some domain =>
-    let entries ←
-      match domain with
-      | domains.UcpValueDomain.Exact value =>
-        alloc.vec.Vec.push (alloc.vec.Vec.new num_bigint.bigint.BigInt) value
-      | domains.UcpValueDomain.FiniteSet values =>
-        do
-        let i ←
-          alloc.collections.btree.set.BTreeSet.impl.iter
-            alloc.alloc.Global.Insts.CoreAllocAllocatorClone values
-        core.iter.traits.iterator.Iterator.collect.default
-          (alloc.collections.btree.set.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT
-          num_bigint.bigint.BigInt) (core.iter.traits.collect.FromIteratorVec
-          num_bigint.bigint.BigInt) i
-    let candidates ←
-      alloc.collections.btree.map.BTreeMapKVGlobal.impl.new
-        num_bigint.bigint.BigInt num_bigint.bigint.BigInt
-    let iter ← alloc.vec.IntoIteratorVec.into_iter entries
-    let (r, hm, hs) ←
-      domains.UcpValueFacts.impl.try_mark_complete_from_samples_loop iter
-        self.domains self.complete_domains cell samples modulus candidates
-    ok (r, { domains := hm, complete_domains := hs })
-
 /-- [ucp_verified::domains::{ucp_verified::domains::UcpValueFacts}::for_hypothetical_reasoning]:
-    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 316:4-322:5 -/
+    Source: '../../../src/circuit_analyzer/ucp/value.rs', lines 324:4-330:5 -/
 def domains.UcpValueFacts.impl.for_hypothetical_reasoning
   (self : domains.UcpValueFacts) : Result domains.UcpValueFacts := do
   let hm ←
@@ -1799,7 +2367,7 @@ def domains.UcpValueFacts.impl.for_hypothetical_reasoning
   ok { domains := hm, complete_domains := hs }
 
 /-- [ucp_verified::mark_unique]:
-    Source: 'lib.rs', lines 29:0-31:1
+    Source: 'lib.rs', lines 32:0-34:1
     Visibility: public -/
 def mark_unique
   (facts : knowledge.UcpFacts) (cell : cells.CellId) :
@@ -1808,7 +2376,7 @@ def mark_unique
   knowledge.UcpFacts.impl.mark_unique facts cell
 
 /-- [ucp_verified::mark_initial_unique]:
-    Source: 'lib.rs', lines 33:0-35:1
+    Source: 'lib.rs', lines 36:0-38:1
     Visibility: public -/
 def mark_initial_unique
   (facts : knowledge.UcpFacts) (cell : cells.CellId) :
@@ -1817,14 +2385,14 @@ def mark_initial_unique
   knowledge.UcpFacts.impl.mark_initial_unique facts cell
 
 /-- [ucp_verified::domain_entrypoints::complete]:
-    Source: 'lib.rs', lines 42:4-44:5
+    Source: 'lib.rs', lines 45:4-47:5
     Visibility: public -/
 def domain_entrypoints.complete
   (values : domains.UcpValueFacts) (cell : cells.CellId) : Result Bool := do
   domains.UcpValueFacts.impl.domain_is_complete values cell
 
 /-- [ucp_verified::domain_entrypoints::known]:
-    Source: 'lib.rs', lines 46:4-48:5
+    Source: 'lib.rs', lines 49:4-51:5
     Visibility: public -/
 def domain_entrypoints.known
   (values : domains.UcpValueFacts) (cell : cells.CellId) :
@@ -1833,14 +2401,14 @@ def domain_entrypoints.known
   domains.UcpValueFacts.impl.known_value values cell
 
 /-- [ucp_verified::domain_entrypoints::hypothetical]:
-    Source: 'lib.rs', lines 50:4-52:5
+    Source: 'lib.rs', lines 53:4-55:5
     Visibility: public -/
 def domain_entrypoints.hypothetical
   (values : domains.UcpValueFacts) : Result domains.UcpValueFacts := do
   domains.UcpValueFacts.impl.for_hypothetical_reasoning values
 
 /-- [ucp_verified::domain_entrypoints::bounded]:
-    Source: 'lib.rs', lines 54:4-56:5
+    Source: 'lib.rs', lines 57:4-59:5
     Visibility: public -/
 def domain_entrypoints.bounded
   (value : num_bigint.bigint.BigInt) :
@@ -1849,7 +2417,7 @@ def domain_entrypoints.bounded
   domains.bounded_value value
 
 /-- [ucp_verified::domain_entrypoints::normalize]:
-    Source: 'lib.rs', lines 58:4-60:5
+    Source: 'lib.rs', lines 61:4-63:5
     Visibility: public -/
 def domain_entrypoints.normalize
   (value : num_bigint.bigint.BigInt) (modulus : num_bigint.bigint.BigInt) :
@@ -1858,7 +2426,7 @@ def domain_entrypoints.normalize
   domains.normalize_field_value value modulus
 
 /-- [ucp_verified::domain_entrypoints::certify]:
-    Source: 'lib.rs', lines 62:4-69:5 -/
+    Source: 'lib.rs', lines 65:4-72:5 -/
 def domain_entrypoints.certify
   (values : domains.UcpValueFacts) (cell : cells.CellId)
   (samples : alloc.collections.btree.set.BTreeSet num_bigint.bigint.BigInt
@@ -1870,7 +2438,7 @@ def domain_entrypoints.certify
     modulus
 
 /-- [ucp_verified::domain_entrypoints::merge]:
-    Source: 'lib.rs', lines 71:4-77:5
+    Source: 'lib.rs', lines 74:4-80:5
     Visibility: public -/
 def domain_entrypoints.merge
   (values : domains.UcpValueFacts) (cell : cells.CellId)

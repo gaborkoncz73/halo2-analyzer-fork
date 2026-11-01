@@ -24,6 +24,9 @@ pub mod profiling;
 pub mod domains;
 #[cfg(not(test))]
 pub use domains as value;
+#[cfg(not(test))]
+#[path = "../../../src/circuit_analyzer/ucp/recovery_core.rs"]
+pub mod recovery_core;
 
 // A Charon belepopontjai a valodi metodusokat hivjak; nem helyettesitik azok torzset.
 pub fn mark_unique(facts: &mut knowledge::UcpFacts, cell: cells::CellId) -> bool {

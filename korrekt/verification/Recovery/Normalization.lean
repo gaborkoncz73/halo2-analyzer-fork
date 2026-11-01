@@ -35,9 +35,9 @@ theorem repaired_remainder_eq_emod {value modulus : Int} (positive : 0 < modulus
   unfold repairRemainder
   rw [Int.tmod_eq_emod]
   by_cases regular : 0 <= value \/ modulus ∣ value
-  · simp only [if_pos regular, Int.natCast_zero, Int.sub_zero]
+  · simp only [ite_eq_left regular, Int.natCast_zero, Int.sub_zero]
     split <;> omega
-  · simp only [if_neg regular, Int.natAbs_of_nonneg (by omega : 0 <= modulus)]
+  · simp only [ite_eq_right regular, Int.natAbs_of_nonneg (by omega : 0 <= modulus)]
     split <;> omega
 
 theorem normalize_representative_eq_center {value modulus : Int} (positive : 0 < modulus) :

@@ -32,7 +32,7 @@ open Lean Elab Command in
 run_cmd do
   let environment <- getEnv
   let allowed := #[``propext, ``Classical.choice, ``Quot.sound]
-  let mut checked := 0
+  let mut checked : Nat := 0
   for (name, info) in environment.constants.toList do
     if (`Recovery).isPrefixOf name then
       match info with

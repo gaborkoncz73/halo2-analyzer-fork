@@ -61,7 +61,7 @@ theorem root_affine_example_recovers_zero :
     (fun _ valid => valid) (by decide) (by decide) (by decide)
   intro assignment valid
   have member := recovered assignment valid
-  simpa [ListDomain] using member
+  simpa [ListDomain, Singleton] using member
 
 example : Satisfiable (fun assignment : Assignment Unit Bool => rootValue booleanArithmetic
     (evaluate booleanArithmetic assignment affineExample) repeatedRoot = false) := by

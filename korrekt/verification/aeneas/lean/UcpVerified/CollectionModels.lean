@@ -138,3 +138,28 @@ def alloc.collections.btree.map.entry.Entry.impl.or_insert_with
   | .Vacant (entries, key) =>
       let value ← closure.call_once function ()
       .ok (value, fun value => .Occupied (entries, key, value))
+
+def alloc.collections.btree.map.entry.Entry.impl.or_default
+    {K V A : Type} (_ : core.cmp.Ord K) (defaultValue : core.default.Default V)
+    (_ : core.alloc.AllocatorClone A)
+    (entry : alloc.collections.btree.map.entry.Entry K V A) :
+    Result (V × (V -> alloc.collections.btree.map.entry.Entry K V A)) := do
+  match entry with
+  | .Occupied (entries, key, value) => .ok (value, fun value => .Occupied (entries, key, value))
+  | .Vacant (entries, key) =>
+      let value ← defaultValue.default
+      .ok (value, fun value => .Occupied (entries, key, value))
+
+def alloc.collections.btree.set.BTreeSetTGlobal.Insts.CoreDefaultDefault.default (T : Type) :
+    Result (alloc.collections.btree.set.BTreeSet T alloc.alloc.Global) := .ok ∅
+
+/- A bejaras a lista tetszoleges kulcssorrendjere ervenyes; a bizonyitasok nem hasznaljak a sorrendet. -/
+def SharedABTreeMap.Insts.CoreIterTraitsCollectIntoIteratorPairSharedAKSharedAVIter.into_iter
+    {K V A : Type} (_ : core.alloc.AllocatorClone A)
+    (entries : alloc.collections.btree.map.BTreeMap K V A) :
+    Result (alloc.collections.btree.map.Iter K V) := .ok entries
+
+def alloc.collections.btree.map.Iter.Insts.CoreIterTraitsIteratorIteratorPairSharedAKSharedAV.next
+    {K V : Type} (remaining : alloc.collections.btree.map.Iter K V) :
+    Result (Option (K × V) × alloc.collections.btree.map.Iter K V) :=
+  .ok (remaining.head?, remaining.tail)

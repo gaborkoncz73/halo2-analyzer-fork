@@ -52,7 +52,7 @@ theorem unique_expression_sound [DecidableEq Value]
       · intro left right _ _
         simp only [evaluate, zero, laws.mul_zero]
       · have innerDetected : uniqueExpression ops known inner = true := by
-          simpa only [uniqueExpression, if_neg zero] using detected
+          simpa only [uniqueExpression, ite_eq_right zero] using detected
         intro left right leftValid rightValid
         change ops.mul (evaluate ops left inner) scalar = ops.mul (evaluate ops right inner) scalar
         exact congrArg (fun value => ops.mul value scalar)

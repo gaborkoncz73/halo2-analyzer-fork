@@ -33,6 +33,8 @@ trap 'rm -rf -- "$work"' EXIT
         --start-from 'crate::mark_unique' \
         --start-from 'crate::mark_initial_unique' \
         --start-from 'crate::domain_entrypoints' \
+        --start-from 'crate::recovery_core::merge_established_evidence' \
+        --start-from 'crate::recovery_core::finish_merge' \
         --dest-file "$work/ucp_verified.llbc" -- --locked
 )
 "$tools/aeneas/aeneas" -backend lean -split-files -impl-namespace -filter-trait-methods \
@@ -45,7 +47,7 @@ perl -pi -e 's/\bType _/Type/g' "$work/lean/Types.lean" "$work/lean/Funs.lean"
 
 (
     cd "$root"
-    sha256sum korrekt/src/circuit_analyzer/ucp/{cell,expr,facts,rules,recovery_loop,privacy,value,value_inference,profiling}.rs \
+    sha256sum korrekt/src/circuit_analyzer/ucp/{cell,expr,facts,rules,recovery_loop,recovery_core,privacy,privacy_search,value,value_inference,profiling}.rs \
         korrekt/verification/aeneas/rust/{lib.rs,Cargo.toml,Cargo.lock} \
         korrekt/verification/aeneas/versions.env
 ) > "$work/SOURCES.sha256"

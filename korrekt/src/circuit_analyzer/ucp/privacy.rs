@@ -17,9 +17,11 @@ use super::{
     },
     privacy_domain::{DomainRefinementState, PrivacyDomainRefinementOptions},
     privacy_search::{
-        choose_action, shortlist_actions, ProbePlan, RecoveryAction, RecoveryEvidence,
+        certification_error_message, choose_action, shortlist_actions,
+        unsupported_sample_message, ProbePlan, RecoveryAction, RecoveryEvidence,
         RecoverySearchState, RecoveryStrategy,
     },
+    recovery_core::{finish_merge, merge_established_evidence, EstablishedEvidence},
     recovery_loop::{run_recovery, RecoveryMachine, Selection},
     value::{normalize_field_value, parse_cell_id, UcpValueDomain, UcpValueFacts},
 };
@@ -1017,35 +1019,29 @@ impl<F: AnalyzableField, Q: RecoveryProbe<F>> RecoveryMachine for RecoveryDriver
         } = pending;
         let checks = recovered.checks.clone();
         let prior_samples = self.evidence.samples(&cell);
-        self.evidence.remember_feasible_samples(
-            &recovered.cell,
-            recovered.samples.iter().cloned(),
+        let model_samples = added_model_samples(
+            self.evidence,
+            &recovered,
+            &cell,
             &self.problem.field_modulus,
-        )?;
-        let mut model_samples = BTreeMap::new();
-        for (sample_cell, values) in &recovered.model_samples {
-            let previous = self.evidence.samples(sample_cell);
-            let added: Vec<_> = values.difference(&previous).cloned().collect();
-            self.evidence.remember_feasible_samples(
-                sample_cell,
-                values.iter().cloned(),
-                &self.problem.field_modulus,
-            )?;
-            if sample_cell != &cell && !added.is_empty() {
-                model_samples.insert(sample_cell.clone(), added);
-            }
-        }
-        let mut propagation_needed = facts_changed(merge_established_results(
+        );
+        let mut propagation_needed = merge_established_results(
+            self.evidence,
             &mut self.result,
             recovered,
             self.search,
             self.non_unique,
             self.limitations,
-        )?);
-        propagation_needed |= self
-            .evidence
-            .certify_complete_domains(&mut self.result, &self.problem.field_modulus)?;
-        self.non_unique.extend(self.evidence.non_unique_cells());
+            &self.problem.field_modulus,
+        )?;
+        propagation_needed |= finish_merge(
+            self.evidence,
+            &self.result.facts,
+            &mut self.result.value_facts,
+            self.non_unique,
+            &self.problem.field_modulus,
+        )
+        .map_err(certification_error_message)?;
         let after = PhaseSnapshot::capture(self.private_cells, &self.result, self.non_unique);
         let mut updates = before.updates(&after);
         if !self.private_set.contains(&cell) {
@@ -1494,23 +1490,59 @@ where
     }
 }
 
-// Csak igazolt következtetést olvaszt be. A megvalósítható mintákat külön W-ben őrzi meg;
-// önmagában egy modellérték nem jogosít lefedő domain vagy egyértelműség bejegyzésére.
+// A nyomkovetes szamara kiszamitja, mely modellmintak ujak a beolvasztas elott.
+fn added_model_samples(
+    evidence: &RecoveryEvidence,
+    recovered: &RecoveryStepResult,
+    cell: &CellId,
+    modulus: &BigInt,
+) -> BTreeMap<CellId, Vec<BigInt>> {
+    let mut added_samples = BTreeMap::new();
+    for (sample_cell, values) in &recovered.model_samples {
+        let mut previous = evidence.samples(sample_cell);
+        if sample_cell == &recovered.cell {
+            previous.extend(
+                recovered
+                    .samples
+                    .iter()
+                    .filter_map(|value| normalize_field_value(value.clone(), modulus)),
+            );
+        }
+        let added: Vec<_> = values.difference(&previous).cloned().collect();
+        if sample_cell != cell && !added.is_empty() {
+            added_samples.insert(sample_cell.clone(), added);
+        }
+    }
+    added_samples
+}
+
+// A szemantikai beolvasztast a kinyert recovery_core vegzi; itt csak a keresesi adminisztracio marad.
 fn merge_established_results(
+    evidence: &mut RecoveryEvidence,
     result: &mut UcpResult,
     recovered: RecoveryStepResult,
     search: &mut RecoverySearchState,
     non_unique: &mut HashSet<CellId>,
     limitations: &mut BTreeMap<CellId, RecoveryLimitation>,
-) -> Result<(bool, bool)> {
-    let cell = recovered.cell;
-    let uniqueness_added = recovered.unique && result.facts.mark_unique(cell.clone());
-    let domain_changed = recovered
-        .domain
-        .is_some_and(|domain| result.value_facts.mark_domain(cell.clone(), domain));
-    if recovered.non_unique {
-        non_unique.insert(cell.clone());
-    }
+    modulus: &BigInt,
+) -> Result<bool> {
+    let cell = recovered.cell.clone();
+    let changed = merge_established_evidence(
+        evidence,
+        &mut result.facts,
+        &mut result.value_facts,
+        non_unique,
+        EstablishedEvidence {
+            cell: recovered.cell,
+            samples: recovered.samples,
+            model_samples: recovered.model_samples,
+            domain: recovered.domain,
+            unique: recovered.unique,
+            non_unique: recovered.non_unique,
+        },
+        modulus,
+    )
+    .map_err(unsupported_sample_message)?;
     if recovered.retryable {
         search
             .cells
@@ -1521,11 +1553,7 @@ fn merge_established_results(
     if let Some(limitation) = recovered.limitation {
         limitations.insert(cell, limitation);
     }
-    Ok((uniqueness_added, domain_changed))
-}
-
-fn facts_changed((uniqueness_added, domain_changed): (bool, bool)) -> bool {
-    uniqueness_added || domain_changed
+    Ok(changed)
 }
 
 fn smt_query_value_facts(current: &UcpValueFacts, extracted: &UcpValueFacts) -> UcpValueFacts {
@@ -2293,25 +2321,18 @@ mod tests {
             assert_eq!(knowledge, before);
             assert!(!search.cells[&cell].retryable);
             assert!(evidence.samples(&cell).is_empty());
-            evidence
-                .remember_feasible_samples(
-                    &cell,
-                    recovered.samples.iter().cloned(),
-                    &context.problem.field_modulus,
-                )
-                .unwrap();
             let mut non_unique = HashSet::new();
             let mut limitations = BTreeMap::new();
-            let changed = facts_changed(
-                merge_established_results(
-                    &mut knowledge,
-                    recovered,
-                    &mut search,
-                    &mut non_unique,
-                    &mut limitations,
-                )
-                .unwrap(),
-            );
+            let changed = merge_established_results(
+                &mut evidence,
+                &mut knowledge,
+                recovered,
+                &mut search,
+                &mut non_unique,
+                &mut limitations,
+                &context.problem.field_modulus,
+            )
+            .unwrap();
             if timeout {
                 assert!(!changed);
                 assert_eq!(knowledge, before);

@@ -62,10 +62,10 @@ theorem root_candidates_sound [DecidableEq Value]
       exact innerSound success ((laws.neg_eq_zero_iff _).mp zero)
   | scale inner scalar innerSound =>
       by_cases scalarZero : scalar = ops.zero
-      · simp only [rootCandidates, if_pos scalarZero] at success
+      · simp only [rootCandidates, ite_eq_left scalarZero] at success
         cases success
       · have innerResult : rootCandidates limit ops inner = some output := by
-          simpa only [rootCandidates, if_neg scalarZero] using success
+          simpa only [rootCandidates, ite_eq_right scalarZero] using success
         have product : ops.mul (rootValue ops parameter inner) scalar = ops.zero := zero
         rcases domain.mul_eq_zero _ _ product with innerZero | impossible
         · exact innerSound innerResult innerZero
