@@ -20,6 +20,7 @@ use super::{
         choose_action, shortlist_actions, ProbePlan, RecoveryAction, RecoveryEvidence,
         RecoverySearchState, RecoveryStrategy,
     },
+    recovery_loop::{run_recovery, RecoveryMachine, Selection},
     value::{normalize_field_value, parse_cell_id, UcpValueDomain, UcpValueFacts},
 };
 #[cfg(test)]
@@ -702,9 +703,8 @@ fn recover_private_inputs<F: AnalyzableField>(
     let mut limitations = BTreeMap::new();
     let mut search = RecoverySearchState::initialize_search(&facts, &values);
     let mut evidence = RecoveryEvidence::default();
-    let mut search_facts = PrivateSearchFacts::default();
     // A kifejezésstátuszokat a ciklus első, kötelező propagációja tölti ki; előtte csak K-t és Deltát használja.
-    let mut result = UcpResult {
+    let result = UcpResult {
         facts,
         value_facts: values,
         checked_expressions: 0,
@@ -712,196 +712,28 @@ fn recover_private_inputs<F: AnalyzableField>(
         unresolved_expressions: 0,
         expression_results: Vec::new(),
     };
-    let mut propagation_needed = true;
     let mut phases = Vec::new();
-    let (status, result) = loop {
-        // Az új megvalósítható minták önmagukban nem érvénytelenítik a propagációs fixpontot.
-        if propagation_needed {
-            loop {
-                let before = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
-                let phase_started = Instant::now();
-                result =
-                    propagate_to_fixpoint(&problem, result.facts, result.value_facts, &mut search);
-                // A puszta teljességi jelölés nem indít új kört; az új konkrét értékre kanonizált domain igen.
-                let repeat =
-                    evidence.certify_complete_domains(&mut result, &problem.field_modulus)?;
-                let after = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
-                phases.push(RecoveryPhase::Ucp {
-                    elapsed: phase_started.elapsed(),
-                    counts: after.counts(),
-                    updates: before.updates(&after),
-                });
-                if !repeat {
-                    break;
-                }
-            }
-            search.observe_progress(&result, &problem.field_modulus);
-            // Az aktuális Delta pontos értékeiből és kis lefedő domainjeiből frissíti az SMT keresési premisszáit.
-            search_facts = established_search_facts(
-                original_context.as_ref(),
-                &analyzer,
-                &result.value_facts,
-            )?;
-            propagation_needed = false;
-        }
-        let (actions, probe_plan) = shortlist_actions(
-            &problem,
-            &private_cells,
-            &snapshot_cells,
-            &private_set,
-            &result,
-            &search,
-            &mut domain_search,
-            &mut discovery,
-            &evidence,
-            &non_unique,
-            original_context.is_some(),
-            &options,
-        )?;
-        let Some(action) = choose_action(
-            actions,
-            &private_cells,
-            &problem,
-            &result,
-            &evidence,
-            Some(&domain_search),
-        ) else {
-            let ProbePlan::Stop(status, reason, pending) = probe_plan else {
-                anyhow::bail!("Selectable recovery probe was lost by the scheduler");
-            };
-            search.statistics.stop_reason = reason;
-            if status == PrivacyAnalysisStatus::QueryLimitReached {
-                for cell in pending {
-                    limitations
-                        .entry(cell)
-                        .or_insert(RecoveryLimitation::QueryLimit);
-                }
-            }
-            break (status, result);
-        };
-        let phase_started = Instant::now();
-        let cell = action.cell().clone();
-        let before = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
-        let before_cell = CellState::capture(&cell, &result, &non_unique);
-        let (operation, strategy) = match &action {
-            RecoveryAction::Refine(_, strategy) => (
-                RecoverySmtAction::Refine,
-                if *strategy == RecoveryStrategy::FastProbe {
-                    RecoverySmtStrategy::FastProbe
-                } else {
-                    RecoverySmtStrategy::Candidates
-                },
-            ),
-            RecoveryAction::Discover(_, strategy) => (
-                RecoverySmtAction::Discover,
-                if *strategy == RecoveryStrategy::FastProbe {
-                    RecoverySmtStrategy::FastProbe
-                } else {
-                    RecoverySmtStrategy::Enumeration
-                },
-            ),
-        };
-        let recovered = {
-            let mut operations = RecoveryOperations {
-                analyzer: &mut analyzer,
-                analyzer_input,
-                original: original_context.as_ref(),
-                search_facts: &search_facts,
-                modulus: &problem.field_modulus,
-                knowledge: &result,
-                smt_domain_reference: &problem.initial_value_facts,
-                options: &options,
-                search: &mut search,
-                private_set: &private_set,
-                query: &mut query,
-            };
-            match action {
-                RecoveryAction::Refine(cell, strategy) => {
-                    operations.refine_domain(&cell, strategy, &mut domain_search, &evidence)
-                }
-                RecoveryAction::Discover(cell, strategy) => {
-                    operations.discover_domain(&cell, strategy, &mut discovery, &evidence)
-                }
-            }
-        }?;
-        let checks = recovered.checks.clone();
-        let limitation = recovered.limitation.clone().or_else(|| {
-            if strategy == RecoverySmtStrategy::FastProbe {
-                None
-            } else {
-                match operation {
-                    RecoverySmtAction::Refine => domain_search
-                        .cells
-                        .get(&cell)
-                        .and_then(|c| c.limitation.clone()),
-                    RecoverySmtAction::Discover => discovery
-                        .cells
-                        .get(&cell)
-                        .and_then(|c| c.limitation.clone()),
-                }
-            }
-        });
-        let prior_samples = evidence.samples(&cell);
-        evidence.remember_feasible_samples(
-            &recovered.cell,
-            recovered.samples.iter().cloned(),
-            &problem.field_modulus,
-        )?;
-        let mut model_samples = BTreeMap::new();
-        for (sample_cell, values) in &recovered.model_samples {
-            let previous = evidence.samples(sample_cell);
-            let added: Vec<_> = values.difference(&previous).cloned().collect();
-            evidence.remember_feasible_samples(
-                sample_cell,
-                values.iter().cloned(),
-                &problem.field_modulus,
-            )?;
-            if sample_cell != &cell && !added.is_empty() {
-                model_samples.insert(sample_cell.clone(), added);
-            }
-        }
-        propagation_needed |= facts_changed(merge_established_results(
-            &mut result,
-            recovered,
-            &mut search,
-            &mut non_unique,
-            &mut limitations,
-        )?);
-        propagation_needed |=
-            evidence.certify_complete_domains(&mut result, &problem.field_modulus)?;
-        non_unique.extend(evidence.non_unique_cells());
-        let after = PhaseSnapshot::capture(&private_cells, &result, &non_unique);
-        let mut updates = before.updates(&after);
-        if !private_set.contains(&cell) {
-            if let Some(update) = before_cell.update(
-                cell.clone(),
-                &CellState::capture(&cell, &result, &non_unique),
-            ) {
-                updates.push(update);
-            }
-        }
-        record_smt_step(
-            &mut phases,
-            RecoverySmtStep {
-                cell: cell.clone(),
-                is_target: private_set.contains(&cell),
-                action: operation,
-                strategy,
-                checks,
-                elapsed: phase_started.elapsed(),
-                propagation_requested: propagation_needed,
-                feasible_samples: evidence
-                    .samples(&cell)
-                    .difference(&prior_samples)
-                    .cloned()
-                    .collect(),
-                model_samples,
-                updates,
-                limitation,
-            },
-            after.counts(),
-        );
-    };
+    let (status, driver) = run_recovery(RecoveryDriver {
+        problem: &problem,
+        analyzer: &mut analyzer,
+        analyzer_input,
+        private_cells: &private_cells,
+        snapshot_cells: &snapshot_cells,
+        private_set: &private_set,
+        original: original_context.as_ref(),
+        options: &options,
+        result,
+        search: &mut search,
+        domain_search: &mut domain_search,
+        discovery: &mut discovery,
+        evidence: &mut evidence,
+        non_unique: &mut non_unique,
+        limitations: &mut limitations,
+        search_facts: PrivateSearchFacts::default(),
+        phases: &mut phases,
+        query: &mut query,
+    })?;
+    let result = driver.result;
 
     ensure!(
         non_unique
@@ -982,6 +814,272 @@ fn recover_private_inputs<F: AnalyzableField>(
     report.phases = phases;
     report.solver_invocations = crate::smt_solver::process::invocation_count() - solver_start;
     Ok(report)
+}
+
+// Az eles muveletek adaptere. A fociklus nem kap kozvetlen hozzaferest a privat witnesshez.
+struct RecoveryDriver<'a, F: AnalyzableField, Q> {
+    problem: &'a UcpProblem,
+    analyzer: &'a mut Analyzer<F>,
+    analyzer_input: &'a AnalyzerInput,
+    private_cells: &'a [CellId],
+    snapshot_cells: &'a [CellId],
+    private_set: &'a HashSet<CellId>,
+    original: Option<&'a OriginalPrivateQueryContext>,
+    options: &'a PrivacyAnalysisOptions,
+    result: UcpResult,
+    search: &'a mut RecoverySearchState,
+    domain_search: &'a mut DomainRefinementState,
+    discovery: &'a mut DomainDiscoveryState,
+    evidence: &'a mut RecoveryEvidence,
+    non_unique: &'a mut HashSet<CellId>,
+    limitations: &'a mut BTreeMap<CellId, RecoveryLimitation>,
+    search_facts: PrivateSearchFacts,
+    phases: &'a mut Vec<RecoveryPhase>,
+    query: &'a mut Q,
+}
+
+// A keresesi eredmenyt a hozza tartozo fazisadatokkal egyutt adja at a beolvasztasnak.
+struct PendingRecovery {
+    recovered: RecoveryStepResult,
+    cell: CellId,
+    before: PhaseSnapshot,
+    before_cell: CellState,
+    started: Instant,
+    operation: RecoverySmtAction,
+    strategy: RecoverySmtStrategy,
+    limitation: Option<RecoveryLimitation>,
+}
+
+impl<F: AnalyzableField, Q: RecoveryProbe<F>> RecoveryMachine for RecoveryDriver<'_, F, Q> {
+    type Action = RecoveryAction;
+    type Pending = PendingRecovery;
+    type Stop = PrivacyAnalysisStatus;
+    type Error = anyhow::Error;
+
+    fn propagate(mut self) -> Result<(Self, bool)> {
+        let before = PhaseSnapshot::capture(self.private_cells, &self.result, self.non_unique);
+        let started = Instant::now();
+        self.result = propagate_to_fixpoint(
+            self.problem,
+            self.result.facts,
+            self.result.value_facts,
+            self.search,
+        );
+        // Csak a domain tartalmanak kanonizalasa indit uj kort, a teljessegi jeloles onmagaban nem.
+        let repeat = self
+            .evidence
+            .certify_complete_domains(&mut self.result, &self.problem.field_modulus)?;
+        let after = PhaseSnapshot::capture(self.private_cells, &self.result, self.non_unique);
+        self.phases.push(RecoveryPhase::Ucp {
+            elapsed: started.elapsed(),
+            counts: after.counts(),
+            updates: before.updates(&after),
+        });
+        Ok((self, repeat))
+    }
+
+    fn refresh(mut self) -> Result<Self> {
+        self.search
+            .observe_progress(&self.result, &self.problem.field_modulus);
+        self.search_facts =
+            established_search_facts(self.original, self.analyzer, &self.result.value_facts)?;
+        Ok(self)
+    }
+
+    fn select(self) -> Result<(Self, Selection<Self::Action, Self::Stop>)> {
+        let (actions, probe_plan) = shortlist_actions(
+            self.problem,
+            self.private_cells,
+            self.snapshot_cells,
+            self.private_set,
+            &self.result,
+            self.search,
+            self.domain_search,
+            self.discovery,
+            self.evidence,
+            self.non_unique,
+            self.original.is_some(),
+            self.options,
+        )?;
+        if let Some(action) = choose_action(
+            actions,
+            self.private_cells,
+            self.problem,
+            &self.result,
+            self.evidence,
+            Some(self.domain_search),
+        ) {
+            return Ok((self, Selection::Run(action)));
+        }
+        let ProbePlan::Stop(status, reason, pending) = probe_plan else {
+            anyhow::bail!("Selectable recovery probe was lost by the scheduler");
+        };
+        self.search.statistics.stop_reason = reason;
+        if status == PrivacyAnalysisStatus::QueryLimitReached {
+            for cell in pending {
+                self.limitations
+                    .entry(cell)
+                    .or_insert(RecoveryLimitation::QueryLimit);
+            }
+        }
+        Ok((self, Selection::Stop(status)))
+    }
+
+    fn query(self, action: Self::Action) -> Result<(Self, Self::Pending)> {
+        let started = Instant::now();
+        let cell = action.cell().clone();
+        let before = PhaseSnapshot::capture(self.private_cells, &self.result, self.non_unique);
+        let before_cell = CellState::capture(&cell, &self.result, self.non_unique);
+        let (operation, strategy) = match &action {
+            RecoveryAction::Refine(_, strategy) => (
+                RecoverySmtAction::Refine,
+                if *strategy == RecoveryStrategy::FastProbe {
+                    RecoverySmtStrategy::FastProbe
+                } else {
+                    RecoverySmtStrategy::Candidates
+                },
+            ),
+            RecoveryAction::Discover(_, strategy) => (
+                RecoverySmtAction::Discover,
+                if *strategy == RecoveryStrategy::FastProbe {
+                    RecoverySmtStrategy::FastProbe
+                } else {
+                    RecoverySmtStrategy::Enumeration
+                },
+            ),
+        };
+        let recovered = {
+            let mut operations = RecoveryOperations {
+                analyzer: self.analyzer,
+                analyzer_input: self.analyzer_input,
+                original: self.original,
+                search_facts: &self.search_facts,
+                modulus: &self.problem.field_modulus,
+                knowledge: &self.result,
+                smt_domain_reference: &self.problem.initial_value_facts,
+                options: self.options,
+                search: self.search,
+                private_set: self.private_set,
+                query: self.query,
+            };
+            match action {
+                RecoveryAction::Refine(cell, strategy) => {
+                    operations.refine_domain(&cell, strategy, self.domain_search, self.evidence)
+                }
+                RecoveryAction::Discover(cell, strategy) => {
+                    operations.discover_domain(&cell, strategy, self.discovery, self.evidence)
+                }
+            }
+        }?;
+        let limitation = recovered.limitation.clone().or_else(|| {
+            if strategy == RecoverySmtStrategy::FastProbe {
+                None
+            } else {
+                match operation {
+                    RecoverySmtAction::Refine => self
+                        .domain_search
+                        .cells
+                        .get(&cell)
+                        .and_then(|c| c.limitation.clone()),
+                    RecoverySmtAction::Discover => self
+                        .discovery
+                        .cells
+                        .get(&cell)
+                        .and_then(|c| c.limitation.clone()),
+                }
+            }
+        });
+        Ok((
+            self,
+            PendingRecovery {
+                recovered,
+                cell,
+                before,
+                before_cell,
+                started,
+                operation,
+                strategy,
+                limitation,
+            },
+        ))
+    }
+
+    fn merge(mut self, pending: Self::Pending) -> Result<(Self, bool)> {
+        let PendingRecovery {
+            recovered,
+            cell,
+            before,
+            before_cell,
+            started,
+            operation,
+            strategy,
+            limitation,
+        } = pending;
+        let checks = recovered.checks.clone();
+        let prior_samples = self.evidence.samples(&cell);
+        self.evidence.remember_feasible_samples(
+            &recovered.cell,
+            recovered.samples.iter().cloned(),
+            &self.problem.field_modulus,
+        )?;
+        let mut model_samples = BTreeMap::new();
+        for (sample_cell, values) in &recovered.model_samples {
+            let previous = self.evidence.samples(sample_cell);
+            let added: Vec<_> = values.difference(&previous).cloned().collect();
+            self.evidence.remember_feasible_samples(
+                sample_cell,
+                values.iter().cloned(),
+                &self.problem.field_modulus,
+            )?;
+            if sample_cell != &cell && !added.is_empty() {
+                model_samples.insert(sample_cell.clone(), added);
+            }
+        }
+        let mut propagation_needed = facts_changed(merge_established_results(
+            &mut self.result,
+            recovered,
+            self.search,
+            self.non_unique,
+            self.limitations,
+        )?);
+        propagation_needed |= self
+            .evidence
+            .certify_complete_domains(&mut self.result, &self.problem.field_modulus)?;
+        self.non_unique.extend(self.evidence.non_unique_cells());
+        let after = PhaseSnapshot::capture(self.private_cells, &self.result, self.non_unique);
+        let mut updates = before.updates(&after);
+        if !self.private_set.contains(&cell) {
+            if let Some(update) = before_cell.update(
+                cell.clone(),
+                &CellState::capture(&cell, &self.result, self.non_unique),
+            ) {
+                updates.push(update);
+            }
+        }
+        record_smt_step(
+            self.phases,
+            RecoverySmtStep {
+                cell: cell.clone(),
+                is_target: self.private_set.contains(&cell),
+                action: operation,
+                strategy,
+                checks,
+                elapsed: started.elapsed(),
+                propagation_requested: propagation_needed,
+                feasible_samples: self
+                    .evidence
+                    .samples(&cell)
+                    .difference(&prior_samples)
+                    .cloned()
+                    .collect(),
+                model_samples,
+                updates,
+                limitation,
+            },
+            after.counts(),
+        );
+        Ok((self, propagation_needed))
+    }
 }
 
 #[derive(Debug)]

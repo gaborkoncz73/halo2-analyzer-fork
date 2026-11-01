@@ -1,0 +1,5 @@
+/.tools/
+/lean/.lake/
+/rust/target/
+!/rust/Cargo.lock
+/lean/UcpVerified/*_Template.lean

@@ -6,7 +6,7 @@ use super::{
     cell::CellId,
     expr::{UcpExpr, UcpScalar},
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::Result;
 use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -53,6 +53,15 @@ pub enum ValueKind {
     Zero,
     NonZero,
     Unknown,
+}
+
+// A logikai hibaokot külön tárolja; a felhasználói üzenetet a külső függvény készíti el.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompleteDomainError {
+    DomainValue,
+    SampleValue,
+    ExcludedFeasibleValue,
+    RepresentationLimit,
 }
 
 impl UcpValueDomain {
@@ -129,7 +138,7 @@ impl UcpValueDomain {
                 Some(Self::Exact(value.clone()))
             }
             (Self::FiniteSet(left), Self::FiniteSet(right)) => {
-                Self::finite_set(left.intersection(right).cloned())
+                Self::finite_set(left.intersection(right).map(|value| value.clone()))
             }
             _ => None,
         }
@@ -235,18 +244,47 @@ impl UcpValueFacts {
         samples: &BTreeSet<BigInt>,
         modulus: &BigInt,
     ) -> Result<bool> {
+        self.try_mark_complete_from_samples(cell, samples, modulus)
+            .map_err(|error| match error {
+                CompleteDomainError::DomainValue => {
+                    anyhow::anyhow!("Unsupported complete-domain field value")
+                }
+                CompleteDomainError::SampleValue => {
+                    anyhow::anyhow!("Unsupported complete-domain sample")
+                }
+                CompleteDomainError::ExcludedFeasibleValue => anyhow::anyhow!(
+                    "Recorded domain for {} excludes a proven feasible value",
+                    cell
+                ),
+                CompleteDomainError::RepresentationLimit => {
+                    anyhow::anyhow!("Complete domain exceeds representation limits")
+                }
+            })
+    }
+
+    // A teljességet normalizált mintákból igazolja, diagnosztikai formázás nélkül.
+    pub(crate) fn try_mark_complete_from_samples(
+        &mut self,
+        cell: &CellId,
+        samples: &BTreeSet<BigInt>,
+        modulus: &BigInt,
+    ) -> std::result::Result<bool, CompleteDomainError> {
         let Some(domain) = self.domains.get(cell) else {
             return Ok(false);
         };
         let entries: Vec<_> = match domain {
-            UcpValueDomain::Exact(value) => vec![value],
+            UcpValueDomain::Exact(value) => {
+                let mut entries = Vec::new();
+                entries.push(value);
+                entries
+            }
             UcpValueDomain::FiniteSet(values) => values.iter().collect(),
         };
         let mut candidates = BTreeMap::new();
         // Közös testbeli reprezentánsra normalizálja az értékeket; -1 és p-1 ugyanazt az elemet jelöli.
         for value in entries {
             let normalized = normalize_field_value(value.clone(), modulus)
-                .context("Unsupported complete-domain field value")?;
+                .ok_or(CompleteDomainError::DomainValue)?;
             candidates
                 .entry(normalized)
                 .or_insert_with(|| value.clone());
@@ -255,19 +293,17 @@ impl UcpValueFacts {
             .iter()
             .map(|value| {
                 normalize_field_value(value.clone(), modulus)
-                    .context("Unsupported complete-domain sample")
+                    .ok_or(CompleteDomainError::SampleValue)
             })
-            .collect::<Result<_>>()?;
-        ensure!(
-            feasible.iter().all(|value| candidates.contains_key(value)),
-            "Recorded domain for {} excludes a proven feasible value",
-            cell
-        );
+            .collect::<std::result::Result<_, _>>()?;
+        if !feasible.iter().all(|value| candidates.contains_key(value)) {
+            return Err(CompleteDomainError::ExcludedFeasibleValue);
+        }
         if feasible.len() != candidates.len() || feasible.is_empty() {
             return Ok(false);
         }
         let canonical = UcpValueDomain::finite_set(candidates.into_values())
-            .context("Complete domain exceeds representation limits")?;
+            .ok_or(CompleteDomainError::RepresentationLimit)?;
         let changed = self.domains.get(cell) != Some(&canonical);
         self.domains.insert(cell.clone(), canonical);
         Ok(self.complete_domains.insert(cell.clone()) || changed)
@@ -1348,6 +1384,93 @@ mod completeness_tests {
             .unwrap());
         assert!(aliases.domain_is_complete(&cell));
         assert_eq!(aliases.known_value(&cell), Some(&(-1).into()));
+    }
+
+    #[test]
+    fn completion_core_and_diagnostic_wrapper_produce_the_same_state() {
+        let cell = CellId::advice(0, 0);
+        for (candidates, witnessed) in [
+            (vec![0, 1], vec![]),
+            (vec![0, 1], vec![0]),
+            (vec![3, 7], vec![3, 7]),
+            (vec![-1, 0, 100], vec![-1, 0]),
+        ] {
+            let mut core = UcpValueFacts::new();
+            core.mark_domain(cell.clone(), domain(&candidates));
+            let mut wrapped = core.clone();
+            let witnessed = samples(&witnessed);
+            let result = core
+                .try_mark_complete_from_samples(&cell, &witnessed, &101.into())
+                .unwrap();
+            assert_eq!(
+                wrapped
+                    .mark_complete_from_samples(&cell, &witnessed, &101.into())
+                    .unwrap(),
+                result
+            );
+            assert_eq!(wrapped, core);
+        }
+    }
+
+    #[test]
+    fn completion_errors_preserve_state_and_existing_diagnostics() {
+        let cell = CellId::advice(0, 0);
+        let mut original = UcpValueFacts::new();
+        original.mark_domain(cell.clone(), domain(&[0, 1]));
+        for (modulus, witnessed, expected, message) in [
+            (
+                1,
+                vec![0],
+                CompleteDomainError::DomainValue,
+                "Unsupported complete-domain field value".to_owned(),
+            ),
+            (
+                101,
+                vec![2],
+                CompleteDomainError::ExcludedFeasibleValue,
+                format!(
+                    "Recorded domain for {} excludes a proven feasible value",
+                    cell
+                ),
+            ),
+        ] {
+            let mut core = original.clone();
+            let mut wrapped = original.clone();
+            let witnessed = samples(&witnessed);
+            assert_eq!(
+                core.try_mark_complete_from_samples(&cell, &witnessed, &modulus.into()),
+                Err(expected)
+            );
+            assert_eq!(
+                wrapped
+                    .mark_complete_from_samples(&cell, &witnessed, &modulus.into())
+                    .unwrap_err()
+                    .to_string(),
+                message
+            );
+            assert_eq!(core, original);
+            assert_eq!(wrapped, original);
+        }
+
+        let mut oversized = UcpValueFacts::new();
+        let candidates: BTreeSet<_> = (0..=MAX_FINITE_DOMAIN_SIZE).map(BigInt::from).collect();
+        oversized
+            .domains
+            .insert(cell.clone(), UcpValueDomain::FiniteSet(candidates.clone()));
+        let original = oversized.clone();
+        assert_eq!(
+            oversized.try_mark_complete_from_samples(&cell, &candidates, &1009.into()),
+            Err(CompleteDomainError::RepresentationLimit)
+        );
+        assert_eq!(oversized, original);
+        assert_eq!(
+            oversized
+                .mark_complete_from_samples(&cell, &candidates, &1009.into())
+                .unwrap_err()
+                .to_string(),
+            "Complete domain exceeds representation limits"
+        );
+        assert_eq!(oversized, original);
     }
 
     #[test]

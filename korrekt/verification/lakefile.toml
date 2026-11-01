@@ -1,0 +1,10 @@
+name = "privateRecoveryVerification"
+version = "0.1.0"
+defaultTargets = ["Recovery"]
+
+[leanOptions]
+autoImplicit = false
+warningAsError = true
+
+[[lean_lib]]
+name = "Recovery"

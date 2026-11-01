@@ -20,6 +20,7 @@ pub mod privacy_observation;
 pub(crate) mod privacy_search;
 pub(crate) mod privacy_subset;
 pub mod privacy_validation;
+pub(crate) mod recovery_loop;
 pub mod rules;
 pub mod value;
 

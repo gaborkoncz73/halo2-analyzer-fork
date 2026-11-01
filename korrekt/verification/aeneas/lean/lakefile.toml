@@ -1,0 +1,13 @@
+name = "ucp_source_verification"
+version = "0.1.0"
+defaultTargets = ["Proofs"]
+
+[[require]]
+name = "aeneas"
+path = "../.tools/aeneas/backends/lean"
+
+[[lean_lib]]
+name = "UcpVerified"
+
+[[lean_lib]]
+name = "Proofs"
