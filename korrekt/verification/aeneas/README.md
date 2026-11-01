@@ -9,6 +9,22 @@ az eles futasban es a kinyeresben is ugyanaz a `recovery_loop.rs` modul.
 
 ## Mi van bizonyitva?
 
+A fo tetelek, amelyek a korabbi reszeredmenyeket osszekapcsoljak:
+
+| Tetel | Allitas |
+| --- | --- |
+| `rust_certification_preserves_knowledge` | A teljes `try_mark_complete_from_samples` megorzi a testbeli tudasinvarianst. |
+| `rust_merge_evidence_sound`, `rust_finish_merge_sound` | A kinyert beolvasztasi mag csak igazolt eredmenybol bovit tudast. |
+| `engine_execution_sound` | Tetszoleges veges szabalyalkalmazas-sorozat megorzi a K/Delta invarianst. |
+| `qed2_fixpoint_soundness` | A QED² helyessegi ervelesenek adaptacioja: a fixpont kimeneti lefedese egyertelmuseget ad. |
+| `core_machine_contracts` | A `RecoveryContracts` a konkret gepre teljesul, az orakulum szerzodesei mellett. |
+| `rust_private_recovery_sound` | A generalt recovery sikeres futasa utan a teljes riportnezet helyes. |
+| `rust_recovery_reveals_secret` | A pontosnak jelentett ertek minden osszeegyeztetheto tanuban a titkos ertek. |
+| `core_refines_model` | A kinyert allapot invariansa a `Recovery` modell `AnalysisSound` invariansat adja. |
+| `example_run`, `example_recovers_secret` | A premisszak nem uresek: a generalt kod tenylegesen lefut. |
+
+A reszletes megfeleltetest a [THESIS_CLAIMS.md](../THESIS_CLAIMS.md) tartalmazza.
+
 Az egyertelmusegi szabalyok ket eles belepopontja:
 
 - `rules.rs::expression_is_unique`: ha `true` az eredmenye es K tenyei
@@ -48,8 +64,8 @@ A `Proofs/DomainState.lean` a `value.rs` valtozatlanul kinyert
 
 A szemantika az egesz reprezentansokat kulon ertelmezesi fuggvennyel
 kapcsolja a testelemekhez. Nem koveteli meg, hogy ket kulonbozo egesz
-kulonbozo testelemet jeloljon. A teljessegi jelolesek helyessege meg
-premissza: a `try_mark_complete_from_samples` teljes szemantikai bizonyitasa nincs kesz.
+kulonbozo testelemet jeloljon. A teljessegi jelolesek helyesseget a
+`rust_certification_preserves_knowledge` tetel orzi meg.
 A lekerdezes bizonyitasa nem bizonyitja
 automatikusan a jelolest eloallito kodot.
 
@@ -108,9 +124,8 @@ Az uj mag teljes torzse es ciklusa mar kinyert kod. A
 `Proofs/CertificationControl.lean` a hianyzo domain agara, a
 normalizalasi hiba valtozatlan taroloval torteno visszateresere es a
 normalizalt kulccsal torteno jeloltbejegyzesre bizonyit konkret teteleket.
-**Ez meg nem a teljes mag invariansmegorzese.** A mintak gyujtesenek,
-a reszhalmaz/elemszam ellenorzesenek es a teljessegi jeloles irasanak
-egyuttes kodszintu bizonyitasa tovabbra is nyitott.
+A `Proofs/Certification.lean` a teljes magot bizonyitja: a mintak gyujteset, a
+reszhalmaz- es elemszam-ellenorzest, valamint a teljessegi jeloles irasat.
 A `normalized_sample_cardinality_certifies_complete` a kivant kriterium
 szemantikai specifikacioja, nem e hianyzo kodkapcsolat helyettesitese.
 
@@ -141,11 +156,10 @@ A `Proofs/RecoveryControl.lean` szerzodesektol fuggetlenul is ellenorzi a
 generalt torzsek konkret vezerleset: a kapott query-eredmeny a megfelelo
 merge-hivasba kerul, es a query/merge/propagacio hibaaga nem valik sikerre.
 
-**Ez modularis, reszleges helyessegbizonyitas.** Nem bizonyit feltetlen
-terminaciot, es a konkret `RecoveryDriver` ot szerzodesenek implementacios
-bizonyitasa meg hianyzik. A szerzodesek explicit tetelpremisszak, nem
-feltetelezett axiomak vagy `sorry`-val kitoltott bizonyitasok. A pontos
-nyitott kotelezettsegeket a [CONTRACTS.md](CONTRACTS.md) sorolja fel.
+**Ez reszleges helyessegbizonyitas.** Nem bizonyit feltetlen terminaciot. A szerzodesek a
+`coreMachine` gepre bizonyitottak (`core_machine_contracts`), a solver es a szabalymotor
+kotelezettsegei explicit tetelpremisszak, nem axiomak. A pontos listat a
+[CONTRACTS.md](CONTRACTS.md) sorolja fel.
 
 A bizonyitas az osszes veges kifejezesfara, tetszoleges melysegre es
 korlatlan matematikai egeszekre ervenyes. Nem kis bemeneti tartomany
@@ -178,8 +192,9 @@ teljes analyzer, a compiler vagy a fuggosegek teljes bizonyitasa.
 | BTreeMap, Iterator::all/collect es Result-gyujtes | A `CollectionModels.lean` explicit tagsagi es bejarasi modelljei; a collect az elso Err-nel megall, az all megorzi a closure belso allapotat a hivasok kozott. A valodi standard konyvtari implementacio es a mag teljessegi hivasgrafjanak helyessege ettol meg nincs bizonyitva. |
 | Hasherek modelljei | Csak a tagsagi API tipusfuggosegeit elegitik ki; nem jelentenek igazolt hash-implementaciot. A tagsagi modell nem futtatja oket. |
 | Halo2 -> UCP kinyeres | A konstansok es az AST helyes ertelmezese premissza. A frontend husege nincs bizonyitva. |
-| `recovery_loop.rs` ket ciklusa | A generalt kod modularis, reszleges helyessege bizonyitott. |
-| Konkret `RecoveryDriver`, solver, K/Delta/W/E frissites | A konkret muveleti szerzodesek bizonyitasa meg hianyzik. A generikus fociklus bizonyitasa nem igazolja automatikusan az adaptert. |
+| `recovery_loop.rs`, `recovery_core.rs` | A generalt kod reszleges helyessege bizonyitott, a szerzodesek a `coreMachine` gepre teljesulnek. |
+| Konkret `RecoveryDriver` | A `coreMachine` a sorrendjet koveti; a megfeleles kezi ellenorzes. |
+| Solver, szabalymotor | Az `OracleContracts` explicit premisszai. |
 | Kezdeti SAT, inicializalas, vegso riportszerializalas | A generikus cikluson kivul maradnak; nincs rajuk teljes forraskodhoz kotott bizonyitas. |
 | Rust -> MIR -> Charon -> Aeneas, Lean kernel | Megbizhato eszkozlanc, nem e projekt altal bizonyitott forditok. |
 
@@ -205,8 +220,7 @@ bash korrekt/verification/aeneas/verify.sh
 A bootstrap rogzitett, SHA-256-tal ellenorzott Aeneas es Lean binarisokat
 tolt le a gitbol kizart `.tools/` ala, valamint telepiti a szukseges Rust
 nightlyt `rustup`-pal. A fuggosegek elso letoltese es a build-cache tobb GB
-tarhelyet igenyelhet. A korabbi Lean 4.24.0 modellprojektet nem modositja:
-az Aeneas-backend kulon Lean 4.35.0 csomag.
+tarhelyet igenyelhet. A `Recovery` modellcsomag ugyanezt a Lean 4.35.0 eszkozt hasznalja.
 
 A `verify.sh` mindig ujra kinyeri az eles Rust-forrast, ujrageneralja a
 Lean-kodot, majd osszehasonlitja a rogzitett kodot, LLBC-t es forrashasheket.

@@ -1,0 +1,41 @@
+name: Formal verification
+
+on:
+  push:
+    paths:
+      - "korrekt/src/circuit_analyzer/ucp/**"
+      - "korrekt/verification/**"
+      - ".github/workflows/formal-verification.yml"
+  pull_request:
+    paths:
+      - "korrekt/src/circuit_analyzer/ucp/**"
+      - "korrekt/verification/**"
+      - ".github/workflows/formal-verification.yml"
+
+jobs:
+  lean-proofs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore pinned tools and Lean packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            korrekt/verification/aeneas/.tools
+            korrekt/verification/aeneas/lean/.lake/packages
+          key: verification-${{ hashFiles('korrekt/verification/aeneas/versions.env', 'korrekt/verification/aeneas/lean/lake-manifest.json') }}
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install pinned Aeneas, Lean and Rust nightly
+        run: bash korrekt/verification/aeneas/bootstrap.sh
+      - name: Re-extract the Rust sources and check every proof
+        run: bash korrekt/verification/aeneas/verify.sh
+      - name: Build the standalone model package
+        run: |
+          cd korrekt/verification
+          PATH="$PWD/aeneas/.tools/lean/bin:$PATH" lake build
+      - name: Run solver-free recovery regressions
+        run: |
+          cargo test -p korrekt --lib ucp::recovery_loop
+          cargo test -p korrekt --lib ucp::value::completeness_tests

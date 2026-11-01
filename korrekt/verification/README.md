@@ -1,61 +1,40 @@
 # A privat visszaallitas verifikacioja
 
-Ket kulon ellenorzes talalhato itt:
+A dolgozat allitasainak es a teteleknek a megfeleltetese: [THESIS_CLAIMS.md](THESIS_CLAIMS.md).
 
-- `Recovery/`: a matematikai modellek eredeti, Lean 4.24.0 bizonyitasai.
-- [`aeneas/`](aeneas/README.md): a valtozatlan Rust-forrasbol automatikusan
-  kinyert egyertelmusegi es modulusos Assign-fuggvenyek, valamint az eles
-  recovery-fociklus modularis bizonyitasai, kulon Aeneas/Lean 4.35.0
-  eszkozlancban. A konkret adapter szerzodesei meg nyitottak.
+Ket csomag talalhato itt, kozos Lean 4.35.0 eszkozlanccal:
 
-Az alabbi leiras es a helyi `lake build` a `Recovery/` modellcsomagra
-vonatkozik; az Aeneas-ellenorzest kulon a sajat `verify.sh` futtatja.
+- `Recovery/`: a kovetkeztetesi szabalyok es a tudasallapot matematikai modelljei.
+- [`aeneas/`](aeneas/README.md): a valtozatlan Rust-forrasbol automatikusan kinyert
+  kod bizonyitasai. Ez a csomag a `Recovery` modelleket is importalja, es a
+  `core_refines_model` tetellel kapcsolja a kinyert allapothoz.
 
-Ez az onallo Lean-projekt a `korrekt/src` mellett talalhato. A recovery
-domain- es mintakezelesenek, valamint a tamogatott kovetkeztetesi szabalyoknak
-a matematikai modelljet, tovabba a normalizalas es a kanonikus domainek
-egeszszam-szemantikajat ellenorzi; a Rust-programot
-nem modositja es ez a modellcsomag nem forditja Leanre. A bizonyitasok tetszoleges cella- es
-ertektipusra, illetve a reprezentacios retegben tetszoleges egeszekre es
-pozitiv modulusra ervenyesek, nem a szemlelteto peldak konkret adataira keszultek.
+A `Recovery` modellek tetszoleges cella- es ertektipusra, illetve a reprezentacios
+retegben tetszoleges egeszekre es pozitiv modulusra ervenyesek.
 
-**A teljes Rust-forras meg nincs formalisan verifikalva.** A pontos
-implementacios hatart es a tovabbi kotelezettsegeket az
+**A teljes Rust-forras nincs formalisan verifikalva.** A pontos implementacios hatart az
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) tartalmazza.
 
 ## Futtatas es VS Code
 
-Rogzitett eszkozkeszlet: **Lean 4.24.0**, kizarolag a vele szallitott `Std`
-es `Lean` modulokkal. Nincs Mathlib- vagy mas kulso csomagfuggoseg.
-A `lean-toolchain` es a `lake-manifest.json` verziozott fajl.
+A teljes ellenorzes a repo gyokerebol:
 
-1. Telepitse az [Elan/Lean eszkozkeszletet](https://lean-lang.org/install/manual/).
-2. A VS Code-ban telepitse a **Lean 4** bovitmenyt (`leanprover.lean4`).
-3. Nyissa meg a projektet es az egyik `.lean` fajlt. A Lean Infoview mutatja
-   az aktualis bizonyitasi celt es a hibahelyeket.
-4. A repo gyokerebol ellenorizze a teljes csomagot:
+```bash
+bash korrekt/verification/aeneas/bootstrap.sh
+bash korrekt/verification/aeneas/verify.sh
+```
+
+Csak a modellcsomag a rogzitett eszkozzel:
 
 ```bash
 cd korrekt/verification
-lake build
+PATH="$PWD/aeneas/.tools/lean/bin:$PATH" lake build
 ```
 
-Az elso Elan-futtatas internetet igenyelhet a rogzitett Lean letoltesehez.
-Ezutan a bizonyitasok ellenorzesehez nem kell SMT-solver vagy halozat.
-A `lake build` nem futtatja a Rust-teszteket. A generalasi eredmenyek a
-gitbol kizart `.lake` mappaba kerulnek.
-
-Az elso ellenorzes a hivatalos Linux x86_64 Lean 4.24.0 kiadassal tortent.
-A fordito csak ideiglenesen, a `/tmp/lean-4.24.0-linux` alatt lett kicsomagolva;
-nem tortent globalis Lean-telepites vagy VS Code-beallitasmodositas.
-Az archivum SHA-256 osszege:
-`b14f5e5159219dd1a1956c3b806813319f5e94ccd5bdfd56f54520609a5bb5ec`.
-Amig ez a konyvtar letezik, a konkret ellenorzes Elan nelkul is ismetelheto:
-
-```bash
-cd korrekt/verification
-/tmp/lean-4.24.0-linux/bin/lake build
-```
+A VS Code **Lean 4** bovitmeny (`leanprover.lean4`) mutatja a bizonyitasi celt.
+A modellcsomagnak nincs Mathlib-fuggosege; az Aeneas-csomag Mathlibet hasznal.
+A `lake build` nem futtatja a Rust-teszteket. A generalasi eredmenyek a gitbol kizart
+`.lake` mappaba kerulnek.
 
 ## Olvasasi sorrend
 
@@ -88,6 +67,7 @@ cd korrekt/verification
 | `Recovery/PropagationChecks.lean` | Ket elemu test, konkret visszaallitas, korrelacio, nulla egyutthato, nem affin szorzat es elemszamkorlat. |
 | `Recovery/RepresentationChecks.lean` | Negativ maradek, azonos testelemek, bitkorlat, elemszam-feltetel es 255 bites reprezentans. |
 | `Recovery/RuleChecks.lean` | Root/Assign/All-But-One/Base-Conv alkalmazasok es a feltetelek elhagyasanak ellenpeldai. |
+| `Recovery/Lookup.lean` | Rendezett n-esek szurese, oszlopvetites, korrelacio, ures tabla kielegithetetlensege. |
 | `Recovery/GlobalChecks.lean` | Teljes tobbcellas modellfutas, korrelalt mintak, kontextuscsere, subset-SAT es cache-invalidation. |
 | `Recovery/Audit.lean` | A Recovery-tetelek tranzitiv axiomafuggosegeinek automatikus ellenorzese. |
 
@@ -309,8 +289,8 @@ hibautvonalak nem ennek a tetelnek a reszei.
 
 ## Kapcsolat a Rust-koddal
 
-Az alabbi megfeleltetes szemantikai tervezesi kapcsolat, nem bizonyitott
-Rust--Lean programfinomitas:
+A kinyert allapotra a `core_refines_model` bizonyitott kapcsolatot ad. A tobbi sor
+szemantikai tervezesi kapcsolat, nem bizonyitott Rust--Lean programfinomitas:
 
 | Lean | Rust (`../src/circuit_analyzer/ucp/`) |
 | --- | --- |
@@ -320,7 +300,7 @@ Rust--Lean programfinomitas:
 | `singleton_cover_is_complete` | `value.rs`: `domain_is_complete` singleton-esete |
 | `two_samples_prove_non_unique` | `privacy_search.rs`: `non_unique_cells` |
 | `covering_hint_is_redundant` | `privacy.rs`: `smt_query_value_facts`; a kikovetkeztetett domainek solveres ujrafelhasznalasa |
-| `SolverSteps.lean` | `privacy.rs`, `privacy_refinement.rs`, `privacy_discovery.rs`: bizonyitott keresesi eredmenyek szemantikaja |
+| `SolverSteps.lean` | `privacy.rs`, `privacy_domain.rs`, `privacy_discovery.rs`: bizonyitott keresesi eredmenyek szemantikaja |
 | `boundedMap`, `boundedCombine`, `expression_domain_sound` | `value.rs`: `map_domain_values`, `combine_domain_values`, `expression_domain_with_optional_modulus` tamogatott esetei |
 | `CommutativeRingLaws.solve_affine` | `value_inference.rs`: `solve_linear_value` inverz alapu testbeli aga |
 | `splitAffine`, `split_affine_sound` | `finite_projection.rs`: `Projection::split`, `scale`, `combine` |
@@ -366,14 +346,12 @@ Rust--Lean programfinomitas:
   A `UcpScalar::Unknown`/`NonZero`, a teljes `value_kind`/Assign elemzo,
   a modulus nelkuli egesz osztas es a tovabbi nemlinearizalo szabalyok,
   kulonosen a BigInt-Mul teljes algoritmusa meg nincsenek verifikalva.
-- Nincs bizonyitott Rust--Lean programfinomitas; a modell es a tenyleges
-  rekurzio, tarolok, normalizalas es korlatkezeles megfeleltetese meg nyitott.
+- A szabalyok modellje es a Rust-kovetkeztetesi modulok megfeleltetese nincs bizonyitva.
 - A szemantikai modell nem bizonyitja a Rust bemeneti adatfolyamat: a kezdeti
   privat witness csak letezest igazolhat, nem lehet recovery-mintak forrasa.
   A `modelEvidence` tenyleges SMT-modell eredetenek es a csak publikus
   recovery-premisszak hasznalatanak implementacios igazolasa kulon feladat.
-- Nincs telepitett es futtatott Charon/Aeneas frontend, es nincs automatikusan
-  a Rust-forrasbol eloallitott Lean-modul. Ez a kovetkezo kulon eszkoz-integracios feladat.
+- A forrashoz kotott bizonyitasok az `aeneas/` csomagban vannak.
 - Uj hipotetikus premisszak mas kontextust jelentenek: regi teljessegi
   bizonyitasok nem vihetok at automatikusan. Erre a `Checks.lean` ellenpeldat tartalmaz.
 
@@ -392,7 +370,4 @@ kiirja az ellenorzott deklaraciok szamat. A fo vegrehajtasi tetel es a
 `complete_from_samples` egyaltalan nem fugg axiomatol; az uj affin es
 kifejezeses tetelek csak a megengedett standard logikai axiomaktol fuggnek.
 
-A dolgozatban vallalhato allitas: **a tamogatott kovetkeztetesi modellek
-es a tobbcellas recovery-allapot felteteles szemantikai helyessege
-Leanben geppel ellenorzott; a teljes
-Rust-implementacio es az osszes kovetkeztetesi szabaly meg nem verifikalt.**
+A dolgozatban vallalhato allitast a [THESIS_CLAIMS.md](THESIS_CLAIMS.md) rogziti.

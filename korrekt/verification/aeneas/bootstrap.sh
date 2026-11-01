@@ -41,4 +41,6 @@ rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustc-d
 export PATH="$tools/lean/bin:$PATH"
 cd "$here/lean"
 lake update
+# Az elore forditott Mathlib-gyorsitotarat hasznalja, ha elerheto; hianyaban a build leforditja.
+lake exe cache get || true
 printf '\nAeneas es a rogzitett fuggoosegek elokeszitve.\n'

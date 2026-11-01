@@ -1,120 +1,72 @@
-# A recovery-bizonyitas nyitott implementacios kotelezettsegei
+# A recovery-bizonyitas szerzodesei
 
-## Mi az uj eredmeny?
+## Az eredmeny
 
-A `privacy.rs` tenylegesen a `recovery_loop.rs::run_recovery` fuggvenyt hivja.
-Ugyanezt a Rust-kodot nyeri ki a Charon es generalja Leanre az Aeneas.
-A `rust_recovery_success_is_sound` a generalt fuggveny sikeres eredmenyerol
-bizonyit allapotinvarians-megorzest, explicit muveleti szerzodesek mellett.
+A korabban nyitott `RecoveryContracts` kotelezettseg most bizonyitott a konkret
+`coreMachine` gepre (`core_machine_contracts`). A gep a generalt `run_recovery`
+fociklust a generalt `merge_established_evidence`, `finish_merge` es
+`try_certify_complete_domains` fuggvenyekkel futtatja, ugyanabban a sorrendben, mint a
+`privacy.rs` `RecoveryDriver` adaptere.
 
-A `rust_recovery_preserves_knowledge` ezt a tetelt a kovetkezo invarianssal
-instancialja: kielegitheto az eredeti Gamma, K tenyei igazak, a domainek
-lefedok, W mintai megvalosithatok, a teljes domainek pontosak, a non-unique
-allitasokhoz ket kulonbozo modell tartozik, E pedig Gamma kovetkezmenye.
+A fo tetel `rust_private_recovery_sound`. Sikeres visszateresnel a teljes allapot
+`CoreSound` invariansa es a `SoundRecovery` riportnezet igaz: K tenyei, a lefedo
+domainek, a W-mintak, a teljessegi jelolesek es a non-unique cimkek az eredeti
+kontextusra helyesek. A dolgozat fogalmaira a `PrivateRecovery.lean` viszi at.
 
-A generikus allapot es a konkret Rust `UcpResult`/`RecoveryEvidence` kozotti
-projekcio megfeleltetese **meg nincs bizonyitva**. Az erre a konkret
-adapterre vonatkozo `RecoveryContracts`-erteket a projekt jelenleg nem
-allitja elo bizonyitassal. Emiatt a teljes `recover_private_inputs`
-implementacios soundnesse meg nem allithato kesz eredmenykent.
+## Amit az orakulum szerzodese kikot
 
-## A muveleti szerzodesek
+Az `OracleContracts` a megmaradt, kodbol nem levezetett kotelezettsegeket nevezi meg:
 
-| Muvelet | Elvart allitas | Konkret Rust-kod, amelyre meg bizonyitani kell |
+| Muvelet | Elvart allitas | Eles Rust-kod |
 | --- | --- | --- |
-| `propagate` | Megorzi a tudasinvarianst; `repeat=false` eseten stabil propagacios allapotot ad. | `propagate_to_fixpoint`, az engine es a teljessegi kanonizalas. |
-| `refresh` | Stabil allapotbol helyes, aktualis E/keresesi tenyeket keszit, megorizve a tudast. | `observe_progress`, `established_search_facts`, SMT-premisszak exportja. |
-| `select` | Nem rontja a tudast vagy a frissesseget; helyes statuszt ad leallaskor. | `shortlist_actions`, `choose_action`, leallasi okok es keretek. |
-| `query` | Megorzi a korabbi tudast; az uj eredmenyhez az eredeti Gamma mellett ervenyes bizonyitek tartozik. | Refine/Discover/FastProbe, solvervalaszok, eredeti kontextus es modellmegosztas. |
-| `merge` | Helyes bizonyitekbol helyes tudast keszit; `changed=false` nem hagy el kotelezo propagaciot. | `remember_feasible_samples`, `merge_established_results`, `certify_complete_domains`, non-unique frissites. |
+| `engine` | A K/Delta valtozasa `EngineStep` lepesek veges sorozata. | `engine.rs::run_cached`, a kovetkeztetesi modulok |
+| `refresh` | A keresesi premisszak az eredeti kontextus kovetkezmenyei. | `observe_progress`, `established_search_facts` |
+| `select` | Nem rontja a keresesi premisszakat, helyes leallasi statuszt ad. | `shortlist_actions`, `choose_action` |
+| `query` | Az eredmenyre teljesul az `EvidenceClaim`. | `refine_domain`, `discover_domain`, cvc5 |
+| `admin` | A nem szemantikus adminisztracio megorzi a premisszakat. | `merge_established_results` retry- es korlatkezelese |
 
-Ezek a szerzodesek panikmentes reszleges specifikaciok: a Rust `Err`
-megengedett, de nem jelent sikeres recovery-riportot. A vegtelen futast
-nem zarjak ki. A teljes terminaciohoz a konkret muveletek terminaciojat,
-valamint a keretekbol vagy csokkeno mertekbol adodo ciklusleallast is
-kulon igazolni kell.
+Az `EvidenceClaim` a beolvasztando eredmeny bizonyitasi kotelezettsege: a mintak
+megvalosithatok, a domain lefedo es kanonikus, a unique es non-unique cimkek igazoltak.
+A `fast_probe_evidence` es a `refinement_evidence` megmutatja, hogy helyes SAT- es
+UNSAT-valaszokbol ez kovetkezik.
 
-A beolvasztas egy konkret resze mar forraskodbol bizonyitott:
-`facts.rs::mark_unique` es az inicialis jeloles. A
-`rust_assign_then_insert_is_sound` a tenyleges Assign-eredmenyt es a
-tenyleges K-frissitest kapcsolja ossze. Ez nem helyettesiti a teljes
-`merge` szerzodest: a teljes Delta/W es a tobbi mezofrissites meg nyitott.
+Az `EngineStep` negy lepese: generalt Assign, generalt `mark_domain` igazolt domainnel,
+singletonbol egyertelmuseg, valamint igazolt egyertelmusegi szabaly. A
+`all_but_one_rule_evidence`, `linear_system_rule_evidence` es
+`base_conversion_rule_evidence` modellszintu bizonyitekot ad a szabalyokhoz.
+A lookup-szabaly modellje a `Recovery/Lookup.lean`.
 
-A `Proofs/FiniteDomains.lean` a tenyleges `finite_set` ciklusra
-terminaciot es teljes-bemenet-megorzest bizonyit. A sikeres some-domain
-nem lehet csak a feldolgozott prefix. A konkret konyvtari iteratorok
-modelljeire is igazolja a bejarasi szerzodest. Az `intersect` osszes
-enum-agara a sikeres eredmeny pontosan a bemeneti halmazok metszete.
+## Mit nem bizonyit a tetel
 
-A `Proofs/DomainMerge.lean` a tenyleges `mark_domain` lefedesmegorzeset,
-a tobbi cella valtozatlansagat, a false eredmenynel teljes valtozatlansagot,
-es a korabbi helyes teljessegi igazolasok megorzeset bizonyitja.
-A complete agban a bejovo domain vizsgalata nelkul valtozatlan marad az allapot.
-Az uj teljessegi jeloles eloallitasa (`try_mark_complete_from_samples`) meg
-nincs teljesen bizonyitva. A konkret `RecoveryDriver.merge` osszes frissitesenek
-egyuttes invariansmegorzese ettol meg szinten nyitott.
+- A `run_cached` valoban csak `EngineStep` lepeseket hajt vegre. A vezerles nem kinyerheto.
+- A kovetkeztetesi modulok kodja a modellszintu teteleknek megfelel.
+- A `RecoveryDriver` a `coreMachine` szerint mukodik. Ez kezi ellenorzes.
+- A cvc5 valaszai es az SMT-kodolas helyesek.
+- A Halo2-kinyeres hu a kapcsolashoz.
+- A futas terminal.
 
-A beolvasztasi tetel kozos egesz reprezentansokra vonatkozik
-(`RepresentativeCover`). A `CanonicalMerge.lean` kanonikus bemeneti
-domainek mellett most mar modulo-lefedesmegorzest is bizonyit a generalt
-mark_domain kodra. A normalizalo hivashelyek invariansat meg igazolni kell;
-a puszta modulo-lefedes kanonikussag nelkul nem eleg.
-A HashMap/BTreeSet es Iterator modellek helyessege tovabbra is
-elfogadott konyvtari szerzodes, nem a standard konyvtar implementacios bizonyitasa.
-
-A `value.rs` konkret `known_value`, `exact_value`, `is_singleton`,
-`domain_is_complete`, `for_hypothetical_reasoning` es `bounded_value`
-fuggvenyeit is kinyeri. A `Proofs/DomainState.lean` ezeken bizonyitja:
-
-- Lefedes es kezdeti SAT mellett a visszaadott exact ertek kotelezo.
-- A complete-lekerdezes pontosan az Exact alaktagot vagy a tarolt
-  explicit igazolast hasznalja; hianyzo domain nem lesz complete.
-- Az explicit teljessegi igazolasok helyesseget feltetelezve a
-  complete-lekerdezes valoban a teljes megvalosithato ertekhalmazt jeloli.
-- A hipotetikus masolat valtozatlan domaineket es ures teljessegi
-  jeloleshalmazt keszit. Erosebb kontextusban a lefedes megmarad;
-  a tobbjeloltes domain nem orokli az eredeti megvalosithatosagi igazolast.
-- A bitkorlat megorzott erteket vagy None-t ad, soha nem csonkolt erteket.
-
-Ez a tenyleges tarolo olvasasi es masolasi kodjanak bizonyitasa,
-nem a `try_mark_complete_from_samples` teljes irasi muvelete. A
-`CompletionFlagsSound` az utobbi muveletre meg bizonyitando invarians,
-nem uj axioma. A HashMap/BTreeSet-klonozas es a BigInt `bits()`
-konyvtari modelljeinek Rust-husege tovabbra is bizalmi feltetel.
-
-A korabbi Iterator-kinyeresi hiba a `cloned()` azonosszemantikaju
-`map(|value| value.clone())` alakjaval es a dokumentalt traitmezofilterrel
-megkerulheto. A teljes mark_domain torzs es a hivasgrafja most kinyert kod;
-a `mergeDomainTail` bizonyitasbeli kiemelesre csak Lean altal ellenorzott
-definicios egyenloseggel lep at, nem feltetelezett helyettesitessel.
-
-A `normalize_field_value` teljes kivalasztott torzse is kinyert es
-megfelelesi/soundness-tetelekkel ellenorzott. A kulso BigInt-muveletek
-modelljere epul; nem a num-bigint implementacioja bizonyitott.
-
-A teljessegjeloles kinyeresi akadalyat a vec! makro helyetti biztonsagos
-vektorepites es a diagnosztikai wrapper levalasztasa oldja fel. Az eles
-`try_mark_complete_from_samples` torzse/ciklusa most generalt kod.
-A `CertificationControl.lean` konkret hiba- es jeloltfrissitesi lepeseit
-ellenorzi, de a teljes ciklus mintalefedesi invariansa meg nyitott.
-A normalizalt halmazok reszhalmaz/elemszam kriteriumanak szemantikai tetele
-kesz; annak alkalmazasat a teljes generalt ciklusra meg bizonyitani kell.
+A `Headroom` premissza kizarja, hogy egy mintahalmaz merete tullepje a platform `usize`
+tartomanyat. A korlatlan Lean-modellben ez kulon feltetel, a fizikai memoriaban nem fordulhat elo.
 
 ## Mit nem helyettesit az audit?
 
-Az audit megakadalyozza a `sorryAx`, sajat axiomak es `native_decide`
-rejtett hasznalatat. Nem bizonyitja a Rust-konyvtari modellek huseget,
-nem igazolja a Halo2--UCP kinyerest, es nem zarja be a fenti szerzodeseket.
+Az audit a `sorryAx`, a sajat axiomak es a `native_decide` rejtett hasznalatat zarja ki.
+Nem bizonyitja a konyvtari modellek huseget, es nem zarja be az orakulum szerzodeset.
 A forrashash az aktualis fajlverziot rogziti, nem onallo helyessegbizonyitas.
 
 ## Futtatott ellenorzesek
 
-- Charon/Aeneas kinyeres a tenyleges szabalyokbol es recovery-fociklusbol.
-- Lean-build es tranzitiv axiomaaudit.
-- A recovery-ciklus sajat sorrend-, ujrainditas- es hibaagtesztjei.
-- A meglevo privacy-regressziok az eles adapterrel.
+- Charon/Aeneas kinyeres az eles forrasbol, `verify.sh`.
+- Lean-build es tranzitiv axiomaaudit mindket csomagon.
+- Nem-uressegi pelda: `example_run` a generalt kodot tenylegesen lefuttatja.
+- Mutacios proba: a `recovery_core.rs`, `value.rs` es `expr.rs` szandekosan elrontott
+  valtozatain a bizonyitasok vagy a kinyeres-ellenorzes elbukott.
+- A meglevo UCP-regressziok egyszalu futtatassal: `cargo test -p korrekt --lib ucp:: -- --test-threads=1`.
 
-Az eredeti teljes fuggveny kozvetlen kinyeresi probaja a pinned Aeneasban
-`Continue to outer loops are not supported yet` hibaval allt meg;
-iterator/closure tipusoknal tovabbi frontend-hibak is jelentkeztek.
-Ezek miatt tortent a kozos, elesben is hasznalt vezerlomodul kiemelese.
+## A kinyeres korlatai
+
+A pinned Aeneas az eredeti `recover_private_inputs` kozvetlen kinyereseben a
+`Continue to outer loops are not supported yet` hibaval allt meg, a `value_inference.rs`
+kodjan pedig a beagyazott return, a korai kilepes es a fuggvenytipusok miatt.
+Ezert kerult a fociklus a `recovery_loop.rs`, a beolvasztas a `recovery_core.rs` modulba.
+Az eles adapter ugyanezt a kodot hivja.
