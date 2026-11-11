@@ -1,543 +1,647 @@
-# Korrekt
+# halo2-analyzer fork: Korrekt + private-value recovery
 
-## Prerequisites
+This repository is a fork of [Quantstamp's halo2-analyzer (Korrekt)](https://github.com/quantstamp/halo2-analyzer).
+It analyzes [Halo2](https://github.com/zcash/halo2) circuits in two ways:
 
-Before you begin, ensure you have Installed CVC5 FOR Finite Field.
+1. **Private-value recovery (this fork).** You give it a circuit, the public
+   (instance) values an observer can see, and the secret (advice) cells you care
+   about. It reports, per secret cell, whether the public values **determine it
+   exactly**, restrict it to a **finite set of candidates**, or leave it
+   **undetermined**. It combines a fast propagation engine (UCP) with the
+   [cvc5](https://cvc5.github.io/) SMT solver over finite fields.
+2. **The original Korrekt checks.** Unused gates, unused columns, unconstrained
+   cells and underconstrained circuits. The original Korrekt decides
+   underconstrainedness with SMT alone: it encodes the whole circuit for the
+   solver and asks for a second witness with the same public values. It has no
+   propagation step. **For exactly this problem, deciding whether the public
+   values determine the witness, this fork adds the UCP engine:** propagation
+   runs first, and SMT is only called for what propagation leaves open.
 
-## Installing CVC5 FOR Finite Field
+You do not need to modify this repository to analyze your own circuit. You
+create a small Rust crate next to it, depend on the `korrekt` library, and run
+it. Section 4 walks through that from start to finish.
 
-These are the steps to install CVC5 on MacOS (probably transferable to Linux).
-Instructions taken from: <https://github.com/cvc5/cvc5/blob/main/INSTALL.rst>
+---
 
-1. Clone CVC5 from official repo
+## Contents
 
-```
-git clone https://github.com/cvc5/cvc5
-```
+1. [Requirements](#1-requirements)
+2. [Install cvc5 with finite-field support](#2-install-cvc5-with-finite-field-support)
+3. [Clone, build and smoke-test](#3-clone-build-and-smoke-test)
+4. [Analyze your own circuit](#4-analyze-your-own-circuit)
+5. [Reading the report](#5-reading-the-report)
+6. [Tuning and limits](#6-tuning-and-limits)
+7. [Troubleshooting](#7-troubleshooting)
+8. [Thesis examples and formal verification](#8-thesis-examples-and-formal-verification)
+9. [Repository layout](#9-repository-layout)
+10. [How it works](#10-how-it-works)
 
-You can also download the source code from <https://github.com/cvc5/cvc5/releases/tag/cvc5-1.0.5> but using the repo is recommended.
-2. Install all dependencies and set proper ENV variables. See [dependencies](#dependencies) section below
-3. Run
+---
 
-```
-./configure.sh —cocoa —auto-download
-```
+## 1. Requirements
 
-4. The do:
+| What | Why | Tested with |
+| --- | --- | --- |
+| Linux | The only tested platform | Linux, GCC 15 |
+| `git` | Clone this repo and the Git dependencies | |
+| [rustup](https://rustup.rs/) | `rust-toolchain.toml` selects a **nightly** toolchain automatically | `rustc 1.97.0-nightly (2026-05-12)` |
+| `cvc5` **built with CoCoA** (finite-field support) on your `PATH` | Every SMT query uses the finite-field theory | cvc5 1.3.x (`main`) |
+| Network access for the first build | Halo2 and a few other dependencies are fetched from Git | |
 
-```
+`rust-toolchain.toml` pins only the `nightly` channel, not a specific date. If a
+future nightly fails to build the project, pin a dated nightly from around the
+tested date in that file (`channel = "nightly-YYYY-MM-DD"`).
+
+---
+
+## 2. Install cvc5 with finite-field support
+
+The cvc5 binaries you get from package managers are usually built **without**
+CoCoA, which means no finite-field support. Build it from source.
+
+**Ubuntu / Debian**
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake git python3 python3-venv python3-pip libgmp-dev m4
+
+git clone https://github.com/cvc5/cvc5.git
+cd cvc5
+./configure.sh --auto-download --cocoa --gpl --poly
 cd build
-make -j4
-make check
-sudo make install
+make -j"$(nproc)"
+sudo make install          # installs /usr/local/bin/cvc5
 ```
 
-## Dependencies
+Notes:
 
-- Python 3.9 (you might need to install pip or update it):
+- `--cocoa` enables finite fields. CoCoA is GPL-licensed, so cvc5 requires
+  `--gpl` together with it.
+- `--auto-download` fetches and patches CoCoA and the other dependencies, and
+  installs the Python build modules (`tomli`, `pyparsing`) in a virtualenv.
+- If CMake cannot find GMP, point it at your installation with
+  `--dep-path=/path/to/prefix`, or export `GMP_LIB=/path/to/libgmp.a`.
+- Full upstream instructions: <https://github.com/cvc5/cvc5/blob/main/INSTALL.rst>.
 
-```
-brew install python@3.9
-python3.9 -m pip install toml 
-python3.9 -m pip install pyparsing
-```
-
-- Java. Go to the following link and install the latest Java
-<https://www.oracle.com/java/technologies/downloads/>
-
-- Necessary for cocoa
-
-```
-brew install gmp
-brew install libpgm
-```
-
-- Now that you have `gmp` installed you need to tell CVC5 where to find it. The easiest way is through an env variable. If you install gap via homebrew, the path will look something like the following
-
-```
-export GMP_LIB=/opt/homebrew/Cellar/gmp/6.2.1_1/lib/libgmp.a
-```
-
-- If you’re having trouble finding it you can search for it with:
-
-```
-find /usr /opt -name "libgmp.a"
-```
-
-## Feature Flags and Halo2 Versions
-
-This project leverages feature flags to enable support of different versions of the Halo2. Each feature flag corresponds to a specific version of Halo2, allowing for flexible and targeted compilation.
-
-### Using Feature Flags
-
-Feature flags can be managed directly via the `Cargo.toml` file or through command line options when building or testing.
-
-#### Default Feature Flags
-
-- **Default Configuration:**
-  By default, the `use_zcash_halo2_proofs` feature is enabled in the `Cargo.toml`.
-
-- **Changing the Default Feature Flag:**
-  There are two ways for changing the default feature flag related to the Halo2 version:
-
-    1. **Modifying the `Cargo.toml` File:**
-       To change the default feature flag used in builds and tests, you can modify the `Cargo.toml` file. Update the `[features]` section by replacing `use_zcash_halo2_proofs` with the feature flag of your choice. This will set a new default feature for the project, affecting all builds and tests unless overridden in the command line.
-
-    2. **Disabling Default Features via Command Line:**
-       You can disable default features in command line or in cargo toml.
-       For disabling the default in command line and specifying your desired flag:
-
-       ```bash
-       cargo build --no-default-features --features your_custom_feature
-       cargo test --no-default-features --features your_custom_feature
-       ```
-
-       By removing the default flag from `crgo.toml` the commands will be:
-
-       ```bash
-       cargo build --features your_custom_feature
-       cargo test --features your_custom_feature
-       ```
-
-        Replace `your_custom_feature` with the appropriate feature flag. This ensures that only the specified feature is active during the build or test process.
-
-### Managing Halo2 Patches
-
-For certain versions, multiple patches may be available. It's important to ensure that only the relevant patch is enabled to avoid conflicts. This is managed by commenting out or uncommenting the appropriate lines in the Cargo.toml file under the [patch] section.
-
-## How to run
-
-1. Go to "korrekt"
-
-2. Run `cargo run` for the default feature flag (`use_zcash_halo2_proofs`).
-
-    ```bash
-    cargo run -- [OPTIONS]
-    ```
-
-    For other versions of halo2 run `cargo run` with relevant halo2 version feature flag:
-
-    ```bash
-    cargo run --no-default-features --features use_pse_halo2_proofs -- [OPTIONS]
-    cargo run --no-default-features --features use_axiom_halo2_proofs -- [OPTIONS]
-    cargo run --no-default-features --features use_scroll_halo2_proofs -- [OPTIONS]
-    cargo run --no-default-features --features use_pse_v1_halo2_proofs -- [OPTIONS]
-    ```
-
-Replace `[OPTIONS]` with the desired options as described below.
-
-### Options
-
-- `-p, --profile <PROFILE>`: Select a predefined configuration profile. Available profiles include:
-  - `specific_inline`
-  - `random_inline`
-  - `random_uninterpreted`
-  - `random_interpreted`
-
-- `-t, --type <TYPE>`: Specify the type of analysis to be performed. Available types include:
-  - `unused_gates` (`ug`)
-  - `unused_columns` (`uc`)
-  - `unconstrained_cells` (`ucc`)
-  - `underconstrained_circuit` (`undcc`)
-
-- `-l, --lookup <METHOD>`: Set the lookup method. This option is required for the `underconstrained_circuit` type. Available methods include:
-  - `uninterpreted` (`u`)
-  - `interpreted` (`i`)
-  - `inline` (`in`)
-
-- `-v, --verification <METHOD>`: Specify the verification method. This option is required for the `underconstrained_circuit` type. Available methods include:
-  - `specific` (`s`)
-  - `random` (`r`)
-
-- `-i, --iterations <COUNT>`: Specify the number of iterations for random input verification. This option is only needed if the verification method is set to `random`.
-
-## How to test
-
-1. Go to "korrekt"
-
-2. Run `cargo test` for the default feature flag (`use_zcash_halo2_proofs`).
-
-    ```bash
-    cargo test -- --test-threads=1
-    ```
-
-   For other versions of halo2 run `cargo test` with relevant halo2 version feature flag:
-
-    ```bash
-    cargo test --no-default-features --features use_pse_halo2_proofs -- --test-threads=1
-    cargo test --no-default-features --features use_axiom_halo2_proofs -- --test-threads=1
-    cargo test --no-default-features --features use_scroll_halo2_proofs -- --test-threads=1
-    cargo test --no-default-features --features use_pse_v1_halo2_proofs -- --test-threads=1
-    ```
-
-## For linting
-
-1. Go to "korrekt"
-2. `cargo clippy --all-targets --all-features -- -D warnings`
-
-## For Formatting
-
-1. Go to "korrekt"
-2. `cargo fmt --`
-
-## For Benchmark
-
-Part of our benchmarking involves comparing the performance of analyzer version 2 with version 1. To enable this comparison, version 2 supports the exact version of Halo2 that version 1 supports, activated by the `use_pse_v1_halo2_proofs` feature flag.
-
-### Setup Instructions
-
-To run the benchmarks successfully, follow these steps:
-
-1. **Update Dependency Features:** Open the `Cargo.toml` file in the `benchmarks` directory, and update the `features` for `korrekt_V2`:
-
-    ```bash
-    korrekt_V2 = { path = "../korrekt", package = "korrekt", features = ["use_pse_v1_halo2_proofs"] }
-    ```
-
-2. **Remove Default Feature:** Ensure that there are no default feature flag set for halo2 dependency in the `Cargo.toml` file of the `korrekt`.
-
-    ```bash
-    [features]
-    default = []
-    use_zcash_halo2_proofs = ["zcash_halo2_proofs"]
-    use_pse_halo2_proofs = ["pse_halo2_proofs"]
-    use_axiom_halo2_proofs = ["axiom_halo2_proofs"]
-    use_scroll_halo2_proofs = ["scroll_halo2_proofs"]
-    use_pse_v1_halo2_proofs = ["pse_v1_halo2_proofs"]
-    ```
-
-3. **Activate Relevant Patch:** In the `Cargo.toml` file of the `korrekt`, ensure the relevant patch is active.
-
-    ```bash
-    [patch."https://github.com/privacy-scaling-explorations/halo2.git"]
-    pse_v1_halo2_proofs = { git = "https://github.com/Analyzable-Halo2/v1-halo2.git", package = "halo2_proofs"}
-    ```
-
-### Running Benchmarks
-
-Once you've made these updates, navigate to the benchmarks directory and for all available benchmarks run:
+**Verify:**
 
 ```bash
-cargo bench
+cvc5 --version | head -1
+cvc5 --show-config | grep cocoa      # must print: cocoa : yes
 ```
 
-Multiple benchmarks are available:
+---
 
-- benchmark_bit_decomp
-- benchmark_fibo_v1
-- benchmark_fibo_v2
-
-For running a specific benchmark run:
+## 3. Clone, build and smoke-test
 
 ```bash
-cargo bench --bench NAME_OF_BENCHMARK
+git clone https://github.com/gaborkoncz73/halo2-analyzer-fork.git
+cd halo2-analyzer-fork
+
+cargo build -p korrekt                # first build fetches Git dependencies
+cargo test -p korrekt --lib demo_risk_audit -- --nocapture --test-threads=1
 ```
 
-Replace `NAME_OF_BENCHMARK` with one of the available benchmarks.
+The test command should finish with output similar to:
 
-## How it works
-
-### Intro to Halo2
-
-When constructing a Halo2 relation, it consists of:
-
-- Gates: a "small" number of (parameterized) constraints between cells.
-- Regions: a logical collection of cells with a set of enabled gates (as indicated by the "selectors").
-
-More on this below.
-
-#### Halo2 "Gates"
-
-Calling the Halo2 "Gates" is kind of a misnomer, for multiple reasons:
-
-##### They are very powerful
-
-Halo2 "gates" are very powerful: they can enforce any number of arbitrary non-deterministic relations.
-For instance, the following can be enforced by a single Halo2 gate:
-
-```
-a * b * c != 0
+```text
+test result: ok. 5 passed; 0 failed; 2 ignored; ...
 ```
 
-Using the polynomial:
+That run calls cvc5, so a passing result confirms that Rust, the dependencies
+and the solver all work. Always pass `--test-threads=1` to solver-backed
+tests: the analyzer writes its SMT queries to fixed file names under
+`src/output/`, so parallel runs would overwrite each other's files.
 
-```
-f(a,b,c,d) := (a * b * c) * d - 1
-```
+---
 
-Which has an assignment for `d` st. `f(a,b,c,d) = 0` iff `a * b * c != 0`.
-Note that the "gate" above has no "output wires".
-Note that `d` is not really "an input": it is part of the witness, but in the example above, it cannot be the output of another gate or part of the statement: it's a "gate hint".
+## 4. Analyze your own circuit
 
-##### The circuit topology is restricted
+The example below runs as written. It contains a small circuit with three
+secrets (`a`, `b`, `x`) and three public outputs (`a + b`, `a - b`, `x²`). From
+the public outputs, `a` and `b` can be recovered exactly. `x` can only be
+narrowed down to `{5, -5}`. To analyze your own circuit, replace the circuit
+section and adjust steps (a)–(d), as described in [4.5](#45-adapting-it-to-your-circuit).
 
-When describing a "circuit" you can usually wire any output to any input.
-This is also possible in Halo2, indeed, the original PlonK paper describes a "universal gate" and a permutation check which enables this (in Halo2 this corresponds to "enabling equality" on the 3 input/output columns).
-However, often in Plonkish arithmetization the layout is intentionally restricted: allowing some subset of the wires (columns) to have arbitrary wiring
-and restricting the rest to accessing other cells defined only locally.
-This is done for efficiency.
-An example of when this is useful is the repeated application of a function:
+### 4.1 Create a crate next to the clone
 
-```
-y = f(f(f(x))
-```
-
-Which can be described as:
-
-```
-z1 = f(x)
-z2 = f(z1)
-y  = f(z2)
+```bash
+cd ..                                            # the directory that contains halo2-analyzer-fork/
+cargo new --vcs none my-circuit-audit
+cd my-circuit-audit
+cp ../halo2-analyzer-fork/rust-toolchain.toml .  # use the same nightly toolchain
 ```
 
-Note that every application of "f" only accesses the output from the previous application.
-Defining a "gate" implementing "f" taking as "input" the "output register" of the previous row,
-enables computing repeated applications of "f" without wiring checks.
-When "f" is, for instance, the round function of a hash function, a single application of "f" is never used, instead large numbers of consecutive rows will implement the full call to the compression function.
+### 4.2 `Cargo.toml`
 
-#### How to mess it up
+Replace the generated file with:
 
-As you can probably see there is ample opportunity to screw this up, e.g.
+```toml
+[package]
+name = "my-circuit-audit"
+version = "0.1.0"
+edition = "2021"
+publish = false
 
-- Accidentally choosing the wrong offset when defining/using a gate.
-- Forgetting to enable a selector, or enabling the wrong selector.
+# Keeps this crate standalone, even if it is placed inside another workspace.
+[workspace]
 
-These pit-falls will lead to soundness (not completeness) issues: the proof will still generate and will still be valid.
-This problem is much more pronounced with Halo than previous systems e.g. bellman, since witness generation (completeness) is completely independent of constraints (soundness).
+[dependencies]
+korrekt = { path = "../halo2-analyzer-fork/korrekt" }
+num-bigint = "0.4"
+anyhow = "1"
 
-### Extracting a description of the relation from Halo2
+# Required. The analyzer needs an instrumented Halo2 build and halo2curves fork.
+# Without these patches, korrekt does not compile outside its own workspace.
+[patch."https://github.com/zcash/halo2.git"]
+halo2_proofs = { git = "https://github.com/Analyzable-Halo2/zcash-halo2.git", rev = "7fc5e14d53c19cc4e09f0af2ed4b87440e1bb4fb" }
 
-As outlined above, Halo2 first defines a number of "gates" (which are enabled by selectors), each such "gate" consists of one/more polynomials which can be enforced over regions. Korrekt works by collecting all the gates and regions using a custom implementation (`AnalyticLayouter` of the `Layouter` trait, which normally is responsible for "place-and-route" (similar to the role of PnR in HDLs is responsible for mapping the regions to rows to minimize the number of required rows to enforce the constraints: essentially it solves a packing problem).
-
-In our case, the `Layouter` will simply record the details of every region.
-
-Since we never need to actually generate a proof the actual PnR is not needed.
-
-### Abstractly Evaluating Gates across Regions
-
-At this point we have for every region:
-
-- The set of enabled selectors.
-- The assigned cells (but with dummy values)
-
-And the gates:
-
-- A set of polynomials for each gate.
-
-If the "circuit" is satisfied, then every polynomial of every gate should vanish over every region: for gates which are not "enabled" the polynomial is `0 * g(<witness>)`, since the "selector" variable is set to 0, i.e. the gate polynomial is:
-
-```
-f(<witness>, selector) = selector * g(<witness>)
+[patch."https://github.com/privacy-scaling-explorations/halo2curves.git"]
+halo2curves = { git = "https://github.com/quantstamp/halo2curves.git", rev = "2ef5a9a60e02f4ae567e24725a5b27b2dce1bc07" }
 ```
 
-However, since we do not have a witness we can't evaluate the gate polynomials (also, doing so would always yield 0).
-
-What we do have is the selectors and constants which enables us to *abstractly evaluate* every polynomial of every gate in every region for *concrete* values of selector and constant free variables.
-
-An example is in order:
-
-Suppose we have the following polynomial:
-
-```
-f(s,a,b,C) := s * (C * a - b)
-```
-
-The variables have the following interpretations:
-
-- `s` is the "selector" (determining if the "gate" is enabled), if it is 0 then the polynomial is always 0.
-- `a` is the "input" of the gate.
-- `b` is the "output" of the gate.
-- `C` is a parameter used to configure the gate: a constant in the circuit.
-
-The "gate" "computes" the following relation: `b = C * a` i.e. it is a "multiplication by constant" gate.
-
-After running synthesis with the `AnalyticalLayouer` we have assignments for `s` and `C` (but not for `a` and `b`),
-as such we cannot fully evaluate `f` but we can determine if it is identically zero, i.e. zero for *every* `a` and `b`.
-We could so so by enumerating assignments for `a` and `b`, which would be slow and accurate, by using a SAT solver, which would be much faster and accurate, or as presently done using abstract interpretation, which is blazingly fast at the cost of accuracy i.e. may yields *false negatives*:
-may return that `f` is not identically zero, when in fact it is.
-
-We introduce the following type:
+### 4.3 `src/main.rs`
 
 ```rust
-pub enum AbsResult {
-    Variable,
-    NonZero,
-    Zero,
+use korrekt::{
+    circuit_analyzer::{
+        analyzable::Analyzable,
+        analyzer::Analyzer,
+        halo2_proofs_libs::*,
+        ucp::{
+            cell::CellId,
+            privacy::{analyze_private_recoverability_with_witness, PrivacyAnalysisOptions},
+            privacy_validation::validate_private_recovery_report,
+        },
+    },
+    io::analyzer_io_type::{
+        AnalyzerInput, AnalyzerType, LookupMethod, VerificationInput, VerificationMethod,
+    },
+};
+use num_bigint::BigInt;
+use std::collections::BTreeMap;
+
+// ============================================================================
+// 1. YOUR CIRCUIT  (replace this part with your own circuit)
+//    Secrets: a, b, x.   Public: a + b, a - b, x * x.
+// ============================================================================
+#[derive(Clone, Debug)]
+pub struct MyConfig {
+    a: Column<Advice>,
+    b: Column<Advice>,
+    sum: Column<Advice>,
+    diff: Column<Advice>,
+    instance: Column<Instance>,
+    s_lin: Selector,
+    s_sq: Selector,
 }
-```
 
-Which represents a polynomial which is either:
+#[derive(Default)]
+pub struct MyCircuit {
+    a: Value<Fr>,
+    b: Value<Fr>,
+    x: Value<Fr>,
+}
 
-1. Something (probably depending on the witness).
-2. Definitely *not zero* (for any witness).
-3. Definitely *zero* (for any witness).
+impl Circuit<Fr> for MyCircuit {
+    type Config = MyConfig;
+    type FloorPlanner = SimpleFloorPlanner;
 
-To see how to generate this consider the simples possible case of a constant:
+    fn without_witnesses(&self) -> Self {
+        Self::default()
+    }
 
-```rust
-pub fn eval_abstract<F: FieldExt>(expr: &Expression<F>, selectors: &HashSet<Selector>) -> AbsResult {
-    match expr {
-        Expression::Constant(v) => if v.is_zero().into() { AbsResult::Zero } else {  AbsResult::NonZero },
-```
+    fn configure(meta: &mut ConstraintSystem<Fr>) -> MyConfig {
+        let [a, b, sum, diff] = [(); 4].map(|_| meta.advice_column());
+        let instance = meta.instance_column();
+        meta.enable_equality(sum);
+        meta.enable_equality(diff);
+        meta.enable_equality(instance);
+        let s_lin = meta.selector();
+        let s_sq = meta.selector();
+        meta.create_gate("sum and difference", |meta| {
+            let s = meta.query_selector(s_lin);
+            let a = meta.query_advice(a, Rotation::cur());
+            let b = meta.query_advice(b, Rotation::cur());
+            let sum = meta.query_advice(sum, Rotation::cur());
+            let diff = meta.query_advice(diff, Rotation::cur());
+            vec![
+                s.clone() * (a.clone() + b.clone() - sum),
+                s * (a - b - diff),
+            ]
+        });
+        meta.create_gate("square", |meta| {
+            let s = meta.query_selector(s_sq);
+            let x = meta.query_advice(a, Rotation::cur());
+            let y = meta.query_advice(sum, Rotation::cur());
+            vec![s * (x.clone() * x - y)]
+        });
+        MyConfig { a, b, sum, diff, instance, s_lin, s_sq }
+    }
 
-The function of the code is pretty self-explanatory. We can do a similar thing for the selectors:
-
-```rust
-Expression::Selector(selector) => {
-    match selectors.contains(selector) {
-        true => AbsResult::NonZero,
-        false => AbsResult::Zero
+    fn synthesize(&self, c: MyConfig, mut layouter: impl Layouter<Fr>) -> Result<(), Error> {
+        let (sum, diff) = layouter.assign_region(
+            || "secret pair",
+            |mut region| {
+                c.s_lin.enable(&mut region, 0)?;
+                region.assign_advice(|| "a", c.a, 0, || self.a)?;
+                region.assign_advice(|| "b", c.b, 0, || self.b)?;
+                let sum = region.assign_advice(|| "a+b", c.sum, 0, || self.a + self.b)?;
+                let diff = region.assign_advice(|| "a-b", c.diff, 0, || self.a - self.b)?;
+                Ok((sum, diff))
+            },
+        )?;
+        let square = layouter.assign_region(
+            || "secret root",
+            |mut region| {
+                c.s_sq.enable(&mut region, 0)?;
+                region.assign_advice(|| "x", c.a, 0, || self.x)?;
+                region.assign_advice(|| "x*x", c.sum, 0, || self.x * self.x)
+            },
+        )?;
+        layouter.constrain_instance(sum.cell(), c.instance, 0)?;
+        layouter.constrain_instance(diff.cell(), c.instance, 1)?;
+        layouter.constrain_instance(square.cell(), c.instance, 2)?;
+        Ok(())
     }
 }
-```
 
-However for the "advice" (wire assignments), we have to throw up our hands and output "Variable" (meaning it could be anything):
+// ============================================================================
+// 2. THE AUDIT
+// ============================================================================
+/// Same `k` you would pass to MockProver (the circuit has 2^k rows).
+const K: u32 = 4;
 
-```rust
-Expression::Advice { .. } => AbsResult::Variable,
-```
+fn main() -> anyhow::Result<()> {
+    // (a) One honest witness and the public values it produces.
+    let circuit = MyCircuit {
+        a: Value::known(Fr::from(7)),
+        b: Value::known(Fr::from(3)),
+        x: Value::known(Fr::from(5)),
+    };
+    let public: Vec<u64> = vec![10, 4, 25]; // instance column 0, rows 0, 1, 2
 
-We can also calculate with these, e.g. a negation does not affect the zero/non-zero status:
+    // (b) Sanity check: the witness must satisfy the circuit with these public values.
+    let instance = public.iter().map(|v| Fr::from(*v)).collect();
+    MockProver::run(K, &circuit, vec![instance])?.assert_satisfied();
 
-```rust
-Expression::Negated(expr)  => {
-    let res = eval_abstract(expr, selectors);
-    return res
-}
-```
+    // (c) What the attacker sees. Keys are "I-<instance column>-<row>".
+    let mut observations = AnalyzerInput {
+        verification_method: VerificationMethod::Specific,
+        verification_input: VerificationInput::new(
+            public
+                .iter()
+                .enumerate()
+                .map(|(row, v)| (format!("I-0-{row}"), BigInt::from(*v))),
+            1,
+        ),
+        lookup_method: LookupMethod::InlineConstraints,
+    };
 
-While a sum operates as follows:
-
-```rust
-Expression::Sum(left, right) => {
-    let res1 = eval_abstract(left, selectors);
-    let res2 = eval_abstract(right, selectors);
-    match (res1, res2) {
-        (AbsResult::Variable, _) => AbsResult::Variable, // could be anything
-        (_, AbsResult::Variable) => AbsResult::Variable, // could be anything
-        (AbsResult::NonZero, AbsResult::NonZero) => AbsResult::Variable, // could be zero or non-zero
-        (AbsResult::Zero, AbsResult::Zero) => AbsResult::Zero,
-        (AbsResult::Zero, AbsResult::NonZero) => AbsResult::NonZero,
-        (AbsResult::NonZero, AbsResult::Zero) => AbsResult::NonZero,
+    // (d) Which advice cells are secret? Found by region name + advice column index.
+    let layout = Analyzable::<Fr>::config_and_synthesize(&circuit, K)?;
+    let mut targets = BTreeMap::new();
+    for region in &layout.regions {
+        for (column, row) in region.cells.iter() {
+            if *column.column_type() != Any::Advice {
+                continue;
+            }
+            // Uncomment to see every advice cell of your circuit:
+            // println!("region {:?}: advice column {}, row {}", region.name, column.index(), row);
+            let label = match (region.name.as_str(), column.index()) {
+                ("secret pair", 0) => "a",
+                ("secret pair", 1) => "b",
+                ("secret root", 0) => "x",
+                _ => continue,
+            };
+            targets.insert(CellId::advice(column.index(), *row as i32), label.to_string());
+        }
     }
+
+    // (e) Private-value recovery (UCP propagation + cvc5).
+    let mut options = PrivacyAnalysisOptions::default();
+    options.solver_timeout_ms = Some(3_000); // per cvc5 call during the search
+    options.initial_sat_timeout_ms = Some(60_000); // only for the SMT fallback of the first SAT check
+    let report = analyze_private_recoverability_with_witness::<Fr, _, _>(
+        &circuit,
+        K,
+        &observations,
+        targets.keys().cloned(),
+        options,
+    )?;
+    println!("{}", report.phase_report_with_names(|cell| targets.get(cell).cloned()));
+    println!("{report}");
+
+    // (f) Optional: independent, fresh SMT check of every reported domain.
+    let validation = validate_private_recovery_report::<Fr, _>(&circuit, K, &observations, &report)?;
+    println!("Validation: {:?} ({} solver checks)", validation.status, validation.solver_checks);
+
+    // (g) Optional: the original Korrekt structural checks on the same circuit.
+    for kind in [
+        AnalyzerType::UnusedGates,
+        AnalyzerType::UnusedColumns,
+        AnalyzerType::UnconstrainedCells,
+        AnalyzerType::UnderconstrainedCircuit,
+    ] {
+        let mut analyzer = Analyzer::new(&circuit, K, kind.clone(), Some(&observations))?;
+        let output = analyzer.dispatch_analysis(&mut observations)?;
+        println!("{kind:?}: {:?}", output.output_status);
+    }
+    Ok(())
 }
 ```
 
-And a multiplication operates as follows:
+### 4.4 Run it
 
-```rust
-Expression::Product(left, right) => {
-    let res1 = eval_abstract(left, selectors);
-    let res2 = eval_abstract(right, selectors);
-    match (res1, res2) {
-        (AbsResult::Zero, _) => AbsResult::Zero,
-        (_, AbsResult::Zero) => AbsResult::Zero,
-        (AbsResult::NonZero, AbsResult::NonZero) => AbsResult::NonZero,
-        _ => AbsResult::Variable,
-    }
-}
- ```
+Run it from the crate's root directory. The SMT query files are written to
+`./src/output/`, relative to the current working directory.
 
-After this process, we have a result indicating whether a polynomial is: definitely zero (trivially satisfied), definitely non-zero (impossible to satisfy) or variable (depending on the witness).
-With this simple tool we then proceed to implement a bunch of checks for individual regions described next.
+```bash
+cargo run --release
+```
 
-### Checks
+The first build takes a few minutes. The output starts with the phase
+report:
 
-#### Unused Gate
+```text
+Initial SAT: VerifiedWitness; 0 solver calls
 
-Check that for every gate there exists a region in which it is not identically zero.
+1. UCP (0.00 s)
+  Targets: 2 exact values, 0 domains. New: 2 exact, 0 new/refined domains.
+  a = 7 (exact)
+  b = 3 (exact)
 
-#### Unconstrained Cell
+1. SMT (0.03 s; 4 solver calls)
+  ...
+    x in {-5, 5} (covering domain); complete domain
+  ...
+Result: Analyzed; 2 exact values, 1 domains; 3 complete domains; 1 non-unique, 0 unresolved; 4 solver calls; ...
+```
 
-Check that for every assigned cell in the region, it occurs in a polynomial which is not identically zero over this region.
-This means that part of the witness is not constrained -- this is almost certainly a bug.
+After the phase report come the full report (one line per secret cell, e.g.
+`A-0-0: Unique; Recovered; ... Exact(7)`), then
+`Validation: VerifiedDomains`, then the four Korrekt checks. `x` can be `5` or
+`-5`, so `UnderconstrainedCircuit: Underconstrained` is the correct result for
+this example.
 
-#### Unused Column
+If you use git for this crate, add `src/output/` to its `.gitignore`.
 
-Check that every column occurs in some polynomial.
+### 4.5 Adapting it to your circuit
 
-### Private Value Recovery In This Fork
+Work through these steps in order:
 
-The UCP module can analyze explicitly selected private advice cells under concrete
-public observations. An optional, fresh SMT validation pass checks recovered exact
-values and finite candidate supersets without assuming inferred facts. See
-[Private Recovery Validation](docs/private-recovery-validation.md) for the API,
-checked property, demos, and limitations.
+1. **Circuit.** Replace section 1 with your `Circuit<Fr>` implementation.
+   `use korrekt::circuit_analyzer::halo2_proofs_libs::*;` re-exports the Halo2
+   types the analyzer is built against: `Circuit`, `ConstraintSystem`,
+   `Layouter`, `Value`, `Column`, `Advice`, `Instance`, `Fixed`, `Selector`,
+   `TableColumn`, `Expression`, `Rotation`, `MockProver`, and `Fr`. `Fr` is the
+   **Pasta `Fp`** field of the zcash backend. If your code imports
+   `halo2_proofs::...`, either change those imports to the re-exports or see
+   [4.6](#46-if-your-circuit-already-lives-in-another-crate).
+2. **`K`.** Use the same `k` you pass to `MockProver::run`.
+3. **Witness and public values (a)–(c).** Construct the circuit with one valid
+   witness and collect the public values it produces. They are the same values
+   you pass to `MockProver::run(K, &circuit, vec![col0, col1, ...])`. The value
+   at instance column `c`, row `r` gets the key `"I-c-r"`. List only the instance
+   cells that the observer actually sees. Values are `BigInt`s: negative numbers
+   mean `p - |v|`, and values up to full field width are accepted.
+4. **Secret cells (d).** A target is `CellId::advice(column_index, absolute_row)`.
+   - `column_index` is the position of the column among your
+     `meta.advice_column()` calls (0, 1, 2, ...).
+   - `absolute_row` is where the floor planner placed the cell. Read it from
+     `layout.regions` and don't hard-code it. Uncomment the `println!` in (d) to
+     list every advice cell with its region name, column and row. Then match
+     on the region names you passed to `assign_region` (as the example does).
+   - Choose only the secrets you care about. Intermediate cells are analyzed
+     anyway and do not need to be targets.
+5. **Lookups.** Private recovery requires
+   `LookupMethod::InlineConstraints` and lookup tables that are **fixed,
+   unrotated** columns (the usual `TableColumn` / `assign_table` pattern).
+6. **Run** with `cargo run --release` and read the report (section 5).
 
-Repeated same-target comparisons with an SMT-only reference, separate validation
-timings, and TSV exports are described in
-[Private Recovery Measurements](docs/private-recovery-measurements.md).
+### 4.6 If your circuit already lives in another crate
 
-[Optional Recovery Profile Measurements](docs/private-recovery-profile-measurements.md)
-compare baseline, finite refinement, full discovery, and targeted discovery with
-separate validation/public-observation control timings, including partial attempts
-and per-cell evidence.
+Add that crate as a dependency of `my-circuit-audit` and keep both `[patch]`
+sections. The patch makes your crate and `korrekt` compile against the **same**
+instrumented Halo2, so the types match:
 
-[Compositional Masking Demo](docs/compositional-masking-demo.md) shows how two
-public observations reveal a secret when a linear mask is reused, with
-single-publication and independent-mask controls. Demos print compact summaries
-by default; set `UCP_DEMO_VERBOSE=1` for full reports.
+```toml
+[dependencies]
+korrekt = { path = "../halo2-analyzer-fork/korrekt" }
+my-circuit = { path = "../my-circuit" }       # or { git = "...", rev = "..." }
+num-bigint = "0.4"
+anyhow = "1"
+```
 
-[External Halo2 Book Evaluation](docs/external-halo2-book-evaluation.md) analyzes
-an unchanged, pinned upstream circuit and a separately identified local control
-that exposes additional intermediate values.
+- If your crate depends on `halo2_proofs = { git = "https://github.com/zcash/halo2.git" }`,
+  the existing `[patch."https://github.com/zcash/halo2.git"]` entry already
+  covers it.
+- If it depends on `halo2_proofs` from crates.io, also add the following. The
+  fork is version `0.3.0`, so your requirement must accept `0.3.0`.
+  ```toml
+  [patch.crates-io]
+  halo2_proofs = { git = "https://github.com/Analyzable-Halo2/zcash-halo2.git", rev = "7fc5e14d53c19cc4e09f0af2ed4b87440e1bb4fb" }
+  ```
+- Your circuit must be generic over, or instantiated with, the zcash backend's
+  Pasta field (`Fr` above).
 
-[Bounded Private Recovery](docs/bounded-private-recovery.md) documents explicit
-solver-check and supervised process budgets, per-cell recovery categories, and structured reasons
-for incomplete or unsupported analyses.
+[external-evaluation/permutation](external-evaluation/permutation/) is a working
+example of this setup. It imports an unmodified circuit from someone else's Git
+repository and runs the full recovery on it.
 
-[Adaptive Private Recovery](docs/adaptive-private-recovery.md) reserves first
-target attempts, bounds bridge/retry work, and renews the stagnation budget on
-actual progress without resetting total query counts.
+### 4.7 Without a witness
 
-[Finite-Domain SMT Refinement](docs/finite-domain-refinement.md) optionally checks
-small candidate sets against an immutable original model, distinguishes partial
-supersets from complete feasible projections, and feeds refinements back into UCP.
+If you have no valid witness, call `analyze_private_recoverability` instead
+(same arguments, same module) and pass the circuit built with
+`MyCircuit::default()`. The first "does any witness exist?" check then runs in
+cvc5 instead of MockProver. That can take much longer on large circuits; it is
+limited by `initial_sat_timeout_ms`. In both variants, the recovery itself
+never reads the witness values.
 
-[SMT Domain Discovery](docs/smt-domain-discovery.md) optionally enumerates private
-cell values without a pre-existing UCP candidate set. Only proven exhaustion
-certifies a complete projection; partial samples never become recovered domains.
-Fair check rounds reuse UCP priority and preserve samples across continuation;
-explicit larger-timeout retries never reset the hard total allowance.
+---
 
-[Targeted SMT Recovery](docs/targeted-smt-recovery.md) optionally proves discovery
-exhaustion from small literal original subsets. Feasible values still come from
-the full original circuit; subset SAT/unknown requires a separately counted full fallback.
+## 5. Reading the report
 
-[Public Observation Control](docs/public-observation-control.md) independently
-checks whether a reported domain requires the concrete public values or already
-follows from the original circuit alone. It separates publication-dependent
-narrowing from stronger SMT reasoning that simply surpassed the UCP baseline.
+**Per secret cell** (lines such as `A-0-0: Unique; Recovered; ...`; `A-c-r` =
+advice column `c`, row `r`):
 
-[Full-Width Private Recovery](docs/full-field-recovery.md) demonstrates 254-bit
-exact values, signed field representatives, and propagation without sampling
-private witness assignments. Public observations now accept BigInt through
-`VerificationInput::new`; domain cardinality and raw-input/value bit limits remain explicit.
+| You see | Meaning |
+| --- | --- |
+| `Unique; Recovered; Exact(v)` | The public values determine the cell: it **leaks** and equals `v`. |
+| `NonUnique; ...; Candidates({...}); domain complete: true` | At least two values are possible, and the set lists **exactly** the possible values. |
+| `...; Candidates({...}); domain complete: false` | The true value is in the set, but some listed values may be impossible (a covering superset). |
+| `Unique; UniqueWithoutValue` | Proven to be determined, but the value was not computed. |
+| `Unknown; Unresolved; No recovered domain` | Nothing was proven either way. This is **not** a privacy guarantee; see the `limitation` field. |
 
-[Imported Range-Gadget Evaluation](docs/imported-range-gadget-evaluation.md)
-compares polynomial and lookup-based running sums imported from `halo2_gadgets`:
-an aggregate can expose both bounded private inputs at a range boundary.
+Values are printed as signed field representatives: `-5` means `p - 5`.
 
-[Relational Delta Propagation](docs/relational-delta-propagation.md) explains
-affine Root inference, retained lookup memberships, and fixed-constant seeding:
-range domains can be recovered before asking SMT about individual private cells.
+**Overall status** (`Privacy analysis: ...` / `Result: ...`):
 
-[Selective SMT Domain Export](docs/selective-smt-domain-export.md) keeps all
-reported domains while avoiding redundant structural finite-set assertions in
-privacy queries; repeated measurements document the lookup regression fix.
+| Status | Meaning |
+| --- | --- |
+| `Analyzed` | The search finished normally. Some cells may still be unresolved. |
+| `QueryLimitReached` | A query budget ran out (see section 6). |
+| `SolverUnknown` | cvc5 returned unknown or timed out on a step the run depended on. |
+| `Inconsistent` | No witness satisfies the circuit with these public values. Check the instance keys and values. |
 
-[Soundness Regression Checks](docs/soundness-hardening.md) documents modular
-assignment, zero-factor handling, selector-independent constraint coverage and
-the field/Halo2 counterexamples used to test them.
+The per-cell `limitation` field explains why a cell stayed open:
+`QueryLimit`, `SolverTimeout`, `SolverUnknown`, `DomainSizeLimit` (more than 256
+candidates), `ValueRepresentationLimit`, `NoConcreteValue` or `InconsistentContext`.
 
-[SAT Hint Acceleration](docs/sat-hint-acceleration.md) explains the scoped,
-positive-only initial satisfiability shortcut and the permutation-copy fix.
+**Validation** (`validate_private_recovery_report`) re-encodes the original
+circuit and the public values from scratch. It assumes nothing that the
+recovery inferred, and checks that every reported domain covers all feasible
+values. Possible results: `VerifiedDomains`, `Refuted` (with a counterexample),
+`NoDomainClaims` or `Inconsistent`.
 
-[Original-Subset Domain Validation](docs/subset-domain-validation.md) proves
-exclusion using literal original constraints, with full-SMT fallback and separate
-nonvacuity checking; the Poseidon publication control now passes fresh validation.
+**Korrekt checks** print one status each:
+`NoUnusedCustomGates` / `UnusedCustomGates`, `NoUnusedColumns` / `UnusedColumns`,
+`NoUnconstrainedCells` / `UnconstrainedCells`, and
+`Underconstrained` / `NotUnderconstrained` (plus `...Local` variants).
 
-[External Poseidon Evaluation](docs/external-poseidon-evaluation.md) adds the full
-upstream hash circuit, a local publication control, and bounded incomplete outcomes.
-It also documents successful control recovery, local linear-subsystem inference,
-and the remaining original-SAT bottleneck in the SMT-only performance reference.
+---
+
+## 6. Tuning and limits
+
+All settings are fields of `PrivacyAnalysisOptions`:
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `solver_timeout_ms` | `None` | Time limit for each cvc5 call during the search. `None` falls back to the `HALO2_ANALYZER_SMT_TIMEOUT_MS` environment variable; if that is unset too, there is no limit. |
+| `initial_sat_timeout_ms` | `None` | Time limit for the initial existence check when it runs in cvc5. |
+| `max_semantic_queries` | 256 | Total uniqueness probes. |
+| `domain_refinement.max_solver_checks` / `.max_candidates_per_cell` | 160 / 128 | Budget for shrinking existing candidate sets. |
+| `domain_discovery.max_solver_checks` / `.max_values_per_cell` | 64 / 16 | Budget for enumerating values of cells that have no candidate set yet. |
+| `search.retry_solver_timeout_ms` | 10 000 | Longer time limit for one retry of a timed-out target. |
+| `compute_structural_baseline` | `false` | Also runs UCP without public values, for comparison only. |
+
+`options.with_profile(PrivacyAnalysisProfile::PropagationOnly)` (also
+`FastProbeOnly`, `RefinementOnly`, `DiscoveryOnly`) turns off the other
+strategies. The profiles are meant for ablation studies. `Standard` is the
+default and enables everything.
+
+Known limits:
+
+- Finite candidate sets are capped at 256 values per cell.
+- Lookups must be inline, with fixed, unrotated table columns (section 4.5).
+- Run one analysis at a time per working directory, because the query files
+  in `src/output/` are shared.
+- Use `--release`. Debug builds work but are much slower.
+- The private-recovery path is tested on the default **zcash** backend only.
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `Failed to execute cvc5` / `Failed to start solver` | `cvc5` is not on `PATH`. Check with `which cvc5`. |
+| cvc5 errors about finite fields or the `FF` logic | cvc5 was built without CoCoA. Rebuild with `--cocoa --gpl` (section 2). |
+| Compile errors about private fields, or mismatched `halo2_proofs` / `halo2curves` types | The `[patch]` sections are missing or don't match your dependency's source (section 4.2 / 4.6). |
+| Git fetch errors during the first build | The first build needs network access. Later builds can use `--offline`. |
+| `MockProver ... assert_satisfied` panics | The witness and public values don't match. Fix those before analyzing. |
+| `Select at least one private advice cell` | Step (d) selected nothing. Print the cells and check the region names and column indices. |
+| `Privacy analysis requires inline lookup constraints ...` | Set `lookup_method: LookupMethod::InlineConstraints`. |
+| `... requires concrete, unrotated fixed lookup tables` | A lookup table uses advice columns or rotations; this is not supported. |
+| Status `Inconsistent` | The public values cannot be produced by the circuit. Check the `I-c-r` keys. |
+| Many `SolverTimeout` / `QueryLimitReached` | Raise `solver_timeout_ms` and the budgets in section 6. |
+| Random test failures in this repo | Solver-backed tests must run with `--test-threads=1`. |
+| A new nightly breaks the build | Pin a dated nightly in `rust-toolchain.toml` (section 1). |
+
+---
+
+## 8. Thesis examples and formal verification
+
+### Examples from the thesis
+
+These are the experiments of the evaluation chapter (Chapter 6) of the thesis
+*Automated Detection of Information Leakage in Overconstrained ZKP Circuits*.
+Each one is a full UCP + SMT recovery, checked against an independent
+reference. They are `#[ignore]`d tests, so they need `--ignored`; run them one
+at a time, in release mode.
+
+| Thesis section | Experiment | Test name | Thesis run |
+| --- | --- | --- | --- |
+| 6.2.2 | Base invoice | `thesis_invoice_recovery_smoke` | 0.91 s, 6 SMT calls |
+| 6.2.3 | Invoice with approval-dependent surcharge and fee catalogue | `thesis_invoice_surcharge_catalog_recovery` | 4.60 s, 13 SMT calls |
+| 6.2.4 | Control: invoice with unrestricted surcharge | `thesis_invoice_approval_control_recovery` | 44.53 s, 88 SMT calls |
+| 6.3 | External Zordle circuit, game `fluff` | `zordle_recovery_upstream_game` | 174.42 s, 85 SMT calls |
+| 6.3 | External Zordle circuit, game `light` | `zordle_recovery_varied_game` | 326.85 s, 95 SMT calls |
+
+```bash
+# replace <test name> with a name from the table
+cargo test --release -p korrekt --lib <test name> -- --ignored --nocapture --test-threads=1
+```
+
+The times are single runs on the thesis machine and only indicate the order of
+magnitude. The invoice circuit, its reference model and further commands are
+described in
+[korrekt/src/circuit_analyzer/ucp/thesis_examples/README.md](korrekt/src/circuit_analyzer/ucp/thesis_examples/README.md)
+(in Hungarian). The Zordle circuit is vendored unchanged in
+[korrekt/src/circuit_analyzer/ucp/external_examples/zordle/](korrekt/src/circuit_analyzer/ucp/external_examples/zordle/).
+
+Setting `UCP_DEMO_VERBOSE=1` makes the thesis examples print full reports.
+
+Full test suite (takes several minutes; long measurements only run with `--ignored`):
+
+```bash
+cargo test -p korrekt -- --test-threads=1
+```
+
+### Formal verification
+
+The Lean 4 proofs of the recovery core are in
+[korrekt/verification/](korrekt/verification/README.md). They are not needed to
+analyze circuits. To check them, run the following from the repo root (needs
+`curl` and `jq`):
+
+```bash
+bash korrekt/verification/aeneas/bootstrap.sh   # installs the pinned Aeneas, Lean and nightly toolchains
+bash korrekt/verification/aeneas/verify.sh      # re-extracts the Rust sources and checks every proof
+```
+
+What is proved, and where the trust boundary lies, is listed in
+[THESIS_CLAIMS.md](korrekt/verification/THESIS_CLAIMS.md) and
+[IMPLEMENTATION_STATUS.md](korrekt/verification/IMPLEMENTATION_STATUS.md).
+
+---
+
+## 9. Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `korrekt/src/circuit_analyzer/analyzer.rs` | Korrekt checks and the SMT backend (Halo2 → SMT-LIB, cvc5 calls) |
+| `korrekt/src/circuit_analyzer/analyzable.rs` | Records regions, gates, copies and fixed values during synthesis |
+| `korrekt/src/circuit_analyzer/ucp/` | Private-value recovery: extraction, propagation rules, search, reports ([module guide](korrekt/src/circuit_analyzer/ucp/README.md)) |
+| `korrekt/src/circuit_analyzer/ucp/thesis_examples/` | Thesis invoice example with an independent reference model |
+| `korrekt/src/circuit_analyzer/ucp/tests/` | Regression tests, demos, measurements, upstream fixtures |
+| `korrekt/src/io/analyzer_io_type.rs` | `AnalyzerInput`, `VerificationInput`, analysis and lookup modes |
+| `korrekt/src/smt_solver/` | SMT-LIB printer, supervised cvc5 process, response parser |
+| `korrekt/verification/` | Lean 4 models and proofs |
+| `external-evaluation/` | Standalone crates that analyze unmodified third-party circuits |
+
+---
+
+## 10. How it works
+
+1. **Synthesis.** The circuit is synthesized with an analysis layouter that does
+   not create a proof. It records every region, enabled selector, fixed value,
+   copy constraint and lookup.
+2. **Extraction.** Every enabled gate polynomial, copy constraint and lookup is
+   turned into equations over concrete cells. This is the *UCP problem*.
+3. **Propagation (UCP).** Starting from the public values, inference rules run
+   until nothing changes (a fixpoint): linear elimination, wrap-aware interval
+   bounds, base and bit decomposition, invertible linear systems, the
+   "all-but-one is zero" rule, and lookup tuples. The rules derive exact values,
+   finite candidate sets and uniqueness facts.
+4. **SMT search.** When propagation gets stuck, the scheduler picks the most
+   promising cvc5 query for the original circuit: a uniqueness probe, a
+   candidate-set refinement, or value discovery. New facts go back into UCP,
+   and propagation runs again.
+5. **Report.** The final report lists each target with its value or candidate
+   set, its completeness and uniqueness, and which limits were hit. An optional
+   fresh SMT pass validates every reported domain.
+
+The original Korrekt checks (unused gates, columns and cells; the
+underconstrained check) use the same synthesis step. They are explained in the
+[upstream README](https://github.com/quantstamp/halo2-analyzer#how-it-works).
